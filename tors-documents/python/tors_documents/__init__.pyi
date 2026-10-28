@@ -19,7 +19,14 @@ class Backend(str, Enum):
     """The engine selector: ``AUTO`` routes by the measured table,
     ``OXIDE``/``ANYDOC`` force one engine and raise on a format it cannot
     read, never a silent fallback. Members are their accepted strings, so
-    ``backend="auto"`` and ``backend=Backend.AUTO`` are the same call."""
+    ``backend="auto"`` and ``backend=Backend.AUTO`` are the same call. On
+    the geometry surface (`page_geometry`) ``AUTO`` and ``OXIDE`` are
+    additionally identical for every format (the geometry lane is a
+    property of the format, not a choice), and the no-geometry formats
+    (html/csv/rtf/epub/odt/ods/odp) answer the same ``[None]`` on every
+    backend — ``ANYDOC`` included: no engine runs there, so nothing is
+    refused and nothing is fallen back (documented divergences from this
+    enum's conversion contract)."""
 
     AUTO = "auto"
     OXIDE = "oxide"
@@ -116,10 +123,12 @@ class PageGeometry:
         on the office lanes."""
     @property
     def crop(self) -> tuple[float, float, float, float] | None:
-        """The PDF page's declared CropBox, resolved + normalized
-        corners, the unrotated source frame, points — provenance for the
-        extent, never re-applied, ``None`` unless a CropBox is declared
-        AND it actually crops; ``None`` on every office lane."""
+        """The PDF page's declared CropBox reduced to the MediaBox (the
+        effective crop: the intersection the engine's visible box stands
+        on), normalized corners, the unrotated source frame, points —
+        provenance for the extent, never re-applied, ``None`` unless a
+        CropBox is declared AND it actually crops; ``None`` on every
+        office lane."""
 
 def to_markdown(
     path: str | os.PathLike[str] | None = None,
@@ -250,7 +259,8 @@ def page_geometry(
     """The declared-box geometry probe: one entry per unit of the
     resolved format — PDF pages (the visible box's render extent, axes
     swapped for a 90/270 rotation; the engine-normalized ``/Rotate``; the
-    declared CropBox as ``crop`` provenance), docx sections (the RAW
+    declared CropBox reduced to the MediaBox (the effective crop) as
+    ``crop`` provenance), docx sections (the RAW
     layer's declared size, twips ÷ 20 — a margins-only section is
     ``None``, never a fabricated Letter), pptx slides (the raw deck-wide
     slide size, EMU ÷ 12700.0, ``None`` everywhere when undeclared),

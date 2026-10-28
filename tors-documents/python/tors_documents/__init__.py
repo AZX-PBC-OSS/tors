@@ -76,7 +76,13 @@ class Backend(str, Enum):
     the OOXML/legacy office formats); ``ANYDOC`` forces anydoc. A forced
     backend raises on a format it cannot read, never a silent fallback.
     Members are the accepted strings, so ``backend="auto"`` and
-    ``backend=Backend.AUTO`` are the same call."""
+    ``backend=Backend.AUTO`` are the same call. On the geometry surface
+    (``page_geometry``) ``AUTO`` and ``OXIDE`` are additionally identical
+    for every format (the geometry lane is a property of the format, not a
+    choice), and the no-geometry formats (html/csv/rtf/epub/odt/ods/odp)
+    answer the same ``[None]`` on every backend — ``ANYDOC`` included: no
+    engine runs there, so nothing is refused and nothing is fallen back
+    (documented divergences from this enum's conversion contract)."""
 
     AUTO = "auto"
     OXIDE = "oxide"

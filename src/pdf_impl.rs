@@ -1,6 +1,6 @@
 //! PDF text/markdown extraction over `pdf_oxide`, the core behind the
-//! `pdf_extract`/`pdf_page_count`/`pdf_classify`/`pdf_link_uris`/`pages=`
-//! surfaces of the `tors-documents` payload crate.
+//! `pdf_extract`/`pdf_page_count`/`pdf_classify`/`pdf_link_uris`/`page_geometry`/
+//! `pages=` surfaces of the `tors-documents` payload crate.
 //!
 //! What this layer is for: one place where the PDF library lives. The pyo3
 //! bindings resolve the input (a `path=` they read, or the caller's `data=`
@@ -801,15 +801,20 @@ pub struct PageBox {
     /// non-right-angle declaration reports 0 (the engine's rule), and the
     /// page's box is then the honest unrotated-extraction frame.
     pub rotation: i32,
-    /// The page's DECLARED CropBox, resolved + normalized corners, the
-    /// unrotated source frame, points — provenance for the extent only:
-    /// never re-applied, never re-swapped, and the width/height need not
-    /// equal its extent at 90/270. `Some` only when a CropBox is declared
-    /// AND it actually crops (its intersection with the MediaBox differs
-    /// from the MediaBox): `None` when undeclared, degenerate,
-    /// out-of-medium, or equal to media — in every one of which the
-    /// engine's own silent fallback has the visible box standing on the
-    /// MediaBox, which the intersection-equals-media test reads back.
+    /// The page's declared CropBox reduced to the MediaBox (the effective
+    /// crop: the intersection the engine's visible box stands on),
+    /// normalized corners, the unrotated source frame, points —
+    /// provenance for the extent only: never re-applied, never re-swapped,
+    /// and the width/height need not equal its extent at 90/270. `Some`
+    /// only when a CropBox is declared AND it actually crops (the
+    /// intersection differs from the MediaBox): `None` when undeclared,
+    /// degenerate, out-of-medium, or equal to media — in every one of
+    /// which the engine's own silent fallback has the visible box standing
+    /// on the MediaBox, which the intersection-equals-media test reads
+    /// back. (What is NOT carried — deliberately, phase 2's note: the
+    /// box's ORIGIN. The crop is provenance for the extent, never a
+    /// rectangle to transform; the phase-2 layout transform must fetch
+    /// the visible-box corners per page itself.)
     pub crop: Option<(f32, f32, f32, f32)>,
 }
 
@@ -1538,6 +1543,32 @@ mod tests {
         );
     }
 
+    /// The partial-overlap golden (the red-team probe): a CropBox that
+    /// HANGS OFF the MediaBox's edge ([300 300 800 900] on [0 0 612 792])
+    /// crops to the INTERSECTION — the engine only exposes the
+    /// intersection, so the entry is its extent (312×492) and its
+    /// normalized corners as the crop provenance, never the declared
+    /// box's own 500×600. The crop wording says "the declared CropBox
+    /// reduced to the MediaBox (the effective crop)" for exactly this
+    /// shape.
+    #[test]
+    fn a_partial_overlap_crop_is_the_intersection() {
+        let geometry = page_geometry(
+            geometry_pdf("/MediaBox [0 0 612 792] /CropBox [300 300 800 900]"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            geometry[0],
+            Some(PageBox {
+                width_pt: 312.0,
+                height_pt: 492.0,
+                rotation: 0,
+                crop: Some((300.0, 300.0, 612.0, 792.0)),
+            })
+        );
+    }
+
     /// A non-right-angle /Rotate reports rotation 0 (the engine's
     /// normalization rule, T10) and the page's box stays the honest
     /// unrotated-extraction frame: nothing swaps, nothing maps.
@@ -1742,6 +1773,111 @@ mod tests {
         );
     }
 
+    /// The mid-iteration damage pins (§9 item 7's per-entry None rule,
+    /// deepseek's probed-and-correct behaviors, now pinned): a page whose
+    /// own box read fails on an index `page_count` reported is a None
+    /// entry with its siblings intact — an indirect-ref MediaBox naming a
+    /// missing object, a /Count over a shorter /Kids tree, and a
+    /// mid-document truncation the open survives — while a truncation the
+    /// OPEN cannot survive is the whole-call ValueError, never a list.
+    #[test]
+    fn mid_iteration_page_damage_is_none_entries_not_a_document_failure() {
+        // Page 2 of 5 declares its MediaBox as an indirect ref to an
+        // object that does not exist (9 0 R; the document ends at 7):
+        // the box read fails for that page alone — [Some, None, Some, Some, Some].
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] /Count 5 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox 9 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+        ];
+        let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+        let geometry = page_geometry(objects_pdf(&refs), None).unwrap();
+        assert_eq!(geometry.len(), 5);
+        assert_eq!(geometry[0].unwrap().width_pt, 612.0);
+        assert_eq!(
+            geometry[1], None,
+            "the missing-object MediaBox is a None entry"
+        );
+        for entry in geometry.iter().skip(2) {
+            assert_eq!(entry.unwrap().width_pt, 612.0, "the siblings are intact");
+        }
+
+        // /Count 5 over three kids (and no further objects): the count
+        // probe reports 5 (the declared count), pages 3-5 have no page
+        // objects to walk — [Some, Some, Some, None, None].
+        let geometry = page_geometry(
+            objects_pdf(&[
+                b"<< /Type /Catalog /Pages 2 0 R >>",
+                b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 5 >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            geometry.len(),
+            5,
+            "the length law reports the declared count"
+        );
+        assert_eq!(
+            geometry,
+            vec![
+                Some(PageBox {
+                    width_pt: 612.0,
+                    height_pt: 792.0,
+                    rotation: 0,
+                    crop: None
+                }),
+                Some(PageBox {
+                    width_pt: 612.0,
+                    height_pt: 792.0,
+                    rotation: 0,
+                    crop: None
+                }),
+                Some(PageBox {
+                    width_pt: 612.0,
+                    height_pt: 792.0,
+                    rotation: 0,
+                    crop: None
+                }),
+                None,
+                None,
+            ]
+        );
+
+        // A 45% truncation: the open survives (the header and page 1's
+        // objects are inside the kept prefix and the engine reconstructs
+        // the rest), page 2's are gone — [Some, None].
+        let full = two_page_pdf("one", "two");
+        let truncated = full[..full.len() * 45 / 100].to_vec();
+        let geometry = page_geometry(truncated, None).unwrap();
+        assert_eq!(
+            geometry,
+            vec![
+                Some(PageBox {
+                    width_pt: 612.0,
+                    height_pt: 792.0,
+                    rotation: 0,
+                    crop: None
+                }),
+                None,
+            ]
+        );
+
+        // A 5% truncation: nothing left to reconstruct the document from
+        // — the open fails and the WHOLE call raises (the typed
+        // InvalidPdf shape), never a partial list.
+        let truncated = full[..full.len() * 5 / 100].to_vec();
+        let err = page_geometry(truncated, None).unwrap_err();
+        assert!(matches!(err, PdfError::InvalidPdf(_)), "{err}");
+    }
+
     // --- the encrypted door on the geometry probe (§9 item 6) --------------
     //
     // A real R2/V1 (RC4-40) Standard-security document, built here: the
@@ -1814,6 +1950,16 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+    }
+
+    /// The hand-rolled RC4 against the standard known-answer vectors (the
+    /// two the RC4 literature pins): the encrypted fixtures above are only
+    /// as trustworthy as this primitive, so it verifies itself before any
+    /// of them leans on it.
+    #[test]
+    fn rc4_matches_the_standard_known_answer_vectors() {
+        assert_eq!(hex(&rc4(b"Key", b"Plaintext")), "BBF316E8D940AF0AD3");
+        assert_eq!(hex(&rc4(b"Wiki", b"pedia")), "1021BF0420");
     }
 
     /// A one-page, R2/V1-encrypted PDF with the given user/owner

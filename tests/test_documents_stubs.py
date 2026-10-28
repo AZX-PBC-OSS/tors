@@ -51,6 +51,7 @@ import pytest
 try:
     import tors_documents
     from tors_documents import aio as payload_aio
+    from tors_documents import page_geometry
 except ImportError:  # pragma: no cover - the source-checkout alternative
     pytest.skip(
         "documents payload not built: the stub guard compares its stubs to its "
@@ -350,3 +351,83 @@ def test_sniff_is_package_only_in_the_stubs_as_it_is_at_runtime() -> None:
         assert "sniff" in _stub_functions(stub), f"{stub}: sniff missing from the package stub"
     for stub in (_PAYLOAD_AIO_STUB, _SHIM_AIO_STUB):
         assert "sniff" not in _stub_functions(stub), f"{stub}: sniff must stay sync-only"
+
+
+# --- the PageGeometry getter pin --------------------------------------------------
+
+
+def _page_geometry_stub(path: Path) -> ast.ClassDef:
+    """The PageGeometry class def from a package stub."""
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.ClassDef) and node.name == "PageGeometry":
+            return node
+    raise AssertionError(f"{path}: no PageGeometry class — the stub is broken")
+
+
+def test_page_geometry_getters_are_exactly_the_four_read_only_fields() -> None:
+    """The pyclass getter pin (§10's 'every-enum-position test for the
+    pyclass getter list', plus T10's rotation domain): the package stubs
+    declare EXACTLY {width_pt, height_pt, rotation, crop} as read-only
+    properties (no setters, no writable attributes — the native pyclass
+    exposes getters only), the live class agrees (the same four public
+    names, each readable, each refusing assignment), and rotation stays
+    inside {0, 90, 180, 270} across the fixture sweep — every
+    engines-corpus kind plus the rotation fixtures, covering each of the
+    four positions (a non-right-angle /Rotate reporting 0 included)."""
+    from documents import ENGINES_CORPUS, generate_pdf_crop, generate_pdf_rotate
+
+    getters = {"width_pt", "height_pt", "rotation", "crop"}
+    for stub in (_PAYLOAD_STUB, _SHIM_STUB):
+        node = _page_geometry_stub(stub)
+        properties: set[str] = set()
+        assignments: list[str] = []
+        setters: set[str] = set()
+        for stmt in node.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                decorators = stmt.decorator_list
+                if any(
+                    isinstance(dec, ast.Attribute) and dec.attr == "setter"
+                    for dec in decorators
+                ):
+                    setters.add(stmt.name)
+                elif any(
+                    isinstance(dec, ast.Name) and dec.id == "property" for dec in decorators
+                ):
+                    properties.add(stmt.name)
+            elif isinstance(stmt, ast.AnnAssign):
+                assignments.append(stmt.target.id)
+        assert properties == getters, f"{stub}: property set drifted: {properties}"
+        assert not setters, f"{stub}: a getter grew a setter: {setters}"
+        assert not assignments, f"{stub}: a writable attribute appeared: {assignments}"
+
+    # the live class: exactly the four public names, each readable and
+    # each refusing assignment (a pyclass getter with no setter)
+    (entry,) = page_geometry(data=generate_pdf_crop())
+    live = {name for name in type(entry).__dict__ if not name.startswith("_")}
+    assert live == getters, f"the live getter set drifted: {live}"
+    for name in getters:
+        getattr(entry, name)  # readable
+        with pytest.raises(AttributeError):
+            setattr(entry, name, None)
+
+    # the rotation domain, across the fixture sweep: the whole engines
+    # corpus (every office entry is 0; the PDFs' pages are 0) plus the
+    # rotation fixtures for each remaining position
+    domain = {0, 90, 180, 270}
+    seen: set[int] = set()
+    for kind in sorted(ENGINES_CORPUS):
+        try:
+            entries = page_geometry(data=ENGINES_CORPUS[kind])
+        except ValueError:
+            continue  # the ppsx alias: the pinned refusal, no entries
+        for geometry in entries:
+            if geometry is not None:
+                assert geometry.rotation in domain, kind
+                seen.add(geometry.rotation)
+    for angle in (0, 90, 180, 270):
+        (rotated,) = page_geometry(data=generate_pdf_rotate(angle))
+        assert rotated.rotation == angle, f"a right-angle /Rotate {angle}"
+        seen.add(angle)
+    (askew,) = page_geometry(data=generate_pdf_rotate(45))
+    assert askew.rotation == 0, "a non-right-angle /Rotate reports 0"
+    assert seen == domain, f"the sweep must reach every position: {seen}"

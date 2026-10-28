@@ -33,11 +33,13 @@ When reporting, include:
 - **Native parsing of untrusted documents**: `tors.documents` hands four native
   engines (`pdf_oxide`, `anydoc`, `office_oxide`, `html-to-markdown-rs`) document
   bytes a caller cannot trust, so parser-level memory safety, hangs, and crashes
-  are in scope on every entry point (`to_markdown`/`to_text` and the PDF-only
-  calls, by `path=` or `data=`). The resource-ceiling threat model is part of this
-  surface: the explicit `max_bytes=` pre-read bound (every lane), the 32 MiB
-  default post-read ceiling on the amplifying lanes (anydoc, office_oxide), and
-  the decompression caps: anydoc's per-entry and total package limits;
+  are in scope on every entry point (`to_markdown`/`to_text`, the PDF-only
+  calls, and `page_geometry`, by `path=` or `data=`). The resource-ceiling
+  threat model is part of this surface: the explicit `max_bytes=` pre-read bound
+  (every lane), the 32 MiB default post-read ceiling on the amplifying lanes
+  (anydoc, office_oxide — `page_geometry`'s office leg included; its PDF row
+  and its no-geometry row carry no default ceiling), and the decompression
+  caps: anydoc's per-entry and total package limits;
   office_oxide's 512 MiB per-part cap plus the tors-documents seam's own
   512 MiB total-across-parts audit on the oxide lane (`backend="oxide"`),
   which refuses a container whose parts inflate past the ceiling in sum

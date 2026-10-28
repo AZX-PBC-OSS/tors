@@ -66,7 +66,9 @@ from documents import (
     generate_docx_pgsz,
     generate_pdf_big,
     generate_pdf_crop,
+    generate_pdf_crop_partial,
     generate_pdf_media_origin,
+    generate_pdf_pages,
     generate_pdf_rotate,
     generate_pdf_zero_pages,
     generate_pptx_empty,
@@ -999,6 +1001,31 @@ def test_to_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 
 
 @pytest.mark.timing
+def test_page_geometry_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    tmp_path: Path,
+) -> None:
+    """The GIL-release claim on the geometry probe (§9 item 12's cell):
+    the whole read+resolve+geometry pass runs under py.detach and the
+    O(pages) pyclass marshalling lands after the GIL is reacquired, so a
+    to_thread wrap keeps the 10ms heartbeat alive through a 500-page
+    document — the multi-hundred-page fixture the item asks for, since
+    per-entry marshalling is the residue class this surface adds (one
+    native pyobject per Some entry)."""
+    from test_gil_release import _assert_loop_stays_responsive
+
+    path = tmp_path / "geometry_500.pdf"
+    path.write_bytes(generate_pdf_pages(500))
+    entries = page_geometry(str(path))
+    assert len(entries) == 500
+    assert all(entry is not None for entry in entries)
+
+    def op() -> None:
+        page_geometry(str(path))
+
+    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
+
+
+@pytest.mark.timing
 def test_to_text_on_a_big_csv_keeps_the_event_loop_at_heartbeat_granularity(
     tmp_path: Path,
 ) -> None:
@@ -1771,9 +1798,10 @@ class TestEncryptedPdfs:
     access"; the door check now sits in front of every engine lane)."""
 
     def test_every_entry_fails_closed_without_a_password(self) -> None:
-        """All six entries (both convert modes and all four PDF-only
-        calls) refuse a locked PDF with pdf_oxide's ValueError naming the
-        encryption, before any engine work. The defect this gate makes
+        """All seven entries (both convert modes, all four PDF-only
+        calls, and the geometry probe) refuse a locked PDF with
+        pdf_oxide's ValueError naming the encryption, before any engine
+        work. The defect this gate makes
         impossible to regress: the pre-fix wheel's to_markdown/pdf_extract
         returned EMPTY output on these same bytes (the empty-string
         masking: indistinguishable from a blank document); today no entry
@@ -1940,7 +1968,15 @@ class TestPageGeometry:
         single-flow fixture declares a page size, so theirs are None."""
         path = _materialize(tmp_path, kind)
         if kind in _REFUSES_ON_THE_GEOMETRY_LANE:
-            return  # pinned by the dedicated alias test below
+            # The alias's length law IS the refusal: the ppsx container
+            # resolves as the pptx kind, office_oxide refuses the
+            # slideshow content type, and the typed ValueError is the
+            # answer — never a silent skip (the full refusal is pinned by
+            # the dedicated alias test below).
+            with pytest.raises(ValueError, match="(?i)format mismatch") as raised:
+                page_geometry(path)
+            assert "expected a PresentationML presentation" in str(raised.value)
+            return
         entries = page_geometry(path)
         assert len(entries) >= 1, "only a zero-unit document may answer []"
         if kind.startswith("pdf"):
@@ -1951,7 +1987,6 @@ class TestPageGeometry:
                 assert entry.rotation == 0, kind
                 assert entry.crop is None, kind
         else:
-            assert kind not in _REFUSES_ON_THE_GEOMETRY_LANE, kind
             assert len(entries) == _UNIT_COUNTS[kind], kind
             assert all(entry is None for entry in entries), kind
 
@@ -2011,6 +2046,20 @@ class TestPageGeometry:
         assert origin.crop == (100.0, 100.0, 500.0, 700.0)  # corners, not extents
 
         assert page_geometry(data=generate_pdf_zero_pages()) == []
+
+    def test_the_partial_overlap_crop_is_the_intersection(self) -> None:
+        """The partial-overlap golden (the red-team probe, Python side):
+        a CropBox hanging off the MediaBox's edge ([300 300 800 900] on
+        [0 0 612 792]) crops to the INTERSECTION — the engine only
+        exposes the intersection, so the entry is its extent (312×492)
+        and its normalized corners as the crop provenance, never the
+        declared box's own 500×600. The crop wording ("the declared
+        CropBox reduced to the MediaBox — the effective crop") is this
+        fixture's shape."""
+        (entry,) = page_geometry(data=generate_pdf_crop_partial())
+        assert (entry.width_pt, entry.height_pt) == (312.0, 492.0)
+        assert entry.rotation == 0
+        assert entry.crop == (300.0, 300.0, 612.0, 792.0)
 
     def test_docx_geometry_reads_the_raw_layer(self) -> None:
         """§9 item 8: a pgSz-bearing section is Some(612.0, 792.0) exact
@@ -2072,6 +2121,38 @@ class TestPageGeometry:
         _, markdown = to_markdown(data=generate_xlsx_chart(), backend="oxide")
         assert "Units per quarter" in markdown
 
+    def test_the_legacy_trio_fixtures_answer_all_none_at_the_ir_count(
+        self,
+    ) -> None:
+        """§4's legacy row, end to end on real OLE bytes (the committed
+        soffice-generated fixtures under tests/legacy_corpus/ — no
+        in-test builder can fake a [MS-CFB] container; see that
+        directory's README for provenance): t.doc → [None] (the one
+        document section), book3.xls → [None, None, None] (one IR section
+        per worksheet), deck3.ppt → [None, None, None] (one per slide).
+        The xls fixture is ALSO the red-team blocker's regression pin:
+        the pre-fix leg demanded the xlsx raw layer of every Excel-kind
+        parse and raised on exactly these genuine bytes ('the xlsx parse
+        lost its raw layer') instead of answering."""
+        fixtures = Path(__file__).resolve().parent / "legacy_corpus"
+        expected = {
+            "t.doc": [None],
+            "book3.xls": [None, None, None],
+            "deck3.ppt": [None, None, None],
+        }
+        for name, want in expected.items():
+            entries = page_geometry(str(fixtures / name))
+            assert entries == want, name
+        # and the container decision rides the bytes, not the name: the
+        # same workbook named .xlsx still routes the legacy parser
+        # (all-None at three), with the container's own name reported
+        assert page_geometry(str(fixtures / "book3.xls"), format="xlsx") == [
+            None,
+            None,
+            None,
+        ]
+        assert sniff((fixtures / "book3.xls").read_bytes()) == "xls"
+
     def test_single_flow_formats_answer_one_none_on_every_backend(
         self, tmp_path: Path
     ) -> None:
@@ -2132,6 +2213,15 @@ class TestPageGeometry:
             'backend "anydoc" cannot serve page geometry for docx: anydoc has no '
             "geometry surface; use backend='auto' or 'oxide' here"
         )
+        # the refusal names the CONTAINER the bytes are (resolved_name's
+        # one container-aware case): a legacy OLE workbook under anydoc
+        # says xls, never the Excel kind's default xlsx spelling
+        ole_workbook = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 4096
+        with pytest.raises(
+            ValueError,
+            match=r'cannot serve page geometry for xls',
+        ):
+            page_geometry(data=ole_workbook, format="xlsx", backend="anydoc")
         # the refusal precedes the door: an encrypted PDF under anydoc
         locked = _encrypted_pdf()
         with pytest.raises(ValueError, match="cannot serve the declared page-box geometry"):
@@ -2279,6 +2369,95 @@ class TestPageGeometry:
         with pytest.raises(ValueError, match="input ceiling") as raised:
             page_geometry(data=fat)
         assert "office_oxide" in str(raised.value)
+
+    def test_the_read_ceiling_keys_on_the_geometry_table_not_the_conversion_table(
+        self, tmp_path: Path
+    ) -> None:
+        """§6's ceiling law on this surface: only the office row meters
+        at the 32 MiB default. A 40 MiB HTML is answered [None] on BOTH
+        lanes (the probed violation: the conversion table's ceiling
+        refused the path= call during the read while data= answered —
+        parity broken, and against a row on which no engine runs), and a
+        34 MiB PDF under backend='anydoc' surfaces the capability
+        refusal, not the ceiling refusal (the probed violation: the
+        conversion routing's anydoc lane metered a read this surface
+        never runs) — refused before the read, under the GIL, exactly
+        where the sibling PDF probes refuse."""
+        fat_html = (
+            b"<!DOCTYPE html><html><body><p>x</p>"
+            + b" " * (40 * 1024 * 1024)
+            + b"</body></html>"
+        )
+        html_path = tmp_path / "big.html"
+        html_path.write_bytes(fat_html)
+        # path/data parity on the no-geometry row, with and without format=
+        assert page_geometry(str(html_path)) == [None]
+        assert page_geometry(data=fat_html) == [None]
+        assert page_geometry(str(html_path), format="html") == [None]
+        assert page_geometry(data=fat_html, format="html") == [None]
+        # and the row answers [None] for anydoc too — refused nowhere
+        assert page_geometry(str(html_path), backend="anydoc") == [None]
+
+        fat_pdf = generate_pdf_big(410_000)  # ≈ 33.6 MB > the 32 MiB default
+        assert len(fat_pdf) > 32 * 1024 * 1024
+        pdf_path = tmp_path / "big_geometry.pdf"
+        pdf_path.write_bytes(fat_pdf)
+        for source in ({"path": str(pdf_path)}, {"data": fat_pdf}):
+            with pytest.raises(ValueError) as raised:
+                page_geometry(**source, backend="anydoc")
+            assert "cannot serve the declared page-box geometry" in str(raised.value)
+            assert "read ceiling" not in str(raised.value)
+        # the pdf row's own read is unmetered on this surface: the same
+        # file answers under the default budget
+        assert len(page_geometry(str(pdf_path))) == 1
+
+    def test_the_refusal_order_matches_the_locked_precedence(self, tmp_path: Path) -> None:
+        """§6's amended order, pinned on the Python surface (the core
+        test only sees the core): resolve/format → the capability refusal
+        (under the GIL, before the detach) → the password-kind refusal →
+        max_bytes → the encrypted door. The red-team probes: a zero
+        max_bytes must not mask the capability refusal (nor the
+        password-kind refusal behind it), and a resolve failure on
+        garbage precedes everything (a capability refusal cannot name a
+        format it has not resolved)."""
+        docx = generate_docx_pgsz()
+        # the capability refusal precedes the zero-max_bytes refusal...
+        with pytest.raises(ValueError, match="cannot serve page geometry for docx"):
+            page_geometry(data=docx, backend="anydoc", max_bytes=0)
+        # ...and precedes the password-kind refusal that would otherwise
+        # sit between them (the probed: max_bytes answered first)
+        with pytest.raises(ValueError, match="cannot serve page geometry for docx"):
+            page_geometry(data=docx, backend="anydoc", max_bytes=0, password="torque")
+        # auto backend: capability passes, the password-kind refusal
+        # precedes the zero refusal
+        with pytest.raises(
+            ValueError, match=r'password= applies to PDF documents only, not "docx"'
+        ):
+            page_geometry(data=docx, max_bytes=0, password="torque")
+        # the zero refusal itself, sequenced last of the three — the
+        # core's own message, on the data lane and the path lane alike
+        # (the binding's parse threads zero through on this surface)
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_geometry(data=docx, max_bytes=0)
+        zero_path = tmp_path / "zero_budget.docx"
+        zero_path.write_bytes(docx)
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_geometry(str(zero_path), max_bytes=0)
+        # and under anydoc the same path call surfaces the capability
+        # refusal, never the zero
+        with pytest.raises(ValueError, match="cannot serve page geometry for docx"):
+            page_geometry(str(zero_path), backend="anydoc", max_bytes=0)
+        # resolve/format precedes the capability refusal: garbage has no
+        # format to name, so the resolve error is the answer
+        with pytest.raises(ValueError, match="(?i)unrecognized"):
+            page_geometry(data=b"garbage", backend="anydoc")
+        # ...even when max_bytes is nonsense too: resolve first (§6)
+        with pytest.raises(ValueError, match="(?i)unrecognized"):
+            page_geometry(data=b"garbage", backend="anydoc", max_bytes=0)
+        # the door stays last: an encrypted PDF under a zero budget
+        # surfaces the zero refusal, never the encrypted door
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_geometry(data=_encrypted_pdf(), max_bytes=0)
 
     def test_aio_carries_the_geometry_lane(self, tmp_path: Path) -> None:
         """The awaitable spellings (both aio modules) wrap the typed

@@ -1361,6 +1361,38 @@ def generate_pdf_zero_pages() -> bytes:
     )
 
 
+def generate_pdf_pages(count: int) -> bytes:
+    """A `count`-page PDF of bare MediaBox-only page dicts (no content
+    streams): the geometry probe's own load fixture — page_geometry parses
+    no content, so the page count IS the work, and the per-entry pyclass
+    marshalling is what the §9 item-12 heartbeat cell exercises. Not
+    committed to the corpus; built on demand (the generate_pdf_big
+    precedent)."""
+    kids = " ".join(f"{3 + page} 0 R" for page in range(count))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
+    ]
+    objects.extend(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+        for _ in range(count)
+    )
+    return _pdf_from_objects(objects)
+
+
+def generate_pdf_crop_partial() -> bytes:
+    """A CropBox that HANGS OFF the MediaBox's edge ([300 300 800 900] on
+    [0 0 612 792]): the partial-overlap golden — the entry is the
+    INTERSECTION (the engine only exposes the intersection): extent
+    312x492, crop (300, 300, 612, 792), never the declared box's own
+    500x600. The crop wording ("the declared CropBox reduced to the
+    MediaBox — the effective crop") is this fixture's shape."""
+    content = b"BT /F1 12 Tf 350 650 Td (partially cropped page line) Tj ET"
+    return _pdf_from_objects(
+        _pdf_page_objects(content, cropbox="[300 300 800 900]")
+    )
+
+
 # --- the office geometry fixtures (standalone, on demand: the same
 # --- generate_pdf_big precedent — none of them carries conversion content
 # --- the matrix's sweeps need, and the committed corpora stay unpinned to

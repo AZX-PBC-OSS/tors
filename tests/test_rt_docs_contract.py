@@ -214,22 +214,26 @@ class TestP3ThePdfLaneReadsUnderThe512MibBackstop:
     def test_static_max_input_read_is_the_provisional_fallback(self) -> None:
         """docs/documents.md:130 names `MAX_INPUT_READ` as the None ceiling.
         Static wiring: the const is 512 MiB and is the fallback argument of
-        the provisional_read_ceiling call in the binding's two-phase read."""
+        BOTH provisional ceiling calls in the binding's two-phase read —
+        the conversion spine's (the docs' own lane) and the geometry
+        surface's (whose pdf and no-geometry rows are the unmetered ones
+        the backstop bounds)."""
         source = LIB_RS.read_text(encoding="utf-8")
         const_line = _line_of(source, "pub(crate) const MAX_INPUT_READ: usize =")
         assert re.search(
             r"pub\(crate\) const MAX_INPUT_READ: usize = 512 \* 1024 \* 1024;", source
         ), f"tors-documents/src/lib.rs:{const_line}: MAX_INPUT_READ is not the documented 512 MiB"
-        call = re.search(r"provisional_read_ceiling\((.*?)\);", source, re.S)
-        assert call, "tors-documents/src/lib.rs: the provisional_read_ceiling call vanished"
-        args = [a.strip() for a in call.group(1).split(",") if a.strip()]
-        assert args[-1] == "MAX_INPUT_READ", (
-            "tors-documents/src/lib.rs:{}: the fallback argument of "
-            "provisional_read_ceiling is {!r}, not MAX_INPUT_READ — the "
-            "docs' 512 MiB backstop is no longer wired".format(
-                _line_of(source, "provisional_read_ceiling("), args[-1]
+        for name in ("provisional_read_ceiling", "provisional_geometry_read_ceiling"):
+            call = re.search(rf"{name}\((.*?),\s*\)", source, re.S)
+            assert call, f"tors-documents/src/lib.rs: the {name} call vanished"
+            args = [a.strip() for a in call.group(1).split(",") if a.strip()]
+            assert args[-1] == "MAX_INPUT_READ", (
+                "tors-documents/src/lib.rs:{}: the fallback argument of "
+                "{} is {!r}, not MAX_INPUT_READ — the docs' 512 MiB "
+                "backstop is no longer wired".format(
+                    _line_of(source, f"{name}("), name, args[-1]
+                )
             )
-        )
 
     def test_a_40mib_html_under_none_meters_during_the_read(self, tmp_path: Path) -> None:
         """F-2 fix pin (a 512 MiB pdf fixture is out of budget for a test):

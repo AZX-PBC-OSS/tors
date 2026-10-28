@@ -314,14 +314,6 @@ documents = ["dep:pdf_oxide", "dep:anydoc", "dep:office_oxide", "dep:html-to-mar
 [dev-dependencies]
 criterion = "0.8"
 strsim = "0.11.1"
-# The encrypted-PDF fixture's key derivation (the page-geometry probe's
-# door pins, pdf_impl's tests): R2/V1 Standard-security documents are built
-# in-test from the spec's own Algorithms 2-4, whose only primitive beyond
-# the hand-rolled RC4 is MD5. md-5 is already in the lock as pdf_oxide's
-# legacy-crypto dependency (the same crate the verifier runs), so this
-# edge adds no new package — and as a dev-dependency it compiles into
-# test builds only: the published crate carries none of it.
-md-5 = "0.11"
 # The random bench's uuid4 comparator only: `Uuid::new_v4()` (the crate's
 # own getrandom-per-call rng path — verified in its source; the
 # thread-cached engine is the separate opt-in fast-rng feature) is what

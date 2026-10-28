@@ -394,6 +394,49 @@ pub fn pdf_page_count(
     .map_err(pdf_lane_error)
 }
 
+/// The `backend="anydoc"` capability probe's GIL-side half
+/// (`page_geometry`'s only pre-detach work beyond argument parsing):
+/// resolve the format as far as it resolves WITHOUT the authoritative
+/// read — an explicit `format=` decides alone, the `data=` lane sniffs
+/// its own resident bytes, the `path=` lane reads the same bounded 64
+/// KiB prefix the two-phase read's first phase reads — and return the
+/// geometry capability refusal when the probed row is one anydoc cannot
+/// serve (the pdf row, the office row; the refusal names the container:
+/// an OLE workbook says `xls`).
+///
+/// `None` = the format did not resolve (defer to the core's
+/// authoritative resolve, post-read) or the row serves the backend. The
+/// path lane's IO failures defer the same way — the detached read
+/// re-runs every gate and produces the real `OSError`/refusal, so a
+/// missing file stays an `OSError` and never a swallowed decision. The
+/// FIFO/device gate runs BEFORE the open: open(2) on a no-writer FIFO
+/// blocks, and this probe runs under the GIL, where that block is
+/// unreclaimable.
+fn probe_capability_refusal(
+    source: &Source<'_>,
+    format: Option<&str>,
+    backend: Backend,
+) -> Option<DocumentError> {
+    let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
+        Source::Data(bytes) => {
+            documents_impl::probe_geometry_capability(bytes, None, format, backend)
+        }
+        Source::Path(path) => {
+            let gated = std::fs::metadata(path)
+                .map_err(|_| ())
+                .and_then(|meta| refuse_non_regular(path, meta.file_type()).map_err(|_| ()));
+            if gated.is_err() {
+                return None;
+            }
+            let mut file = std::fs::File::open(path).ok()?;
+            let (prefix, _over) =
+                documents_impl::read_bounded_into(&mut file, Vec::new(), SNIFF_PREFIX).ok()?;
+            documents_impl::probe_geometry_capability(&prefix, path.to_str(), format, backend)
+        }
+    };
+    probed.err()
+}
+
 /// `tors.documents.page_geometry(path, data=None, format=None,
 /// password=None, backend=None, max_bytes=None)
 /// -> list[PageGeometry | None]` (or `page_geometry(data=...)`): the
@@ -405,10 +448,11 @@ pub fn pdf_page_count(
 /// swapped for a 90/270 rotation, the turn already applied), `rotation`
 /// (the PDF engine-normalized `/Rotate` ∈ {0, 90, 180, 270}, a
 /// non-right-angle declaration reporting 0; office units always 0), and
-/// `crop` (a PDF page's declared CropBox, resolved + normalized corners,
-/// the unrotated source frame — provenance only, never re-applied;
-/// `None` unless a CropBox is declared AND it actually crops). Office
-/// entries always carry `rotation = 0`, `crop = None`.
+/// `crop` (a PDF page's declared CropBox REDUCED TO THE MEDIABOX — the
+/// effective crop, the intersection the engine's visible box stands on —
+/// normalized corners, the unrotated source frame; provenance only,
+/// never re-applied; `None` unless a CropBox is declared AND it actually
+/// crops). Office entries always carry `rotation = 0`, `crop = None`.
 ///
 /// The unit and length are a documented function of the resolved format:
 /// pdf → one entry per page (the page count); docx → one per section
@@ -449,21 +493,38 @@ pub fn pdf_page_count(
 /// from the office parse — never `None`/`[]`, never a password prompt.
 ///
 /// `max_bytes` is the caller's input budget in bytes (a positive `int`):
-/// zero is refused as nonsense, an explicit budget binds pre-read (the
-/// `path=`'s stat, the `data=` length) exactly as on every other entry
-/// point, and `None` keeps the 32 MiB default ceiling as the office
-/// leg's post-read check (the office parse amplifies its container into
-/// resident memory); the pdf lane runs no lane-specific policy (its own
-/// limits govern, under the finite 512 MiB read backstop).
+/// an explicit budget binds pre-read (the `path=`'s stat, the `data=`
+/// length) exactly as on every other entry point, and `None` keeps the
+/// 32 MiB default ceiling as the OFFICE leg's post-read check (the
+/// office parse amplifies its container into resident memory) — the pdf
+/// row and the no-geometry row carry no default ceiling on this surface
+/// (the pdf lane's own limits govern; no engine runs on the no-geometry
+/// row), the read bounded only by the finite 512 MiB backstop. Zero is
+/// refused as the nonsense it is — but CORE-side, sequenced (§6) after
+/// the capability and password-kind refusals, never pre-empting them the
+/// way the other surfaces' binding-side parse does.
+///
+/// With an explicit `format=` naming a no-geometry format
+/// (html/csv/rtf/epub/odt/ods/odp), the answer is format-determined —
+/// `[None]` — and the file is never read: the regular-file gates still
+/// run (a missing path is the same `OSError`, a FIFO the same refusal),
+/// but the bytes are consulted by nobody.
 ///
 /// Errors: `OSError` for a missing/unreadable file; `ValueError` for
 /// bytes that resolve to no format, an unknown `format=` name, a bad
 /// backend name, a password on a non-PDF, an over-budget input, a
 /// malformed/encrypted document, or an office container that will not
-/// parse — the capability refusal first, then the password-kind refusal,
-/// then the ceiling, then the engine's own doors.
+/// parse — the pinned §6 order: the format resolves first (the
+/// capability refusal names it, so it cannot precede resolve), then the
+/// capability refusal (under the GIL, before the detach), then the
+/// password-kind refusal, then the max_bytes refusals (zero's included),
+/// then the engine's own encrypted doors.
 ///
-/// GIL model: the argument marshalling under the GIL, the whole
+/// GIL model: the argument marshalling under the GIL, plus — on
+/// `backend="anydoc"` only — a bounded 64 KiB prefix read that resolves
+/// the format so the capability refusal can fire before the detach (the
+/// sibling PDF probes' ordering, which this surface's format-aware
+/// refusal needs a resolved format to keep); the whole
 /// read+resolve+geometry pass under one `py.detach`, then the entry-list
 /// marshalling (O(units): one small native object per `Some` entry).
 /// ⚠ A malformed PDF can crash the process (uncatchable native stack
@@ -490,10 +551,26 @@ pub fn page_geometry(
     let format = parse_format(format)?;
     let password = parse_password(password)?;
     let backend = parse_backend(backend)?;
-    let max_bytes = parse_max_bytes(max_bytes)?;
+    // The capability refusal fires HERE — under the GIL, before the
+    // detach and before any byte of the document is read — exactly where
+    // the four PDF-only siblings fire theirs. They can name their format
+    // without resolving (PDF-only by construction); this surface's
+    // refusal is format-aware, so the format resolves first (the helper
+    // below). When even the prefix cannot resolve the format, the
+    // refusal defers to the core's authoritative resolve — §6's
+    // resolve-first clause: a capability refusal cannot name a format it
+    // has not resolved.
+    if backend == Backend::Anydoc
+        && let Some(refusal) = probe_capability_refusal(&source, format, backend)
+    {
+        return Err(document_error(py, refusal)?);
+    }
+    // The zero value threads through (see `parse_max_bytes_on`): the
+    // core's sequenced check is this surface's zero refusal.
+    let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
-            .into_input(max_bytes, format, backend)
+            .into_geometry_input(max_bytes, format, backend)
             .map_err(input_document_error)?;
         documents_impl::page_geometry(
             bytes,
@@ -559,10 +636,12 @@ impl PageGeometry {
         self.inner.rotation
     }
 
-    /// The PDF page's declared CropBox, resolved + normalized corners,
-    /// the unrotated source frame, points — `Some` only when a CropBox is
-    /// declared AND it actually crops; provenance for the extent, never
-    /// re-applied. `None` on every office lane.
+    /// The PDF page's declared CropBox reduced to the MediaBox (the
+    /// effective crop: the intersection the engine's visible box stands
+    /// on), normalized corners, the unrotated source frame, points —
+    /// `Some` only when a CropBox is declared AND it actually crops;
+    /// provenance for the extent, never re-applied. `None` on every
+    /// office lane.
     #[getter]
     fn crop(&self) -> Option<(f32, f32, f32, f32)> {
         self.inner.crop
@@ -1137,6 +1216,48 @@ impl Source<'_> {
         format: Option<&str>,
         backend: Backend,
     ) -> Result<(Vec<u8>, Option<String>), InputError> {
+        self.read_input(max_bytes, format, backend, Spine::Conversion)
+    }
+
+    /// The bytes and the name hint: the GEOMETRY probe's entry. The
+    /// divergence from [`Source::into_input`] is two halves, both keyed
+    /// on the geometry capability table (the locked §6, which says the
+    /// read metering keys on the table the surface actually routes by):
+    ///
+    /// - the provisional read ceiling (the `None` budget's two-phase
+    ///   guess) keys on [`documents_impl::provisional_geometry_read_ceiling`]
+    ///   — only the office row meters at the 32 MiB default; the pdf row
+    ///   and the no-geometry row read under [`MAX_INPUT_READ`], so a
+    ///   40 MiB HTML answers `[None]` on `path=` exactly as on `data=`
+    ///   (the parity the conversion table's ceiling broke), and a 34 MiB
+    ///   PDF is read (its own limits govern) instead of refused by a
+    ///   lane it never runs.
+    /// - the no-read door: an explicit `format=` naming a no-geometry
+    ///   format settles the answer before any byte — the core's resolve
+    ///   short-circuits on the name, the geometry table runs no engine
+    ///   on the row, and the entry is the format-determined `[None]` —
+    ///   so the regular-file gates still run (a missing path is the same
+    ///   `OSError`, a FIFO the same refusal) but nothing is read. A
+    ///   directory keeps its pinned EISDIR read refusal, so only regular
+    ///   files pass.
+    fn into_geometry_input(
+        self,
+        max_bytes: Option<usize>,
+        format: Option<&str>,
+        backend: Backend,
+    ) -> Result<(Vec<u8>, Option<String>), InputError> {
+        self.read_input(max_bytes, format, backend, Spine::Geometry)
+    }
+
+    /// [`Source::into_input`]/[`Source::into_geometry_input`]'s shared
+    /// body, keyed by which routing table meters the read.
+    fn read_input(
+        self,
+        max_bytes: Option<usize>,
+        format: Option<&str>,
+        backend: Backend,
+        spine: Spine,
+    ) -> Result<(Vec<u8>, Option<String>), InputError> {
         match self {
             Source::Path(path) => {
                 // parse_path already validated the Unicode, so the hint is
@@ -1162,12 +1283,40 @@ impl Source<'_> {
                 refuse_non_regular(&path, meta.file_type())?;
                 refuse_over_ceiling(max_bytes, Some(meta.file_type()), meta.len())?;
 
+                // The geometry spine's no-read door (the method's doc):
+                // an explicit format name that settles the row as
+                // no-geometry answers without the file. Directories fall
+                // through to the read — the EISDIR refusal is the read's
+                // own, and the door must not swallow it.
+                if spine == Spine::Geometry
+                    && !meta.is_dir()
+                    && format.is_some_and(documents_impl::is_no_geometry_format)
+                {
+                    return Ok((Vec::new(), hint_name));
+                }
+
                 // The stat is no longer the authority on how much to read: a
                 // lying stat (procfs' st_size=0) or a sparse hole made the
                 // old read_to_end unbounded. The bounded read is the ceiling.
                 let (bytes, over, used_ceiling) = match max_bytes {
                     // Explicit budget: it is the ceiling, no sniff needed.
                     Some(limit) => {
+                        if limit == 0 {
+                            // A zero budget binds maximally — nothing of
+                            // the document is read — but the value itself
+                            // is the CORE's sequenced refusal on this
+                            // surface (§6: after the capability and
+                            // password-kind checks), so the sniff prefix
+                            // (the metering read's own first phase) still
+                            // feeds the core's resolve and nothing more.
+                            let (prefix, _) = documents_impl::read_bounded_into(
+                                &mut file,
+                                Vec::new(),
+                                SNIFF_PREFIX,
+                            )
+                            .map_err(map_read_err)?;
+                            return Ok((prefix, hint_name));
+                        }
                         let (b, o) = documents_impl::read_bounded_into(file, Vec::new(), limit)
                             .map_err(map_read_err)?;
                         (b, o, limit)
@@ -1181,13 +1330,22 @@ impl Source<'_> {
                         // (_prefix_over is true for any file over 64 KiB): phase 2
                         // re-reads from the current file position and the real
                         // ceiling (>= 32 MiB) governs the refusal below.
-                        let ceiling = documents_impl::provisional_read_ceiling(
-                            &prefix,
-                            hint_name.as_deref(),
-                            format,
-                            backend,
-                            MAX_INPUT_READ,
-                        );
+                        let ceiling = match spine {
+                            Spine::Conversion => documents_impl::provisional_read_ceiling(
+                                &prefix,
+                                hint_name.as_deref(),
+                                format,
+                                backend,
+                                MAX_INPUT_READ,
+                            ),
+                            Spine::Geometry => documents_impl::provisional_geometry_read_ceiling(
+                                &prefix,
+                                hint_name.as_deref(),
+                                format,
+                                backend,
+                                MAX_INPUT_READ,
+                            ),
+                        };
                         // Phase 2: continue from the SAME file (position is already past
                         // the prefix), prepending the prefix we already read.
                         let (b, o) = documents_impl::read_bounded_into(file, prefix, ceiling)
@@ -1210,11 +1368,28 @@ impl Source<'_> {
                 // memory, but the parse it would feed is not free). No new
                 // backstop: resident bytes cannot grow past themselves.
                 refuse_over_ceiling(max_bytes, None, bytes.len() as u64)?;
-                // The one copy, inside the detach (the enum's docs).
+                // The one copy, inside the detach (the enum's docs). The
+                // caller's bytes stay WHOLE even under a zero budget: the
+                // core's resolve reads them (the zero VALUE refusal is
+                // sequenced after resolve/capability/password-kind in the
+                // core, and resolve is the step that needs the truth).
                 Ok((bytes.to_vec(), None))
             }
         }
     }
+}
+
+/// Which routing table keys the two-phase read's provisional ceiling (and
+/// whether the no-read door exists): the conversion spine's own
+/// ([`documents_impl::provisional_read_ceiling`] — the anydoc,
+/// office_oxide, and HTML lanes meter at the 32 MiB default) or the
+/// geometry surface's ([`documents_impl::provisional_geometry_read_ceiling`]
+/// — the office row alone meters; the pdf row and the no-geometry row
+/// carry no default ceiling).
+#[derive(Clone, Copy, PartialEq)]
+enum Spine {
+    Conversion,
+    Geometry,
 }
 
 /// io::OutOfMemory from the bounded reader means the input was too large to
@@ -1280,6 +1455,17 @@ fn refuse_over_ceiling(
     // usize -> u64 is lossless on every platform; the stat side is u64
     // natively, so the gate compares in the wider type.
     if size <= limit as u64 {
+        return Ok(());
+    }
+    // A zero LIMIT is never a size refusal: on the geometry surface the
+    // zero value threads through to the core's sequenced value refusal
+    // (§6: after the capability and password-kind checks — the red-team
+    // probe had the binding's pre-emption masking the anydoc refusal on a
+    // docx), and on every other surface `parse_max_bytes` refuses zero
+    // binding-side before a budget exists. Skipping keeps the zero case
+    // out of the ceiling vocabulary entirely ("must be positive" names
+    // it, never a 0-byte ceiling).
+    if limit == 0 {
         return Ok(());
     }
     Err(InputError::Refused(format!(
@@ -1503,6 +1689,32 @@ fn parse_password(password: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String
 /// doctrine. Wrong types raise `TypeError` (bool first: it launders as
 /// an int), wrong values `ValueError` (negative, zero, i64-overflow).
 fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
+    parse_max_bytes_on(max_bytes, ZeroRefusal::Binding)
+}
+
+/// Whether a zero budget is refused at the parse or threaded through.
+/// Every surface but one refuses it here (the house rule: a nonsense
+/// argument never reaches the engines). The one exception is
+/// `page_geometry`: its zero VALUE refusal is a max_bytes-class refusal
+/// whose locked §6 position is core-side, AFTER the capability and
+/// password-kind checks — the binding's pre-emption would fire it first
+/// (the red-team probe: `page_geometry(data=docx, backend="anydoc",
+/// max_bytes=0)` answered the max_bytes error where the capability
+/// refusal is the truth), so the zero threads through as `Some(0)` and
+/// the core's own zero check (already sequenced) names it.
+#[derive(Clone, Copy)]
+enum ZeroRefusal {
+    /// Refuse zero at the parse (every surface but `page_geometry`).
+    Binding,
+    /// Thread zero through as `Some(0)`; the core's sequenced check
+    /// refuses it (`page_geometry` only).
+    CoreSide,
+}
+
+fn parse_max_bytes_on(
+    max_bytes: Option<&Bound<'_, PyAny>>,
+    zero: ZeroRefusal,
+) -> PyResult<Option<usize>> {
     let Some(max_bytes) = max_bytes else {
         return Ok(None);
     };
@@ -1525,7 +1737,12 @@ fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usiz
             py_repr(max_bytes)
         )));
     };
-    if limit <= 0 {
+    // Negative budgets are refused at the parse on EVERY surface,
+    // `page_geometry` included: they are unrepresentable in the core's
+    // `usize` budget, so they are argument-contract refusals (the same
+    // class as a non-int), not sequenced value refusals — zero is the
+    // only representable value refusal, and only it can sequence.
+    if limit < 0 || (limit == 0 && matches!(zero, ZeroRefusal::Binding)) {
         return Err(PyValueError::new_err(format!(
             "max_bytes must be positive (the input ceiling in bytes, binding on every lane \
              when explicit), not {limit}"
