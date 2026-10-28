@@ -107,6 +107,32 @@ class PdfClassification:
         """Every page is image-only: nothing local can read this
         document; route it to an OCR stage."""
 
+class PageGeometry:
+    """One ``page_geometry`` entry: a unit's declared render box, in
+    points — the native pyclass exposed directly (no Python wrapper view:
+    the deliberate deviation from the PdfClassification wrapper
+    precedent, whose wrapper exists to re-type verdict strings a
+    geometry entry has none of); ``==`` is structural (the four
+    fields)."""
+    @property
+    def width_pt(self) -> float:
+        """The unit's render width in points (positive, finite; the axes
+        swapped for a 90/270 PDF rotation)."""
+    @property
+    def height_pt(self) -> float:
+        """The unit's render height in points (the same law)."""
+    @property
+    def rotation(self) -> int:
+        """The declared rotation, engine-normalized: {0, 90, 180, 270} on
+        the PDF lane (a non-right-angle ``/Rotate`` reports 0), always 0
+        on the office lanes."""
+    @property
+    def crop(self) -> tuple[float, float, float, float] | None:
+        """The PDF page's declared CropBox, resolved + normalized
+        corners, the unrotated source frame, points — provenance for the
+        extent, never re-applied, ``None`` unless a CropBox is declared
+        AND it actually crops; ``None`` on every office lane."""
+
 def to_markdown(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
@@ -222,5 +248,36 @@ def pdf_link_uris(
     its PDF surface is the ``to_markdown``/``to_text`` conversion pair);
     an explicit ``max_bytes=`` binds before the read, ``None`` leaves the
     lane unmetered. ⚠ A malformed PDF can crash the process (uncatchable
+    native stack exhaustion in the pdf_oxide engine): sandbox untrusted
+    PDFs (docs/documents.md, SECURITY.md)."""
+
+def page_geometry(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = ...,
+    password: str | None = None,
+    backend: Backend | str = ...,
+    max_bytes: int | None = None,
+) -> list[PageGeometry | None]:
+    """The declared-box geometry probe: one entry per unit of the
+    resolved format — PDF pages (the visible box's render extent, axes
+    swapped for a 90/270 rotation; the engine-normalized ``/Rotate``; the
+    declared CropBox as ``crop`` provenance), docx sections (the RAW
+    layer's declared size, twips ÷ 20 — a margins-only section is
+    ``None``, never a fabricated Letter), pptx slides (the raw deck-wide
+    slide size, EMU ÷ 12700.0, ``None`` everywhere when undeclared),
+    xlsx worksheets (all ``None``: an unbounded grid is not a page),
+    legacy doc/xls/ppt sections (all ``None``), and exactly one ``None``
+    entry for the single-flow formats (html/csv/rtf/epub/odt/ods/odp:
+    unit = whole document). ``[]`` only for zero units. ``format=``
+    names the format (explicit name wins over sniff wins over
+    extension); ``backend=`` is ``"auto"``/``"oxide"`` — identical on
+    this surface for every format — while ``"anydoc"`` is refused where
+    geometry is obtainable (pdf and the office families) and answered
+    ``[None]`` on the no-geometry row; ``password=`` unlocks an encrypted
+    PDF (any other format: a clean error; an encrypted OOXML package: a
+    typed ``ValueError``); an explicit ``max_bytes=`` binds before the
+    read, ``None`` keeps the 32 MiB default ceiling on the office leg.
+    Runs GIL-free. ⚠ A malformed PDF can crash the process (uncatchable
     native stack exhaustion in the pdf_oxide engine): sandbox untrusted
     PDFs (docs/documents.md, SECURITY.md)."""

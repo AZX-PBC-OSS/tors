@@ -50,6 +50,7 @@ from pathlib import Path
 import pytest
 from test_documents_hardening import _hwm_kb, _run_or_fail
 from tors_documents import (
+    page_geometry,
     pdf_classify,
     pdf_extract,
     pdf_link_uris,
@@ -374,6 +375,7 @@ PUBLIC_CONVERSION_SURFACE: tuple[tuple[Callable[..., object], bool], ...] = (
     # (function, whether its own docstring states the None doctrine)
     (to_markdown, True),
     (to_text, False),  # delegates: "the same ... max_bytes= semantics as to_markdown"
+    (page_geometry, True),
     (pdf_classify, True),
     (pdf_extract, True),
     (pdf_link_uris, True),

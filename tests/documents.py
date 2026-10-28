@@ -1361,6 +1361,124 @@ def generate_pdf_zero_pages() -> bytes:
     )
 
 
+# --- the office geometry fixtures (standalone, on demand: the same
+# --- generate_pdf_big precedent — none of them carries conversion content
+# --- the matrix's sweeps need, and the committed corpora stay unpinned to
+# --- them) --------------------------------------------------------------
+
+_DOCX_PGSZ = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+_DOCX_MARGINS_ONLY = (
+    '<w:sectPr><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>'
+)
+
+
+def _docx_with_sectpr(sectpr: str) -> bytes:
+    """generate_docx's container with the body's trailing `<w:sectPr>`
+    spelled by the fixture (the office geometry lane's raw-layer
+    fixtures)."""
+    body = "".join(_docx_paragraph(paragraph) for paragraph in DOCX_PARAGRAPHS)
+    document = (
+        _XML_DECL
+        + f'<w:document xmlns:w="{_W_NS}"><w:body>{body}{sectpr}</w:body></w:document>\n'
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", DOCX_CONTENT_TYPES.encode("utf-8")),
+            ("_rels/.rels", DOCX_RELS.encode("utf-8")),
+            ("word/document.xml", document.encode("utf-8")),
+        ]
+    )
+
+
+def generate_docx_pgsz() -> bytes:
+    """A pgSz-bearing docx (Letter, 12240×15840 twips): the geometry
+    probe's Some(612.0, 792.0) exact golden."""
+    return _docx_with_sectpr(_DOCX_PGSZ)
+
+
+def generate_docx_margins_only() -> bytes:
+    """A margins-only sectPr (no `<w:pgSz>`): the raw-layer amendment's
+    own pinning fixture — the geometry probe must answer None, where the
+    to_ir() path would fabricate Letter."""
+    return _docx_with_sectpr(_DOCX_MARGINS_ONLY)
+
+
+def generate_pptx_sldsz() -> bytes:
+    """generate_pptx_rich's deck with a declared slide size
+    (12192000×6858000 EMU): the geometry probe's Some(960.0, 540.0)
+    exact golden (EMU ÷ 12700.0 in float)."""
+    with zipfile.ZipFile(io.BytesIO(generate_pptx_rich())) as archive:
+        entries = [(item.filename, archive.read(item.filename)) for item in archive.infolist()]
+    rewritten = []
+    for name, data in entries:
+        if name == "ppt/presentation.xml":
+            text = data.decode("utf-8")
+            marker = "</p:sldIdLst>"
+            text = text.replace(
+                marker,
+                marker + '<p:sldSz cx="12192000" cy="6858000"/>',
+            )
+            data = text.encode("utf-8")
+        rewritten.append((name, data))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in rewritten:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o644 << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, data)
+    return buffer.getvalue()
+
+
+def generate_pptx_empty() -> bytes:
+    """A deck whose slide list is empty and which carries no slide parts:
+    the zero-slide shape (geometry answer: the empty list), if the
+    engine's parser accepts it."""
+    presentation = (
+        _XML_DECL
+        + f'<p:presentation xmlns:p="{_P_NS}" xmlns:r="{_DOC_NS}">'
+        "<p:sldIdLst/></p:presentation>"
+    )
+    content_types = (
+        _XML_DECL
+        + f'<Types xmlns="{_CT_NS}">'
+        + _CT_RELS
+        + _CT_XML
+        + _CT_PPTX_MAIN
+        + "</Types>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", content_types.encode("utf-8")),
+            ("_rels/.rels", _root_rels("ppt/presentation.xml").encode("utf-8")),
+            ("ppt/presentation.xml", presentation.encode("utf-8")),
+        ]
+    )
+
+
+def generate_xlsx_chart() -> bytes:
+    """generate_xlsx's workbook plus one `xl/charts/chart1.xml` part
+    carrying chart text: the IR gains a "Charts" section for it (the
+    converter's worksheet+Charts count) while the geometry probe's
+    length law stays the RAW worksheet count — the fixture that pins the
+    two counts apart."""
+    chart = (
+        _XML_DECL
+        + '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+        + ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        + "<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Units per quarter"
+        + "</a:t></a:r></a:p></c:rich></c:tx></c:title>"
+        + '<c:plotArea><c:barChart><c:ser><c:tx><c:v>Series name</c:v></c:tx>'
+        + '<c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt>'
+        + "</c:strCache></c:strRef></c:cat></c:ser></c:barChart></c:plotArea>"
+        + "</c:chart></c:chartSpace>"
+    )
+    with zipfile.ZipFile(io.BytesIO(generate_xlsx())) as archive:
+        entries = [(item.filename, archive.read(item.filename)) for item in archive.infolist()]
+    return _zip_bytes(entries + [("xl/charts/chart1.xml", chart.encode("utf-8"))])
+
+
 # --- the registry ------------------------------------------------------------
 #
 # The corpus's five documents ride along (same bytes, no duplication) so the

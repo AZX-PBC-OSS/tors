@@ -3720,6 +3720,20 @@ mod tests {
             Backend::Auto,
         );
         assert!(matches!(err, DocumentError::Convert(_)), "{err:?}");
+        // the encrypted-OOXML door (§7): an OLE/CFB container standing
+        // where a docx belongs — the encrypted-package shape's container —
+        // is the typed "encrypted" refusal, never None/[], never a
+        // password prompt; and the mis-sniffed-as-legacy shape (no
+        // explicit name: the OLE magic resolves xls) fails the same
+        // typed way through the legacy parser.
+        let err = geometry_err(
+            "locked.docx",
+            &ole_with_stream("EncryptedPackage"),
+            Backend::Auto,
+        );
+        assert!(err.to_string().contains("encrypted"), "{err:?}");
+        let err = geometry_err("locked.xlsx", &ole_with_stream("Workbook"), Backend::Auto);
+        assert!(matches!(err, DocumentError::Convert(_)), "{err:?}");
         // garbage named pdf: the pdf lane's own typed refusal
         let err = geometry_err("junk.pdf", b"garbage", Backend::Auto);
         assert!(matches!(err, DocumentError::Convert(_)), "{err:?}");

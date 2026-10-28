@@ -44,7 +44,13 @@ import zlib
 
 import pytest
 
-from tors.documents import pdf_classify, pdf_extract, pdf_link_uris, pdf_page_count
+from tors.documents import (
+    page_geometry,
+    pdf_classify,
+    pdf_extract,
+    pdf_link_uris,
+    pdf_page_count,
+)
 
 
 def _row(type_: int, a: int, b: int) -> bytes:
@@ -113,7 +119,7 @@ def _objstm_document(
     return bytes(out)
 
 
-_ENTRY_POINTS = [pdf_page_count, pdf_extract, pdf_classify, pdf_link_uris]
+_ENTRY_POINTS = [page_geometry, pdf_page_count, pdf_extract, pdf_classify, pdf_link_uris]
 
 
 def _probe(blob: bytes) -> subprocess.CompletedProcess[str]:

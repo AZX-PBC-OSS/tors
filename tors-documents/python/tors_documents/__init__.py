@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from enum import Enum
 
-from tors_documents._tors_documents import NeedsOcrError
+from tors_documents._tors_documents import NeedsOcrError, PageGeometry
 from tors_documents._tors_documents import PdfClassification as _NativePdfClassification
 
 # The wheel's version, baked from the crate's Cargo.toml at build time
@@ -39,6 +39,7 @@ from tors_documents._tors_documents import PdfClassification as _NativePdfClassi
 # import and needs a static fallback pin that drifts stale in source
 # checkouts).
 from tors_documents._tors_documents import __version__ as __version__
+from tors_documents._tors_documents import page_geometry as _native_page_geometry
 from tors_documents._tors_documents import pdf_classify as _native_pdf_classify
 from tors_documents._tors_documents import pdf_extract as _native_pdf_extract
 from tors_documents._tors_documents import pdf_link_uris as _native_pdf_link_uris
@@ -53,9 +54,11 @@ __all__ = [
     "Backend",
     "Format",
     "NeedsOcrError",
+    "PageGeometry",
     "PageKind",
     "PdfClassification",
     "__version__",
+    "page_geometry",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",
@@ -290,6 +293,45 @@ def pdf_page_count(
     ``None`` reads the pdf lane under the finite 512 MiB backstop (a
     memory-safety floor, raised with an explicit ``max_bytes=``)."""
     return _native_pdf_page_count(_coerce_path(path), data, password, backend, max_bytes)
+
+
+def page_geometry(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> list[PageGeometry | None]:
+    """The declared-box geometry probe (the full contract is the native
+    function's docstring): one entry per unit of the resolved format —
+    PDF pages, docx sections, pptx slides, xlsx worksheets, legacy
+    sections — ``None`` where that unit declares no geometry, exactly one
+    ``[None]`` entry for the single-flow formats (html/csv/rtf/epub and
+    the ODF family, unit = whole document), ``[]`` only for zero units.
+    Entries are the native :class:`PageGeometry` (exposed directly, with
+    structural ``==`` — the deliberate deviation from the
+    PdfClassification wrapper precedent, stated in its docstring).
+    ``format=`` names the format (explicit name wins over sniff wins over
+    extension); ``backend=`` is ``"auto"``/``"oxide"`` (identical on this
+    surface for every format; ``"anydoc"`` is refused where geometry is
+    obtainable — pdf and the office families — while the no-geometry row
+    answers ``[None]`` on every backend); ``password=`` for an encrypted
+    PDF (a password on any other format is a clean error); an explicit
+    ``max_bytes=`` binds before the read, ``None`` keeps the 32 MiB
+    default ceiling on the office leg (a post-read check there) while the
+    pdf lane reads under the finite 512 MiB backstop. The whole
+    read+resolve+geometry pass runs GIL-free. ⚠ A malformed PDF can crash
+    the process (uncatchable native stack exhaustion in the pdf_oxide
+    engine): sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
+    return _native_page_geometry(
+        _coerce_path(path),
+        data,
+        format,
+        password,
+        backend,
+        max_bytes,
+    )
 
 
 class PdfClassification:

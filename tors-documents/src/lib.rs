@@ -18,6 +18,11 @@
 //! - [`pdf_page_count`]: the page tree and nothing else
 //! - [`pdf_classify`]: the cheap text-vs-image preflight (which pages are
 //!   image-only)
+//! - [`page_geometry`]: every unit's declared render box — PDF pages, the
+//!   office families' sections/slides/worksheets, the single-flow
+//!   formats' one `[None]` — the cheap geometry probe the payload shares
+//!   with `pdf_layout`'s future per-page boxes (the native
+//!   [`PageGeometry`] pyclass is that surface's entry type too)
 //!
 //! GIL model (the crate-wide discipline, applied per function): the
 //! argument borrow of the path string plus argument validation happen
@@ -387,6 +392,199 @@ pub fn pdf_page_count(
         tors::pdf_impl::page_count(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
     })
     .map_err(pdf_lane_error)
+}
+
+/// `tors.documents.page_geometry(path, data=None, format=None,
+/// password=None, backend=None, max_bytes=None)
+/// -> list[PageGeometry | None]` (or `page_geometry(data=...)`): the
+/// declared-box geometry probe — one entry per unit of the resolved
+/// format, `None` where that unit declares no geometry.
+///
+/// The entry, per unit, in points: `width_pt`/`height_pt` (the render
+/// extent — for a PDF page the visible box's extent with the axes
+/// swapped for a 90/270 rotation, the turn already applied), `rotation`
+/// (the PDF engine-normalized `/Rotate` ∈ {0, 90, 180, 270}, a
+/// non-right-angle declaration reporting 0; office units always 0), and
+/// `crop` (a PDF page's declared CropBox, resolved + normalized corners,
+/// the unrotated source frame — provenance only, never re-applied;
+/// `None` unless a CropBox is declared AND it actually crops). Office
+/// entries always carry `rotation = 0`, `crop = None`.
+///
+/// The unit and length are a documented function of the resolved format:
+/// pdf → one entry per page (the page count); docx → one per section
+/// (the converter's section count, sizes read from the RAW document
+/// layer — a section declaring only margins is `None`, never a
+/// fabricated Letter); pptx → one per slide (the raw deck-wide slide
+/// size, EMU ÷ 12700.0 in float, `None` everywhere when undeclared);
+/// xlsx → one per worksheet, all `None` (a worksheet is an unbounded
+/// grid, not a page); legacy doc/xls/ppt → all `None` at the converter's
+/// section count; html/csv/rtf/epub/odt/ods/odp → exactly one entry,
+/// `None` (unit = whole document, single-flow — never `[]`). `[]` is
+/// reachable exactly when the resolved unit count is zero (a zero-page
+/// PDF, a zero-slide deck). A per-unit box read that fails on an index
+/// the length rule reported is a `None` entry, its siblings intact.
+///
+/// `backend` names the engine lane: `"auto"` (the default) and `"oxide"`
+/// are IDENTICAL on this surface for every format — the geometry lane is
+/// a property of the format, not a choice (a documented divergence from
+/// `Backend.AUTO`'s conversion contract). `"anydoc"` is refused on the
+/// formats whose geometry anydoc structurally lacks (pdf and the office
+/// families) — a format-aware capability `ValueError` raised ahead of
+/// every other refusal; the no-geometry row runs no engine at all, so
+/// every backend (anydoc included) gets the same `[None]` (another
+/// documented divergence from conversion routing's unsupported-pair
+/// errors: there is nothing to refuse and nothing is fallen back).
+///
+/// `format` names the format explicitly (extension spelling, no dot,
+/// case-insensitive; `None` sniffs it from the content markers, with the
+/// path's extension as the last resort) — the explicit name wins over
+/// the sniff wins over the extension, `convert()`'s precedence, so a
+/// `data=` call can name its format with no file to consult.
+///
+/// `password` unlocks an encrypted PDF (the PDF kinds only: a password
+/// on any other format is a `ValueError`, never a silently-ignored
+/// argument). Without one, an encrypted PDF fails closed (`ValueError`);
+/// owner-password-only files authenticate with the empty password and
+/// read normally. An encrypted OOXML package is a typed `ValueError`
+/// from the office parse — never `None`/`[]`, never a password prompt.
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`):
+/// zero is refused as nonsense, an explicit budget binds pre-read (the
+/// `path=`'s stat, the `data=` length) exactly as on every other entry
+/// point, and `None` keeps the 32 MiB default ceiling as the office
+/// leg's post-read check (the office parse amplifies its container into
+/// resident memory); the pdf lane runs no lane-specific policy (its own
+/// limits govern, under the finite 512 MiB read backstop).
+///
+/// Errors: `OSError` for a missing/unreadable file; `ValueError` for
+/// bytes that resolve to no format, an unknown `format=` name, a bad
+/// backend name, a password on a non-PDF, an over-budget input, a
+/// malformed/encrypted document, or an office container that will not
+/// parse — the capability refusal first, then the password-kind refusal,
+/// then the ceiling, then the engine's own doors.
+///
+/// GIL model: the argument marshalling under the GIL, the whole
+/// read+resolve+geometry pass under one `py.detach`, then the entry-list
+/// marshalling (O(units): one small native object per `Some` entry).
+/// ⚠ A malformed PDF can crash the process (uncatchable native stack
+/// exhaustion in the pdf_oxide engine): sandbox untrusted PDFs
+/// (docs/documents.md, SECURITY.md).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    format = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
+pub fn page_geometry(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    format: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<Option<PageGeometry>>> {
+    let source = parse_source(path, data, "page_geometry")?;
+    let format = parse_format(format)?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    let max_bytes = parse_max_bytes(max_bytes)?;
+    let entries = match py.detach(move || {
+        let (bytes, hint) = source
+            .into_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
+        documents_impl::page_geometry(
+            bytes,
+            hint.as_deref(),
+            format,
+            backend,
+            &documents_impl::ConvertOptions {
+                password: password.as_deref(),
+                max_bytes,
+            },
+        )
+    }) {
+        Ok(entries) => entries,
+        Err(err) => return Err(document_error(py, err)?),
+    };
+    // O(units) of native-object construction, post-detach (the
+    // PdfClassification precedent's residue class, one pyclass per entry).
+    Ok(entries
+        .into_iter()
+        .map(|entry| entry.map(|geometry| PageGeometry { inner: geometry }))
+        .collect())
+}
+
+/// One `page_geometry` entry: a unit's declared render box, in points —
+/// the native pyclass the probe returns per page/section/slide/worksheet.
+///
+/// Deliberate deviation from the `PdfClassification` wrapper precedent:
+/// this class is exposed DIRECTLY (no Python wrapper view around it).
+/// The wrapper pattern exists to add typing the native layer lacks —
+/// `PdfClassification` re-types verdict strings as `PageKind` members —
+/// while a geometry entry carries nothing to re-type: the fields are
+/// floats, an int, and a tuple-or-None, exactly as returned. §12 item 2
+/// resolved for native + Rust-side `__eq__`: comparisons are structural
+/// (`==` on two entries compares the four fields; lists of them compare
+/// elementwise), so `page_geometry(path) == page_geometry(path,
+/// backend="oxide")` is a plain list equality — the property the tests
+/// pin.
+#[pyclass]
+pub struct PageGeometry {
+    inner: documents_impl::PageGeometry,
+}
+
+#[pymethods]
+impl PageGeometry {
+    /// The unit's render width in points (positive, finite; the axes
+    /// swapped for a 90/270 PDF rotation).
+    #[getter]
+    fn width_pt(&self) -> f32 {
+        self.inner.width_pt
+    }
+
+    /// The unit's render height in points (the same law).
+    #[getter]
+    fn height_pt(&self) -> f32 {
+        self.inner.height_pt
+    }
+
+    /// The declared rotation, engine-normalized: {0, 90, 180, 270} on the
+    /// PDF lane (a non-right-angle `/Rotate` reports 0), always 0 on the
+    /// office lanes.
+    #[getter]
+    fn rotation(&self) -> i32 {
+        self.inner.rotation
+    }
+
+    /// The PDF page's declared CropBox, resolved + normalized corners,
+    /// the unrotated source frame, points — `Some` only when a CropBox is
+    /// declared AND it actually crops; provenance for the extent, never
+    /// re-applied. `None` on every office lane.
+    #[getter]
+    fn crop(&self) -> Option<(f32, f32, f32, f32)> {
+        self.inner.crop
+    }
+
+    /// Structural equality: two entries are equal exactly when their four
+    /// fields are (an entry against any other type is `NotImplemented`,
+    /// Python's own protocol).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        let crop = match self.inner.crop {
+            Some((x0, y0, x1, y1)) => format!("({x0:?}, {y0:?}, {x1:?}, {y1:?})"),
+            None => "None".to_string(),
+        };
+        format!(
+            "PageGeometry(width_pt={:?}, height_pt={:?}, rotation={}, crop={})",
+            self.inner.width_pt, self.inner.height_pt, self.inner.rotation, crop
+        )
+    }
 }
 
 /// `tors.documents.pdf_link_uris(path, data=None, password=None,
@@ -1390,9 +1588,7 @@ fn parse_backend(backend: Option<&Bound<'_, PyAny>>) -> PyResult<Backend> {
 /// byte-pinned historical text); `page_geometry`'s format-aware refusal
 /// is raised in the core, where the resolved format lives.
 fn refuse_anydoc(capability: &str) -> PyErr {
-    PyValueError::new_err(
-        documents_impl::anydoc_capability_refusal(capability, "pdf").to_string(),
-    )
+    PyValueError::new_err(documents_impl::anydoc_capability_refusal(capability, "pdf").to_string())
 }
 
 /// The largest page index any PDF can carry, and therefore the ceiling a
@@ -1644,6 +1840,8 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("NeedsOcrError", m.py().get_type::<NeedsOcrError>())?;
     m.add_class::<PdfClassification>()?;
+    m.add_class::<PageGeometry>()?;
+    m.add_function(wrap_pyfunction!(page_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_classify, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_extract, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_link_uris, m)?)?;
