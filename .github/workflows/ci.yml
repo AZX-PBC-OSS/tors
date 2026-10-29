@@ -378,16 +378,26 @@ jobs:
         # weekly pass; this loop had drifted from both (truncate_ellipsis,
         # controls, json_repair were Makefile-only). gfm_strip joined the
         # lists when its char-boundary fence-trim panic was fixed
-        # (strip_fence_content, unit-pinned). documents_markdown stays
+        # (strip_fence_content, unit-pinned). The nine never-wired targets
+        # (chunk-budget, chunk-text, detect-encoding, first-invalid-charset,
+        # grounding, ground_sentences, grounding_coverage, near_dup,
+        # uuid-text) joined 2026-10-29 — see the Makefile's FUZZ_TARGETS
+        # comment. documents_markdown stays
         # deliberately absent: it SIGSEGVs on a KNOWN upstream bug
         # (pdf_oxide 0.3.78 parse_object/parse_array recursion, no depth
         # cap); the Makefile's FUZZ_TARGETS comment carries the repro.
         # It stays built and committed as the repro harness, joining the
-        # run lists when pdf_oxide ships a cap.
+        # run lists when pdf_oxide ships a cap. The eight newer documents
+        # surfaces (page_images, page_text_chars, document_structure,
+        # page_geometry, page_layout, page_tables, pdf_page_labels,
+        # pdf_security) have no targets either, parked on the same
+        # recorded decision (seven of them parse PDF bytes through the
+        # same uncapped parser; none gets one until pdf_oxide ships the
+        # cap).
         working-directory: fuzz
         run: |
           set -e
-          for t in decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming chunk-budget chunk-text detect-encoding first-invalid-charset json_repair_streaming; do
+          for t in decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming chunk-budget chunk-text detect-encoding first-invalid-charset grounding ground_sentences grounding_coverage near_dup uuid-text; do
             echo "=== $t ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=15 -close_fd_mask=3
           done

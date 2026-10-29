@@ -198,7 +198,26 @@ gen-html-table:
 # 2026-09-09: ASan stack-overflow, ~500-frame parse_object/parse_array
 # alternation). It stays committed as the repro harness, joining the run
 # lists when pdf_oxide ships a cap.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming
+#
+# The eight newer documents surfaces (page_images, page_text_chars,
+# document_structure, page_geometry, page_layout, page_tables,
+# pdf_page_labels, pdf_security) have no fuzz targets either, parked on
+# the same recorded decision: seven of them parse PDF bytes through that
+# same uncapped pdf_oxide parser (a target today would SIGSEGV exactly
+# like documents_markdown's would), and none of the eight gets one until
+# pdf_oxide ships the cap. (document_structure refuses PDF outright —
+# documents_impl.rs's PDF_STRUCTURE_WHY — and is parked alongside the
+# seven so the documents surfaces join the lists together.)
+#
+# The nine never-wired targets joined the run lists 2026-10-29:
+# chunk-budget, chunk-text, detect-encoding, first-invalid-charset,
+# grounding, ground_sentences, grounding_coverage, near_dup, uuid-text
+# had been committed and compiled all along but ran nowhere — zero
+# build/run verification is how truncate_ellipsis-class rot happens.
+# near_dup is safe to run (pure-Rust corpus ops, no documents surface
+# behind it); none of the nine routes through pdf_oxide.
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming chunk-budget chunk-text detect-encoding first-invalid-charset grounding ground_sentences grounding_coverage near_dup uuid-text
+
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \
 		echo "=== $$t (30s) ==="; \
