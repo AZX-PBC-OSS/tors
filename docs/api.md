@@ -6705,8 +6705,10 @@ value). Wrong TYPES raise `TypeError`
 or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
 extraction failure), a non-sequence `weights` (a bare `str` included), a
 non-numeric `weights` entry, an unhashable id, whose error is
-Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
-extracts as its `0`/`1` value, the int-extraction convention). For
+Python's own; a `bool` where an int belongs (`k=True`) extracts as its
+`0`/`1` value, the int-extraction convention, while a `bool` in `gains`
+or `weights` is a `TypeError` (a non-numeric value including `bool` is
+refused: `True`/`False` are not gains or weights). For
 nDCG, legal finite gains can be so large the DCG and
 IDCG sums overflow to `+inf`; the score then saturates instead of
 dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite
