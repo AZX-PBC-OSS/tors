@@ -578,11 +578,7 @@ fn uniform_open(state: &mut u64) -> f64 {
 /// rather than held probabilistically).
 fn uniform_open_from_draw(draw: u64) -> f64 {
     let u = ((draw >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64);
-    if u < 1.0 {
-        u
-    } else {
-        1.0 - f64::EPSILON / 2.0
-    }
+    if u < 1.0 { u } else { 1.0 - f64::EPSILON / 2.0 }
 }
 
 /// One standard exponential draw from a uniform in (0, 1): the inverse
@@ -1580,7 +1576,7 @@ mod tests {
         // zero (slightly negative, the documented honest shape), never
         // the wrapped-mask 1.0.
         let got = jaccard_estimate(&[0, 1, 2], &[3, 4, 5], Some(63));
-        assert!(got < 1.0 && got >= -1.0, "{got}");
+        assert!((-1.0..1.0).contains(&got), "{got}");
     }
 
     #[test]

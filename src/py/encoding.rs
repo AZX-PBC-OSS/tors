@@ -8,9 +8,14 @@ use crate::encoding_impl;
 /// only reach for this on the bytes that already failed that check. This
 /// is a heuristic guesser, not a validator, and it always returns some
 /// encoding, confidence unexposed by the underlying crate beyond the single
-/// best answer. `tld` is an optional top-level domain without the leading
-/// dot (`"jp"`, not `".jp"`) that disambiguates language-family-ambiguous
-/// input; an empty string or `None` both mean "no hint". Same bytes-only
+/// best answer. `tld` is an optional top-level-domain hint that
+/// disambiguates language-family-ambiguous input, and its accepted
+/// spellings are lenient: `"jp"`, `".jp"`, and `"JP"` all normalize to
+/// the same hint (one leading dot stripped, lowercased); a hint that
+/// still trips the detector's own precondition after that (an embedded
+/// period from a full domain, or non-ASCII) degrades to no hint rather
+/// than erroring. An empty string or `None` both mean "no hint". Same
+/// bytes-only
 /// argument contract as `decode_utf8`/`utf8_is_valid` (`bytearray`/
 /// `memoryview`/`str` raise `TypeError`).
 ///

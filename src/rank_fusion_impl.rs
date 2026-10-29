@@ -368,7 +368,10 @@ mod tests {
     fn loose_larger_n_docs_stays_correct() {
         // The other side the min-clamp defends: a loose-LARGER n_docs (a
         // sparse numbering) neither panics nor emits the unvoted slots.
-        assert_eq!(rank_fuse(&[vec![5u32]], 60, 10_000, None), vec![(5, 1.0 / 61.0)]);
+        assert_eq!(
+            rank_fuse(&[vec![5u32]], 60, 10_000, None),
+            vec![(5, 1.0 / 61.0)]
+        );
     }
 
     #[test]
