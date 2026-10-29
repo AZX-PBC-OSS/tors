@@ -2,6 +2,11 @@
 name = "tors-fuzz"
 version = "0.0.0"
 publish = false
+# Not inherited from anywhere (the crate is deliberately not a workspace
+# member): cargo-deny's unlicensed check flags the manifest itself, the
+# same gate every other lockfile passes. The repo's own license, same as
+# the root crate's.
+license = "MIT"
 edition = "2024"
 
 [package.metadata]

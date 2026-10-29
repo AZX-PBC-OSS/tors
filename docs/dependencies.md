@@ -2,7 +2,7 @@
 
 The license gate is `cargo deny check licenses advisories bans` (`make deny`;
 the same three checks run in CI's lint job). The allowlist in `deny.toml` is
-permissive-only: MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, plus four
+permissive-only: MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, plus five
 documented additions, all permissive grants inside the gate's intent:
 
 - `Apache-2.0 WITH LLVM-exception` (target-lexicon, a pyo3 build dependency:
@@ -17,6 +17,11 @@ documented additions, all permissive grants inside the gate's intent:
   jsonschema crate's `referencing` $ref machinery, the json_repair port's
   validation engine: MIT No Attribution is plain MIT with the attribution
   obligation removed, the same family as 0BSD; recorded in `deny.toml`)
+- `NCSA` (libfuzzer-sys, `(MIT OR Apache-2.0) AND NCSA`: the AND conjunct is
+  LLVM's embedded libFuzzer C++ sources under the University of
+  Illinois/NCSA Open Source License — LLVM's own license, a BSD-style
+  permissive grant; caught the first time the fuzz crate's own lock was
+  deny-gated)
 
 No GPL/LGPL/AGPL/MPL, no unlicensed. Dual/tri-licensed crates are consumed via
 an allowed branch: notably r-efi (a getrandom dependency, dev tree only)
@@ -33,7 +38,7 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | crate | version | license | role |
 |---|---|---|---|
 | pyo3 | 0.29.2 | MIT OR Apache-2.0 | the CPython extension layer (abi3-py310) |
-| unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | NFC/NFD/NFKC/NFKD tables (Unicode 16.0.0) |
+| unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | NFC/NFD/NFKC/NFKD tables (Unicode 16.0.0); HELD at 0.1.25 `--precise` in all three locks (#215): 0.1.26 ships UCD 17.0.0's tables, which breaks tests/test_parity.py's residual budget until its `_TORS_UCD_MAJOR` moves with the bump (Cargo.toml's seal comment has the lift condition; dependabot ignores the crate on every cargo lane) |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | UAX #29 grapheme/word tables (Unicode 17.0.0) |
 | sha2 | 0.11.0 | MIT OR Apache-2.0 | finalize's and content_hash's SHA-256, and (with the rest of the RustCrypto family below) the one-shot hashing surface's sha256/sha512 engines and hmac's inner hash |
 | const-hex | 1.19.1 | MIT OR Apache-2.0 | digest hex encoding (`finalize`/`finalize_utf8`, `merkle_root`/`merkle_diff`); no longer in the random family — `random_hex` char-samples its output since the length-first refactor (see `random_impl.rs`) |
@@ -197,6 +202,16 @@ resolves its own independent `tors-documents/Cargo.lock` whose package set
 carries crates and versions the root lock never resolves (measured:
 payload-only names, plus version-skewed pairs), so both lockfiles are gated
 (`deny.toml`'s `[graph]` comment records the same).
+
+The fuzz crate resolves a THIRD independent lock (`fuzz/Cargo.lock`,
+fuzz/Cargo.toml's header), gated by its own pass — `cargo deny
+--manifest-path fuzz/Cargo.toml check licenses advisories bans` — in the
+same lint job and in `make deny`: the libFuzzer tree's advisories gate like
+every other lock's (that lock is never version-synced by
+release-lock-sync.yml, which is exactly why it needs its own advisory
+pass). First pass over that lock caught two real entries: the `NCSA`
+allowlist addition above, and the fuzz crate itself declaring no `license`
+field (now `MIT`, the repo's own).
 
 Two documents-tree entries the engine tree forced into `deny.toml`:
 `CC0-1.0` is allowlisted (`tiny-keccak` 2.0.2, public-domain-equivalent,

@@ -22,6 +22,13 @@ updates:
     groups:
       rust-minor-patch:
         update-types: ["minor", "patch"]
+    # unicode-normalization is HELD at 0.1.25 --precise in all three locks
+    # (root Cargo.toml's seal comment, #215): 0.1.26 ships UCD 17.0, which
+    # breaks tests/test_parity.py's residual budget until _TORS_UCD_MAJOR
+    # moves with it. Without the ignore, any rust-minor-patch PR
+    # re-resolves the caret "0.1" to 0.1.26+ and silently lifts the hold.
+    ignore:
+      - dependency-name: "unicode-normalization"
 
   # The payload crate resolves its own engine tree into its own lockfile:
   # tors-documents is deliberately NOT a cargo workspace member (its
@@ -43,6 +50,11 @@ updates:
     groups:
       rust-minor-patch:
         update-types: ["minor", "patch"]
+    # unicode-normalization is HELD at 0.1.25 --precise in this lock too
+    # (root Cargo.toml's seal comment, #215); ignored here so a
+    # re-resolution on this lane cannot silently lift the hold.
+    ignore:
+      - dependency-name: "unicode-normalization"
 
   # The fuzz crate is the THIRD independent manifest (fuzz/Cargo.toml's own
   # header): not a cargo workspace member, resolving its own fuzz/Cargo.lock,
@@ -66,9 +78,16 @@ updates:
       rust-minor-patch:
         update-types: ["minor", "patch"]
     ignore:
+      # The three ORACLE pins: hand-synced to the root Cargo.toml's own
+      # versions (fuzz/Cargo.toml's oracle comment); dependabot bumps
+      # toward latest, not toward "match the root crate".
       - dependency-name: "sha2"
       - dependency-name: "const-hex"
       - dependency-name: "unicode-segmentation"
+      # HELD at 0.1.25 --precise in this lock too (root Cargo.toml's seal
+      # comment, #215): 0.1.26 = UCD 17.0 breaks tests/test_parity.py's
+      # residual budget until _TORS_UCD_MAJOR moves with it.
+      - dependency-name: "unicode-normalization"
 
   # `uv` is a first-class Dependabot ecosystem (understands pyproject.toml and uv.lock
   # natively), not `pip`, which reads pyproject.toml but doesn't maintain uv.lock.

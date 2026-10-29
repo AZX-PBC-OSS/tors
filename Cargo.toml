@@ -24,6 +24,17 @@ crate-type = ["cdylib", "rlib"]
 # pyproject.toml): one wheel per platform runs on every Python 3.10+ release rather than
 # needing a wheel built per minor version.
 pyo3 = { version = "0.29", features = ["abi3-py310"] }
+# HELD pin (=`0.1.25`, via --precise in all three locks — root,
+# tors-documents/, fuzz/ — by the 2026 deps rev, #215): a deliberate hold
+# point, NOT a build constraint. 0.1.26 ships UCD 17.0.0's tables, and the
+# jump breaks tests/test_parity.py's residual budget: the test's
+# _TORS_UCD_MAJOR (currently 16, this crate's tables' UCD major) calibrates
+# the per-leg residual bound against the running interpreter's UCD, so a
+# 17.0 crate moves the tables without moving the constant and every leg's
+# residual exceeds its bound. LIFT condition: raise _TORS_UCD_MAJOR to the
+# new UCD major in the same commit as the crate bump, and re-measure the
+# per-leg residuals its docstring records. .github/dependabot.yml ignores
+# unicode-normalization on every cargo lane for the same reason.
 unicode-normalization = "0.1"
 # finalize's content hash: sha256 over the normalize result's UTF-8 bytes, lowercase hex:
 # byte-identical to hashlib.sha256(...).hexdigest(), the expression a normalize-then-hash

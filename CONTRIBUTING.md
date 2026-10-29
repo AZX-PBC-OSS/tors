@@ -5,7 +5,7 @@ Thanks for your interest in contributing to `tors`!
 ## Setup
 
 ```sh
-uv sync --locked --extra documents
+uv sync --locked --extra documents --group docs
 ```
 
 Every command after that takes `--no-sync` (a bare `uv run` re-resolves the environment and
@@ -13,7 +13,8 @@ can silently drop the Rust extension build). The `--extra documents` is required
 keeps the tors-documents payload wheel installed. A plain `uv sync --locked` would
 uninstall the payload, and the pytest suite's documents gates would silently skip at
 module level (the same hazard `make install`/`make dev` and CI's sync step avoid by
-always carrying the extra).
+always carrying the extra). The `--group docs` matters for the same exactness reason:
+the docs group is non-default, and `make lint`'s mkdocs gate needs it installed.
 
 After changing Rust code: `uv sync --locked --extra documents --reinstall-package tors`
 or `maturin develop`.

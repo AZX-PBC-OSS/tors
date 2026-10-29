@@ -33,12 +33,17 @@ check: lint test
 # (tests/test_documents_engines.py) run against the tors.documents payload
 # (tors-documents/, the uv-workspace member), and a plain `uv sync --locked`
 # is exact: it would uninstall the payload and silently skip those gates.
+# --group docs for the same exactness reason: the docs group (mkdocs,
+# mkdocs-material) is NON-default (pyproject.toml's default-groups is
+# ["dev"] only), so without naming it here a plain sync never installs it —
+# or EVICTS it, and `make lint`'s mkdocs gate dies on the missing tool (a
+# `--no-install-project` sync like ci.yml's ruff step is likewise exact).
 # Both workspace members are force-reinstalled: uv's wheel cache does not
 # key on Rust sources (the `dev` target's note), so without the flag a
 # re-run after a pull keeps BOTH wheels' native code stale — the same trap
 # `dev` exists to disarm, one level up.
 install:
-	uv sync --locked --extra documents --reinstall-package tors \
+	uv sync --locked --extra documents --group docs --reinstall-package tors \
 		--reinstall-package tors-documents
 
 # Rebuild the extension after Rust edits. uv's wheel cache does not key on
@@ -70,7 +75,7 @@ install:
 dev:
 	-find python/tors -maxdepth 1 -name '_tors*.so' ! -name '_tors.abi3.so' -delete
 	-find tors-documents/python -name '*.so' -delete
-	uv sync --locked --extra documents --reinstall-package tors \
+	uv sync --locked --extra documents --group docs --reinstall-package tors \
 		--reinstall-package tors-documents
 
 # The ci.yml lint job, verbatim: fmt gate (root workspace AND the fuzz
@@ -121,17 +126,20 @@ bench:
 fmt:
 	cargo fmt
 
-# The licensing gate (the ci.yml lint job's two Cargo deny steps): the
+# The licensing gate (the ci.yml lint job's three Cargo deny steps): the
 # permissive-only license allowlist, the advisory policy, and the ban
-# policy live in deny.toml. BOTH lockfiles are gated: tors-documents
+# policy live in deny.toml. ALL THREE lockfiles are gated: tors-documents
 # resolves its own independent Cargo.lock (not a workspace member; its
 # Cargo.toml's header) whose package set is not a subset of the root
 # lock's (deny.toml's [graph] comment), so the payload manifest gets its
-# own pass. Requires cargo-deny on PATH
+# own pass; fuzz/ likewise resolves its own fuzz/Cargo.lock (the
+# libFuzzer tree's advisories), which neither of the other passes reads.
+# Requires cargo-deny on PATH
 # (`cargo install cargo-deny --locked`, ~1min).
 deny:
 	cargo deny check licenses advisories bans
 	cargo deny --manifest-path tors-documents/Cargo.toml check licenses advisories bans
+	cargo deny --manifest-path fuzz/Cargo.toml check licenses advisories bans
 
 # Regenerate src/html_table.rs from the RUNNING interpreter's html module
 # (tools/gen_html_table.py; the provenance line lives in the generated header).
@@ -190,7 +198,25 @@ gen-html-table:
 # 2026-09-09: ASan stack-overflow, ~500-frame parse_object/parse_array
 # alternation). It stays committed as the repro harness, joining the run
 # lists when pdf_oxide ships a cap.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming
+#
+# The eight newer documents surfaces (page_images, page_text_chars,
+# document_structure, page_geometry, page_layout, page_tables,
+# pdf_page_labels, pdf_security) have no fuzz targets either, parked on
+# the same recorded decision: seven of them parse PDF bytes through that
+# same uncapped pdf_oxide parser (a target today would SIGSEGV exactly
+# like documents_markdown's would), and none of the eight gets one until
+# pdf_oxide ships the cap. (document_structure refuses PDF outright —
+# documents_impl.rs's PDF_STRUCTURE_WHY — and is parked alongside the
+# seven so the documents surfaces join the lists together.)
+#
+# The nine never-wired targets joined the run lists 2026-10-29:
+# chunk-budget, chunk-text, detect-encoding, first-invalid-charset,
+# grounding, ground_sentences, grounding_coverage, near_dup, uuid-text
+# had been committed and compiled all along but ran nowhere — zero
+# build/run verification is how truncate_ellipsis-class rot happens.
+# near_dup is safe to run (pure-Rust corpus ops, no documents surface
+# behind it); none of the nine routes through pdf_oxide.
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming chunk-budget chunk-text detect-encoding first-invalid-charset grounding ground_sentences grounding_coverage near_dup uuid-text
 
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \
