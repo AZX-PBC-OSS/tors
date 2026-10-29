@@ -555,10 +555,30 @@ pub fn distinct_shingle_count(text: &str, shingle_size: usize) -> usize {
 /// centering that keeps both endpoints unreachable (`u > 0` makes the
 /// logarithmic draws below finite, `u < 1` makes `1 - u` positive). The
 /// same spelling every float draw of the new engines rides, so the
-/// conversion is pinned in exactly one place.
+/// conversion is pinned in exactly one place
+/// ([`uniform_open_from_draw`], which the tests can force the
+/// pathological draw through).
 fn uniform_open(state: &mut u64) -> f64 {
-    let draw = splitmix64(state);
-    ((draw >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64)
+    uniform_open_from_draw(splitmix64(state))
+}
+
+/// [`uniform_open`]'s conversion, drawn out so the pathological draw is
+/// testable directly. The lattice is the half-ulp-centered top 53 bits —
+/// mathematically `(2x + 1) · 2^-54` for the top-53-bits integer `x` — and
+/// exactly one of its points is not an f64: the top draw `x = 2^53 - 1`
+/// wants `1 - 2^-54`, which falls exactly halfway between `1 - 2^-53` and
+/// `1.0`, an IEEE tie that rounds (ties-to-even) UP to `1.0`. At
+/// `u == 1.0` the logarithmic draws below are infinite, and the ICWS
+/// argmin's strict `score < best` locks the resulting NaN incumbent in
+/// permanently. So that one tie snaps to the largest f64 strictly below
+/// 1.0: both endpoints are unreachable for EVERY draw. Every other draw
+/// computes exactly what the bare expression always computed (the snap is
+/// reachable on one draw in 2^53 — but "unreachable" is the contract the
+/// logarithmic draws and the argmin are built on, so it is enforced here
+/// rather than held probabilistically).
+fn uniform_open_from_draw(draw: u64) -> f64 {
+    let u = ((draw >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64);
+    if u < 1.0 { u } else { 1.0 - f64::EPSILON / 2.0 }
 }
 
 /// One standard exponential draw from a uniform in (0, 1): the inverse
@@ -719,10 +739,19 @@ pub fn superminhash_signature(
 /// shape, not a bug, and callers thresholding should compare the raw
 /// agreement fraction instead. The variance is at most ~3x the full-row
 /// estimator's once `b >= log2(1/J)` (below that the chance-agreement
-/// term dominates the information the rows carry).
+/// term dominates the information the rows carry). `bits` is 1..=63 (the
+/// pyo3 binding's cap, asserted here for the direct Rust caller): 64
+/// would `1u64 << 64`-wrap the mask to zero and silently answer 1.0 on
+/// disjoint signatures; the full-row estimator is `None`, not 64.
 pub fn jaccard_estimate(a: &[u64], b: &[u64], bits: Option<u32>) -> f64 {
     assert_eq!(a.len(), b.len(), "signature lengths differ");
     assert!(!a.is_empty(), "empty signatures estimate nothing");
+    if let Some(bits) = bits {
+        assert!(
+            (1..=63).contains(&bits),
+            "bits {bits} outside 1..=63 (the pyo3 binding's cap; the full row is None, not 64)"
+        );
+    }
     let agree = match bits {
         None => a.iter().zip(b).filter(|(x, y)| x == y).count(),
         Some(bits) => {
@@ -1527,6 +1556,56 @@ mod tests {
         // Identical signatures estimate 1.0 at every bits value.
         for bits in [None, Some(1), Some(8), Some(63)] {
             assert!((jaccard_estimate(&a, &a, bits) - 1.0).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "bits 64 outside 1..=63")]
+    fn bits_sixty_four_is_a_core_range_violation() {
+        // The direct Rust caller's guard (the pyo3 binding validates
+        // [1, 63] first, py/minhash.rs): bits = 64 would `1u64 << 64`
+        // panic in debug and wrap the mask to zero in release — which
+        // silently answers 1.0 on disjoint signatures.
+        let _ = jaccard_estimate(&[0, 1, 2], &[3, 4, 5], Some(64));
+    }
+
+    #[test]
+    fn disjoint_signatures_never_estimate_one_under_the_cap() {
+        // The release-wrap shape the assert forbids, on a legal bits
+        // value: disjoint signatures at the top of the cap answer near
+        // zero (slightly negative, the documented honest shape), never
+        // the wrapped-mask 1.0.
+        let got = jaccard_estimate(&[0, 1, 2], &[3, 4, 5], Some(63));
+        assert!((-1.0..1.0).contains(&got), "{got}");
+    }
+
+    #[test]
+    fn the_pathological_draw_stays_strictly_inside_the_open_interval() {
+        // The top-53-bits-all-ones draw is the ONE lattice point whose
+        // centered value (1 - 2^-54) is not an f64: an exact IEEE tie
+        // that rounds to 1.0, where the logarithmic draws are infinite
+        // and the ICWS argmin's strict `score < best` locks a NaN
+        // incumbent in permanently. uniform_open must keep BOTH
+        // endpoints unreachable for that draw too — and for every other
+        // corner of the 11-bit-shifted top bits.
+        for draw in [0u64, u64::MAX, 0x5555_5555_5555_5555, 0xAAAA_AAAA_AAAA_AAAA] {
+            let u = uniform_open_from_draw(draw);
+            assert!(u > 0.0 && u < 1.0, "{draw:x} -> {u}");
+            // The signature math stays sane on it: the inverse-CDF
+            // exponential is finite (the u < 1 guarantee — no +inf, no
+            // NaN downstream; the bottom corner's -0.0 is the pre-existing
+            // exact-zero shape, finite by the same guarantee).
+            let e = -(1.0 - u).ln();
+            assert!(e.is_finite() && e >= 0.0, "{draw:x} -> exp {e}");
+        }
+        // The top draw's snap lands on the largest f64 below 1.0.
+        assert_eq!(uniform_open_from_draw(u64::MAX), 1.0 - f64::EPSILON / 2.0);
+        // And the live path stays routed through the pinned conversion:
+        // a state sweep never escapes (0, 1) either.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..100_000 {
+            let u = uniform_open(&mut state);
+            assert!(u > 0.0 && u < 1.0, "{u}");
         }
     }
 

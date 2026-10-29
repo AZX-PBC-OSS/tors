@@ -240,7 +240,8 @@ pub fn utf8_byte_len(_py: Python<'_>, s: &str) -> usize {
 /// UTF-8 view cache):
 ///
 /// * ASCII: the borrow is a zero-copy alias and the scan is one
-///   detached pass — the answer is exactly `2 * len(s)` in UTF-8 bytes.
+///   detached pass — the answer is exactly `2 * len(s)` in UTF-16 bytes
+///   (the function's unit; `len(s)` counts characters).
 /// * Non-ASCII, first call on the object (a cold UTF-8 cache): the
 ///   borrow materializes and caches the view under the GIL
 ///   (encode-parity cost; `encode` reads that cache and never fills
