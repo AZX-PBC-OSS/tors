@@ -34,11 +34,11 @@ When reporting, include:
   engines (`pdf_oxide`, `anydoc`, `office_oxide`, `html-to-markdown-rs`) document
   bytes a caller cannot trust, so parser-level memory safety, hangs, and crashes
   are in scope on every entry point (`to_markdown`/`to_text`, the PDF-only
-  calls, and `page_geometry`/`page_layout`, by `path=` or `data=`). The resource-ceiling
+  calls, and `page_geometry`/`page_layout`/`page_tables`, by `path=` or `data=`). The resource-ceiling
   threat model is part of this surface: the explicit `max_bytes=` pre-read bound
   (every lane), the 32 MiB default post-read ceiling on the amplifying lanes
   (anydoc, office_oxide — the geometry surfaces' office leg included, on
-  `page_geometry` and `page_layout` alike; their PDF row
+  `page_geometry`, `page_layout`, and `page_tables` alike; their PDF row
   and their no-geometry row carry no default ceiling), and the decompression
   caps: anydoc's per-entry and total package limits;
   office_oxide's 512 MiB per-part cap plus the tors-documents seam's own
