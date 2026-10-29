@@ -436,6 +436,82 @@ class Cell:
         """The row span (the engine's; 1 unless a merge covers this
         cell)."""
 
+class PdfSecurity:
+    """The ``pdf_security`` answer: the four security fields the reading
+    rule composes (``readable = !encrypted ||
+    unlocked_with_supplied_password || owner_password_only``); exposed
+    directly (no Python wrapper view: the fields are bools and an
+    optional ``PdfPermissions``, nothing to re-type — the
+    ``PageGeometry`` deviation note applies); ``==`` is structural (the
+    four fields)."""
+    @property
+    def encrypted(self) -> bool:
+        """The document carries an ``/Encrypt`` entry (handler present,
+        or the trailer names one) — before and regardless of any
+        authentication."""
+    @property
+    def unlocked_with_supplied_password(self) -> bool:
+        """The content was readable under the credentials THIS call
+        held: the supplied password's result when one was given, else
+        the empty-password open law (``password=None`` MEANS the
+        implicit empty attempt, never "no attempt")."""
+    @property
+    def permissions(self) -> PdfPermissions | None:
+        """The declared ``/P`` permission flags: ``None`` when
+        unencrypted AND when the ``/Encrypt`` dict fails to initialize
+        (malformed shape, unsupported ``/V``/``/R``, a crypto-policy
+        denial — three states that collapse into ``encrypted &&
+        permissions is None``); ``Some`` otherwise, INCLUDING
+        pre-authentication. ``/P`` is advisory (§7.6.3.2): the probe
+        reports, callers enforce."""
+    @property
+    def owner_password_only(self) -> bool:
+        """The empty password authenticated — the owner-password-only
+        shape, whose content surfaces read fine with no password. An
+        inference from the open's own single implicit empty attempt,
+        never a credential-kind probe (the engine never exposes
+        user-vs-owner): an empty OWNER password with a non-empty USER
+        password also reports ``True``. Honest meaning: "the empty
+        string opens this document"."""
+
+class PdfPermissions:
+    """One decoded ``/P`` permission flag set (``pdf_security``'s
+    ``permissions``): the eight named bits of the §7.6.3.2 Table 22
+    decode plus the raw integer; exposed directly (the
+    ``PageGeometry`` deviation note applies); ``==`` is structural (the
+    nine fields). Callers enforcing a policy should prefer the named
+    bits and keep ``raw_p`` for provenance."""
+    @property
+    def print_low_res(self) -> bool:
+        """Bit 3: print (low resolution)."""
+    @property
+    def modify(self) -> bool:
+        """Bit 4: modify (other than annotation / form fill)."""
+    @property
+    def copy(self) -> bool:
+        """Bit 5: copy text and graphics."""
+    @property
+    def annotate(self) -> bool:
+        """Bit 6: annotate and form-fill."""
+    @property
+    def fill_forms(self) -> bool:
+        """Bit 9 (rev ≥ 3): fill interactive form fields."""
+    @property
+    def accessibility(self) -> bool:
+        """Bit 10 (rev ≥ 3): extract for accessibility."""
+    @property
+    def assemble(self) -> bool:
+        """Bit 11 (rev ≥ 3): assemble (insert/rotate/delete pages)."""
+    @property
+    def print_high_res(self) -> bool:
+        """Bit 12 (rev ≥ 3): print high resolution."""
+    @property
+    def raw_p(self) -> int:
+        """The raw ``/P`` integer, the engine's ``*i as i32`` view: a
+        ``/P`` outside i32 (e.g. 4294967292) reports truncated (−4) —
+        lossless ONLY within i32, the two's-complement form the spec
+        itself writes."""
+
 def to_markdown(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
@@ -535,6 +611,62 @@ def pdf_page_count(
     unmetered. ⚠ A malformed PDF can crash the process (uncatchable
     native stack exhaustion in the pdf_oxide engine): sandbox untrusted
     PDFs (docs/documents.md, SECURITY.md)."""
+
+def pdf_page_labels(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = ...,
+    max_bytes: int | None = None,
+) -> list[str | None]:
+    """The page label a reader displays, per page (the ISO 32000 §12.4.2
+    numbering tree; one GIL-free pass). ``None`` = the page declares no
+    label (no tree, or before the tree's first range): the
+    fabricate-an-ordinal signal — no label is ever fabricated here. A
+    declared label is always ``str``, including the empty string (a
+    styleless, prefixless range declares it); a styleless range with a
+    prefix yields that same string for every page it covers (constant
+    labels); the render arithmetic is u64 (a legal ``/St 4294967294``
+    never panics or wraps; an over-u32 ``/St`` carries the engine's own
+    parse-time truncation). Rotation/crop irrelevant; a corrupt tree is
+    presented as "no labels" (every page ``None`` — the documented
+    masking). ``backend=`` is ``"auto"``/``"oxide"`` (the pdf_oxide
+    lane; ``"anydoc"`` is a capability refusal: a surface its reader
+    never renders; its PDF surface is the ``to_markdown``/``to_text``
+    conversion pair); ``password=`` unlocks an encrypted PDF (the door
+    governs unchanged: a locked document raises, never ciphertext
+    labels); an explicit ``max_bytes=`` binds before the read, ``None``
+    leaves the lane unmetered. ⚠ A malformed PDF can crash the process
+    (uncatchable native stack exhaustion in the pdf_oxide engine):
+    sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
+
+def pdf_security(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = ...,
+    max_bytes: int | None = None,
+) -> PdfSecurity:
+    """The typed encryption/permissions probe: the four security fields
+    REPORTED, never a raise on a locked state, never unlocking beyond
+    the supplied password (one password per call plus the open's own
+    implicit empty attempt; the fail-closed door stays every content
+    surface's single encryption authority). Reading rule:
+    ``readable = !encrypted || unlocked_with_supplied_password ||
+    owner_password_only`` — the trap cell is owner-only + a WRONG
+    supplied password (``unlocked`` false there while the document reads
+    fine with NO password, and the door raises on the wrong one). Three
+    states collapse into ``encrypted && permissions is None`` (malformed
+    ``/Encrypt``, unsupported ``/V``/``/R``, a crypto-policy denial):
+    "needs a password" is indistinguishable from "this build/policy
+    refuses the cipher", and the report is identical with or without a
+    supplied password. ``permissions`` is advisory (§7.6.3.2): the probe
+    reports, callers enforce. ``backend=`` is ``"auto"``/``"oxide"``
+    (the pdf_oxide lane; ``"anydoc"`` is a capability refusal: a report
+    its reader never makes; its PDF surface is the
+    ``to_markdown``/``to_text`` conversion pair); an explicit
+    ``max_bytes=`` binds before the read, ``None`` leaves the lane
+    unmetered."""
 
 def pdf_link_uris(
     path: str | os.PathLike[str] | None = None,

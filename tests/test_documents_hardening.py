@@ -68,6 +68,8 @@ from tors_documents import (
     pdf_extract,
     pdf_link_uris,
     pdf_page_count,
+    pdf_page_labels,
+    pdf_security,
     to_markdown,
     to_text,
 )
@@ -185,6 +187,8 @@ class TestNonRegularPathsAreTypedRefusals:
             pdf_classify,
             pdf_extract,
             pdf_page_count,
+            pdf_page_labels,
+            pdf_security,
             pdf_link_uris,
         ):
             with pytest.raises(ValueError, match="path must name a regular file") as raised:
@@ -411,6 +415,11 @@ class TestNulInPathIsAValueError:
     naming ``path`` (the message convention) and repr'ing the value."""
 
     def test_the_refusal_matches_cpythons_class_and_names_path(self) -> None:
+        # A representative sweep (the refusal is one shared helper, so a
+        # sample pins the convention): pdf_extract/pdf_link_uris were
+        # never in this loop — they joined later and are covered by the
+        # parametrized loop below; every new entry point joins here from
+        # birth (pdf_page_labels, pdf_security included).
         for call in (
             to_markdown,
             to_text,
@@ -419,6 +428,8 @@ class TestNulInPathIsAValueError:
             page_tables,
             pdf_page_count,
             pdf_classify,
+            pdf_page_labels,
+            pdf_security,
         ):
             with pytest.raises(ValueError, match="(?i)null") as raised:
                 call("feed\x00name.pdf")
@@ -458,6 +469,8 @@ class TestPathCoercionNamesTheArgument:
             pdf_classify,
             pdf_extract,
             pdf_page_count,
+            pdf_page_labels,
+            pdf_security,
             pdf_link_uris,
         ],
         ids=lambda call: call.__name__,

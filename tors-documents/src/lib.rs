@@ -16,6 +16,12 @@
 //! - [`pdf_extract`]: the per-page text probe + whole-document markdown in
 //!   one pass over one open PDF
 //! - [`pdf_page_count`]: the page tree and nothing else
+//! - [`pdf_page_labels`]: the page label a reader displays, per page
+//!   (the ISO 32000 §12.4.2 numbering tree; `None` = the page declares
+//!   no label — never a fabricated ordinal)
+//! - [`pdf_security`]: the typed encryption/permissions probe — the
+//!   four security fields reported (never a raise on a locked state),
+//!   the fail-closed door's carve-out
 //! - [`pdf_classify`]: the cheap text-vs-image preflight (which pages are
 //!   image-only)
 //! - [`page_geometry`]: every unit's declared render box — PDF pages, the
@@ -401,6 +407,448 @@ pub fn pdf_page_count(
         tors::pdf_impl::page_count(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
     })
     .map_err(pdf_lane_error)
+}
+
+/// `tors.documents.pdf_page_labels(path, data=None, password=None,
+/// backend="auto", max_bytes=None) -> list[str | None]` (or
+/// `pdf_page_labels(data=...)`): read a PDF and return the page label a
+/// reader displays for every page ("i", "A-1", "12") — the ISO 32000
+/// §12.4.2 numbering tree and nothing else, no content extraction.
+/// Citations and UIs name pages the way the document does, not by
+/// 0-based ordinal.
+///
+/// `None` means the page DECLARES no label — no `/PageLabels` tree at
+/// all, or the page sits before the tree's first range (gaps exist only
+/// there; the list is always the page count long, page order) — and is
+/// the caller's fabricate-an-ordinal signal: no label is ever
+/// fabricated here (the #207 law). A declared label is always `Some`,
+/// including the empty string: a styleless range (`/S` absent) with no
+/// prefix declares the empty label, and a styleless range WITH a prefix
+/// yields that same string for every page it covers (constant labels, a
+/// per-page counter only the numbered styles carry). A prefix that
+/// fails to decode (unmapped PDFDocEncoding bytes dropped; invalid
+/// UTF-16) is silently lost, so such a page can also answer `Some("")`
+/// (styleless) or the bare number (a style present).
+///
+/// The covering rule is the engine's minus its ordinal fallback: the
+/// last range in the stable-sorted tree with `start_page ≤ i` covers
+/// page `i`; two ranges sharing a start page resolve to the last in
+/// traversal order (root `/Nums` before `/Kids`, kids in array order).
+/// Labels render on u64 arithmetic (a legal `/St 4294967294` renders
+/// through `4294967296` without panic or wrap — never the engine
+/// formatter's `u32 + u32`; an over-u32 `/St` carries the engine's own
+/// parse-time truncation, e.g. 5000000000 reads back as 705032704).
+/// Rotation and crop are irrelevant (tree data). A corrupt tree (a
+/// non-dict `/PageLabels`, tree node, `/Kids` member, or label entry) is
+/// presented as "no labels" — every page `None`, the content-read-
+/// failure law, the same list a tree-less document answers; that is a
+/// deliberate masking, stated here the way `tables_refused: false` is.
+///
+/// `backend` names the engine lane, the same vocabulary the conversion
+/// pair takes: `"auto"` (the default; the native layer takes `None` as
+/// the same choice) and `"oxide"` both run pdf_oxide:
+/// the mapping `engine_for` makes for PDF ("oxide" is the oxide-family
+/// engine for this format), byte-identical output either way.
+/// `"anydoc"` is refused before any work runs, a named `ValueError`
+/// raised under the GIL ahead of the detach and the encrypted door
+/// check: a capability refusal, not the format-level UnsupportedBackend
+/// (PDF+anydoc is a usable conversion pair): anydoc's PDF surface is
+/// whole-document markdown only (~anydoc-0.2.4/src/formats/pdf.rs), and
+/// this call needs the /PageLabels numbering tree (labels its reader
+/// never renders). Whole-document conversion is the
+/// conversion pair's call: `to_markdown`/`to_text` with
+/// `backend="anydoc"` (`NeedsOcrError` is that lane's scanned-page
+/// signal).
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`).
+/// An explicit budget binds this family pre-read exactly as it binds the
+/// conversion pair, the shared source-spine gate: the `path=`'s size at
+/// the stat and again on the open handle, the `data=` length before the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
+/// 32 MiB default ceiling is the core's post-read check on the
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
+///
+/// `password` unlocks an encrypted PDF. The door governs unchanged (the
+/// single encryption authority): a locked document raises the family's
+/// `ValueError` — never ciphertext labels (the labels are read from
+/// encrypted string objects, and the engine's extractor would return
+/// ciphertext prefixes on a locked file; `open()` is the only gate) —
+/// and owner-password-only files authenticate with the empty password
+/// and read their decrypted labels.
+///
+/// Errors: `OSError` for a missing/unreadable file, `ValueError` for bytes
+/// that do not parse as a PDF, `ValueError` naming `path` for a
+/// FIFO/device/socket path (regular files only, the shared source spine),
+/// the capability `ValueError` for `backend="anydoc"` (under the GIL,
+/// before any work runs, so an encrypted document under it surfaces the
+/// backend refusal, never the door-check error), the encrypted door
+/// `ValueError` (with `password=`: its "did not unlock" error), and the ceiling
+/// `ValueError` for an input over an explicit `max_bytes` (both sizes
+/// named, refused before the read or copy): the input-side refusals
+/// constructed after the GIL is reacquired.
+///
+/// GIL model: `pdf_page_count`'s shape — the path str marshalling
+/// (`parse_path`), the open+tree walk under `py.detach`, and one
+/// `list[str | None]` back (O(pages) of Python strings, no
+/// marshalling class).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
+pub fn pdf_page_labels(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<Option<String>>> {
+    let source = parse_source(path, data, "pdf_page_labels")?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    if backend == Backend::Anydoc {
+        return Err(refuse_anydoc(
+            "the /PageLabels numbering tree (labels its reader never renders)",
+        ));
+    }
+    let max_bytes = parse_max_bytes(max_bytes)?;
+    py.detach(move || {
+        let bytes = source.into_bytes(max_bytes)?;
+        tors::pdf_impl::page_labels(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
+    })
+    .map_err(pdf_lane_error)
+}
+
+/// `tors.documents.pdf_security(path, data=None, password=None,
+/// backend="auto", max_bytes=None) -> PdfSecurity` (or
+/// `pdf_security(data=...)`): the typed encryption/permissions probe —
+/// report the document's security state; never unlock beyond the
+/// supplied password, never raise for a state the caller asked about.
+/// Right now "can I read this document and what does it allow" is
+/// answered by poking (open, `authenticate("")`, `permissions()`, then
+/// see which call refuses); this answers it in one call, and the
+/// fail-closed door stays every content surface's single encryption
+/// authority — this surface REPORTS state instead of raising on it.
+///
+/// The four fields (the reading rule first — they are not one boolean):
+/// `readable = !encrypted || unlocked_with_supplied_password ||
+/// owner_password_only`. The DOOR is deliberately stricter: a wrong
+/// supplied password raises on every content surface even when
+/// `owner_password_only` is true (owner-only + wrong password reports
+/// `{encrypted: true, unlocked: false, permissions: Some, owner_only:
+/// true}` while `pdf_page_count(…, "wrong")` raises) — never read
+/// `unlocked == false` as "locked"; read the rule.
+///
+/// - `encrypted`: the document carries an `/Encrypt` entry (handler
+///   present, or the trailer names one), before and regardless of any
+///   authentication.
+/// - `unlocked_with_supplied_password`: the content was readable under
+///   the credentials THIS call held — the supplied password's result
+///   when one was given, else the empty-password open law (`password=
+///   None` MEANS the implicit empty attempt, never "no attempt"):
+///   owner-only + no password → true (the reads-fine case), user-locked
+///   + no password → false, wrong password → false. A supplied password
+///   on an unencrypted document is a no-op (nothing to authenticate),
+///   never an error.
+/// - `permissions`: the declared `/P` permission flags (a
+///   [`PdfPermissions`], below) — `None` when unencrypted AND when the
+///   `/Encrypt` dict fails to initialize; `Some` otherwise, INCLUDING
+///   pre-authentication (the raw `/P` off the parsed dict). `/P` is
+///   ADVISORY (§7.6.3.2): this probe reports, callers enforce.
+/// - `owner_password_only`: the empty password authenticated — the
+///   owner-password-only shape, whose content surfaces read fine with
+///   no password. An inference from the open's own single implicit
+///   empty attempt, never a credential-kind probe (the engine never
+///   exposes user-vs-owner): an empty OWNER password with a non-empty
+///   USER password also reports true. Honest meaning: "the empty string
+///   opens this document".
+///
+/// Three distinct states collapse into `encrypted == true &&
+/// permissions is None` and are NOT distinguishable in v1: a malformed
+/// `/Encrypt` dict; an unsupported `/V`/`/R`; and a crypto-policy
+/// denial (`fips_strict`'s R≤4/MD5 refusal). A caller cannot tell
+/// "needs a password" from "this build/policy refuses the cipher" —
+/// deliberate (no typed flag), and the report is IDENTICAL with or
+/// without a supplied password (a state report must not depend on the
+/// caller's password choice).
+///
+/// `Some(permissions)` vs `None` reads "the /P dict parsed and its
+/// flags are these" vs "no password answer exists in this build" — the
+/// `needs-a-password`/`no-answer` split the conflation above names.
+///
+/// One password is tried per call (the supplied one) plus the open's
+/// own single implicit empty attempt: no amplification, no dictionary
+/// walk, no /Encrypt version or cipher enumeration.
+///
+/// `backend` names the engine lane, the same vocabulary the conversion
+/// pair takes: `"auto"` (the default; the native layer takes `None` as
+/// the same choice) and `"oxide"` both run pdf_oxide:
+/// the mapping `engine_for` makes for PDF ("oxide" is the oxide-family
+/// engine for this format), byte-identical output either way.
+/// `"anydoc"` is refused before any work runs, a named `ValueError`
+/// raised under the GIL ahead of the detach: a capability refusal, not
+/// the format-level UnsupportedBackend (PDF+anydoc is a usable
+/// conversion pair): anydoc's PDF surface is whole-document markdown
+/// only (~anydoc-0.2.4/src/formats/pdf.rs), and
+/// this call needs the /Encrypt security state (an encryption report
+/// its reader never makes). Whole-document conversion is the
+/// conversion pair's call: `to_markdown`/`to_text` with
+/// `backend="anydoc"` (`NeedsOcrError` is that lane's scanned-page
+/// signal).
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`).
+/// An explicit budget binds this family pre-read exactly as it binds the
+/// conversion pair, the shared source-spine gate: the `path=`'s size at
+/// the stat and again on the open handle, the `data=` length before the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
+/// 32 MiB default ceiling is the core's post-read check on the
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
+///
+/// Errors: `OSError` for a missing/unreadable file, `ValueError` for bytes
+/// that do not parse as a PDF, `ValueError` naming `path` for a
+/// FIFO/device/socket path (regular files only, the shared source spine),
+/// the capability `ValueError` for `backend="anydoc"` (under the GIL,
+/// before any work runs), and the ceiling
+/// `ValueError` for an input over an explicit `max_bytes` (both sizes
+/// named, refused before the read or copy). NOT raised: the encrypted
+/// door itself — this surface reports the locked state instead (the
+/// carve-out the fail-closed doctrine documents); an encrypted document
+/// under `backend="anydoc"` still surfaces the backend refusal (under
+/// the GIL, before any work runs).
+///
+/// GIL model: `pdf_page_count`'s shape — the path str marshalling
+/// (`parse_path`), the open+state read under `py.detach`, then one
+/// pyclass back (O(1); the `permissions` getter materializes its own
+/// pyclass on access, post-detach).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
+pub fn pdf_security(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PdfSecurity> {
+    let source = parse_source(path, data, "pdf_security")?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    if backend == Backend::Anydoc {
+        return Err(refuse_anydoc(
+            "the /Encrypt security state (an encryption report its reader never makes)",
+        ));
+    }
+    let max_bytes = parse_max_bytes(max_bytes)?;
+    py.detach(move || {
+        let bytes = source.into_bytes(max_bytes)?;
+        tors::pdf_impl::security(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
+    })
+    .map_err(pdf_lane_error)
+    .map(pdf_security_inner)
+}
+
+/// The core's `PdfSecurity` into the binding's pyclass (the
+/// `PageTables` entry precedent: one constructor, post-detach).
+fn pdf_security_inner(security: tors::pdf_impl::PdfSecurity) -> PdfSecurity {
+    PdfSecurity { inner: security }
+}
+
+/// The `pdf_security` answer as the native pyclass: the four fields the
+/// reading rule composes (`readable = !encrypted ||
+/// unlocked_with_supplied_password || owner_password_only` — the trap
+/// cell is owner-only + a WRONG supplied password: `unlocked` false
+/// there while the document reads fine with NO password, and the door
+/// raises on the wrong one; never read `unlocked == false` as
+/// "locked").
+///
+/// Exposed DIRECTLY (no Python wrapper view) — the `PageGeometry`
+/// deviation note applies: the fields are bools and an optional
+/// [`PdfPermissions`], exactly as returned, nothing to re-type; `==` is
+/// structural (the four fields).
+#[pyclass]
+pub struct PdfSecurity {
+    inner: tors::pdf_impl::PdfSecurity,
+}
+
+#[pymethods]
+impl PdfSecurity {
+    /// The document carries an `/Encrypt` entry (handler present, or the
+    /// trailer names one) — before and regardless of any authentication.
+    #[getter]
+    fn encrypted(&self) -> bool {
+        self.inner.encrypted
+    }
+
+    /// The content was readable under the credentials THIS call held:
+    /// the supplied password's result when one was given, else the
+    /// empty-password open law (`password=None` MEANS the implicit
+    /// empty attempt, never "no attempt").
+    #[getter]
+    fn unlocked_with_supplied_password(&self) -> bool {
+        self.inner.unlocked_with_supplied_password
+    }
+
+    /// The declared `/P` permission flags (a `PdfPermissions`, or None):
+    /// None when unencrypted AND when the /Encrypt dict fails to
+    /// initialize; Some otherwise, INCLUDING pre-authentication. /P is
+    /// advisory (§7.6.3.2): the probe reports, callers enforce.
+    #[getter]
+    fn permissions(&self) -> Option<PdfPermissions> {
+        self.inner.permissions.map(|p| PdfPermissions { inner: p })
+    }
+
+    /// The empty password authenticated (the owner-password-only
+    /// shape): an inference from the open's own single implicit empty
+    /// attempt, never a credential-kind probe — an empty OWNER password
+    /// with a non-empty USER password also reports true. Honest
+    /// meaning: "the empty string opens this document".
+    #[getter]
+    fn owner_password_only(&self) -> bool {
+        self.inner.owner_password_only
+    }
+
+    /// Structural equality (all four fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        security_repr(&self.inner)
+    }
+}
+
+/// The `PdfSecurity` repr, the Python shape (the repr law: never the
+/// Rust Debug).
+fn security_repr(security: &tors::pdf_impl::PdfSecurity) -> String {
+    let py_bool = |value: bool| if value { "True" } else { "False" };
+    let permissions = match &security.permissions {
+        Some(_) => "PdfPermissions(...)".to_string(),
+        None => "None".to_string(),
+    };
+    format!(
+        "PdfSecurity(encrypted={}, unlocked_with_supplied_password={}, permissions={}, owner_password_only={})",
+        py_bool(security.encrypted),
+        py_bool(security.unlocked_with_supplied_password),
+        permissions,
+        py_bool(security.owner_password_only),
+    )
+}
+
+/// One decoded `/P` permission flag set (`pdf_security`'s
+/// `permissions`): the eight named bits of the §7.6.3.2 Table 22 decode,
+/// plus `raw_p`, the raw `/P` integer. The named bits are what callers
+/// enforcing a policy should read; `raw_p` is provenance.
+///
+/// Exposed DIRECTLY (no Python wrapper view) — the `PageGeometry`
+/// deviation note applies; `==` is structural (the nine fields).
+#[pyclass]
+pub struct PdfPermissions {
+    inner: tors::pdf_impl::PdfPermissions,
+}
+
+#[pymethods]
+impl PdfPermissions {
+    /// Bit 3: print (low resolution).
+    #[getter]
+    fn print_low_res(&self) -> bool {
+        self.inner.print_low_res
+    }
+
+    /// Bit 4: modify (other than annotation / form fill).
+    #[getter]
+    fn modify(&self) -> bool {
+        self.inner.modify
+    }
+
+    /// Bit 5: copy text and graphics.
+    #[getter]
+    fn copy(&self) -> bool {
+        self.inner.copy
+    }
+
+    /// Bit 6: annotate and form-fill.
+    #[getter]
+    fn annotate(&self) -> bool {
+        self.inner.annotate
+    }
+
+    /// Bit 9 (rev ≥ 3): fill interactive form fields.
+    #[getter]
+    fn fill_forms(&self) -> bool {
+        self.inner.fill_forms
+    }
+
+    /// Bit 10 (rev ≥ 3): extract for accessibility.
+    #[getter]
+    fn accessibility(&self) -> bool {
+        self.inner.accessibility
+    }
+
+    /// Bit 11 (rev ≥ 3): assemble (insert/rotate/delete pages).
+    #[getter]
+    fn assemble(&self) -> bool {
+        self.inner.assemble
+    }
+
+    /// Bit 12 (rev ≥ 3): print high resolution.
+    #[getter]
+    fn print_high_res(&self) -> bool {
+        self.inner.print_high_res
+    }
+
+    /// The raw `/P` integer, the engine's `*i as i32` view: a `/P`
+    /// outside i32 (e.g. 4294967292) reports truncated (−4) — lossless
+    /// ONLY within i32, the two's-complement form the spec itself
+    /// writes. Prefer the named bits; keep this for provenance.
+    #[getter]
+    fn raw_p(&self) -> i32 {
+        self.inner.raw_p
+    }
+
+    /// Structural equality (all nine fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        permissions_repr(&self.inner)
+    }
+}
+
+/// The `PdfPermissions` repr, the Python shape.
+fn permissions_repr(permissions: &tors::pdf_impl::PdfPermissions) -> String {
+    let py_bool = |value: bool| if value { "True" } else { "False" };
+    format!(
+        "PdfPermissions(print_low_res={}, modify={}, copy={}, annotate={}, \
+         fill_forms={}, accessibility={}, assemble={}, print_high_res={}, raw_p={})",
+        py_bool(permissions.print_low_res),
+        py_bool(permissions.modify),
+        py_bool(permissions.copy),
+        py_bool(permissions.annotate),
+        py_bool(permissions.fill_forms),
+        py_bool(permissions.accessibility),
+        py_bool(permissions.assemble),
+        py_bool(permissions.print_high_res),
+        permissions.raw_p,
+    )
 }
 
 /// The `backend="anydoc"` capability probe's GIL-side half
@@ -3201,6 +3649,8 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Table>()?;
     m.add_class::<Row>()?;
     m.add_class::<Cell>()?;
+    m.add_class::<PdfSecurity>()?;
+    m.add_class::<PdfPermissions>()?;
     m.add_function(wrap_pyfunction!(page_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(page_layout, m)?)?;
     m.add_function(wrap_pyfunction!(page_tables, m)?)?;
@@ -3208,6 +3658,8 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pdf_extract, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_link_uris, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_page_count, m)?)?;
+    m.add_function(wrap_pyfunction!(pdf_page_labels, m)?)?;
+    m.add_function(wrap_pyfunction!(pdf_security, m)?)?;
     m.add_function(wrap_pyfunction!(to_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(to_text, m)?)?;
     m.add_function(wrap_pyfunction!(sniff, m)?)?;

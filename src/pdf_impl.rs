@@ -147,6 +147,7 @@ use pdf_oxide::document::PdfDocument;
 // Public: the payload crate's error mapping and `documents_impl`'s
 // `PagesError` both name this type through `pdf_impl`.
 pub use pdf_oxide::Error as PdfError;
+use pdf_oxide::extractors::{PageLabelExtractor, PageLabelRange, PageLabelStyle};
 use pdf_oxide::{AnnotationSubtype, LinkAction};
 
 /// One `pdf_extract` result: the per-page plain text and the whole-document
@@ -756,6 +757,179 @@ pub fn page_count(bytes: Vec<u8>, password: Option<&str>) -> Result<usize, PdfEr
     )
 }
 
+/// The page-labels probe (ISO 32000 §12.4.2, the numbering tree): for
+/// every page, the label a reader displays ("i", "A-1", "12"), or `None`
+/// where the page declares no label. `None` is reserved for "no covering
+/// range" — no `/PageLabels` tree at all (every page `None`), or pages
+/// before the tree's first range (gaps exist only there: the tree is
+/// sorted by start page and a range covers to the next one's start) — the
+/// caller's fabricate-an-ordinal signal. A DECLARED label is always
+/// `Some`, including the empty string: a styleless range (`/S` absent)
+/// with no prefix declares the empty label (the engine's own render).
+///
+/// The engine walk: [`PageLabelExtractor::extract`], the numbering tree
+/// only — catalog `/PageLabels`, `/Nums`/`/Kids`, nothing else — so the
+/// cost is a few objects, rotation and crop irrelevant. The covering rule
+/// is the engine's minus the fallback, replicated here and never reused
+/// from the fabricating wrappers ([`PageLabelExtractor::get_label`] /
+/// `all_page_labels` fabricate a 1-based ordinal for uncovered pages,
+/// which #207 forbids): the LAST range in the extractor's stable-sorted
+/// vec with `start_page ≤ i` covers page `i` (two ranges sharing a start
+/// page resolve to the last in traversal order — root `/Nums` before
+/// `/Kids`, kids in array order; a negative `/Nums` key is dropped at
+/// parse; a range whose start page is past the last page is kept and
+/// simply never covers).
+///
+/// The arithmetic is u64/checked by construction here, NOT the engine's
+/// [`PageLabelRange::format_label`]: that formatter adds
+/// `u32 + u32` (a legal `/St 4294967294` panics in debug and wraps to
+/// `"0"` in release two pages later) and truncates the `/St` integer to
+/// u32 first (`/St 5000000000` reads back as 705032704). The u64 render
+/// keeps the engine's per-style spellings — decimal, subtractive Roman
+/// (unbounded: 4000 is "MMMM"), bijective base-26 alpha (Z wraps to AA) —
+/// so a legal `/St` renders without panic or wrap, while an over-u32 `/St`
+/// carries the engine's own truncation into the visible label (the value
+/// the PDF's /St literally names is not representable; the first
+/// rendered number is still the truncated one).
+///
+/// The None ladder (failures raise; the per-page None is the only soft
+/// answer): door/parse/page-count failures raise — document-level;
+/// no `/PageLabels` → every page `None`; an `extract()` ERROR (a
+/// non-dict `/PageLabels`, a non-dict tree node INCLUDING a `/Kids`
+/// member, a non-dict label entry, a non-dict catalog, any
+/// `load_object` failure) → every page `None` — the content-read-failure
+/// law (a failed read of the reported thing is the empty answer),
+/// documented here as a MASKING: a corrupt tree is presented as "no
+/// labels", acceptable because the caller's fallback for both is the
+/// same ordinal; depth-cap/cycle tree walks degrade engine-side to the
+/// ranges found so far (a warning, not an error). A covered page whose
+/// range is styleless with no prefix is `Some("")` — declared empty. A
+/// prefix that fails to decode (unmapped PDFDocEncoding bytes are
+/// dropped; invalid UTF-16 decodes to nothing) is silently lost: with
+/// `/S` absent the page still answers `Some("")` (styleless +
+/// no-prefix), with a style it answers the bare number.
+///
+/// The door: page labels are read from ENCRYPTED string objects, and the
+/// extractor is NOT auth-gated engine-side — on a locked document it
+/// returns ciphertext prefixes (`Èu1`) with no error. [`open`] is the
+/// ONLY gate: never call the extractor outside it, and a user-locked
+/// document answers the door's `EncryptedPdf` refusal here like every
+/// other entry (an owner-password-only one authenticates at open and
+/// reads the decrypted prefixes). Zero pages: an empty vec (length is
+/// always [`PdfDocument::page_count`]). Runs under
+/// [`with_depth_headroom`], like every entry point.
+pub fn page_labels(
+    bytes: Vec<u8>,
+    password: Option<&str>,
+) -> Result<Vec<Option<String>>, PdfError> {
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            let doc = open(bytes, password.as_deref())?;
+            let count = doc.page_count()?;
+            // The door comment (spec R7): this extractor is NOT
+            // auth-gated engine-side and returns ciphertext prefixes on
+            // locked files — `open()` above is the ONLY gate. An extract
+            // ERROR is the all-None masking the docstring states (the
+            // content-read-failure law), never a raise.
+            let ranges = PageLabelExtractor::extract(&doc).unwrap_or_default();
+            Ok((0..count)
+                .map(|page| render_page_label(&ranges, page))
+                .collect())
+        },
+        pdf_error_identity,
+    )
+}
+
+/// One page's label: the covering range's render, or `None` where no
+/// range covers (the engine's covering rule replicated — see
+/// [`page_labels`]; never [`PageLabelExtractor::get_label`], which
+/// fabricates an ordinal fallback).
+fn render_page_label(ranges: &[PageLabelRange], page: usize) -> Option<String> {
+    let range = ranges.iter().rev().find(|r| r.start_page <= page)?;
+    // start_value is the engine's u32 (an over-u32 /St is the engine's
+    // own truncation, already applied at parse); the render arithmetic is
+    // u64, so no legal value panics or wraps (format_label's u32 + u32
+    // does both — page_labels's docstring).
+    let number = range.start_value as u64 + (page - range.start_page) as u64;
+    Some(render_label_number(
+        range.style,
+        number,
+        range.prefix.as_deref(),
+    ))
+}
+
+/// The per-style render, the engine's spellings on u64 arithmetic
+/// ([`render_page_label`]): decimal; subtractive Roman, unbounded (no
+/// u32 ceiling: 4000 is "MMMM"); bijective base-26 alpha (1=A … 26=Z,
+/// 27=AA — no zero glyph, so Z wraps to AA); styleless renders the empty
+/// string (the prefix, alone, if any).
+fn render_label_number(style: PageLabelStyle, number: u64, prefix: Option<&str>) -> String {
+    let rendered = match style {
+        PageLabelStyle::Decimal => number.to_string(),
+        PageLabelStyle::RomanUpper => render_roman(number, true),
+        PageLabelStyle::RomanLower => render_roman(number, false),
+        PageLabelStyle::AlphaUpper => render_alpha(number, true),
+        PageLabelStyle::AlphaLower => render_alpha(number, false),
+        // The engine's own render: an empty string, prefix included.
+        PageLabelStyle::None => String::new(),
+    };
+    match prefix {
+        Some(prefix) => format!("{prefix}{rendered}"),
+        None => rendered,
+    }
+}
+
+/// Subtractive Roman numerals, the engine's table on u64 (unbounded: one
+/// "m" pair per thousand, no ceiling — [`page_labels`]'s docstring).
+fn render_roman(mut n: u64, uppercase: bool) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let numerals = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut result = String::new();
+    for (value, numeral) in numerals.iter() {
+        while n >= *value {
+            result.push_str(numeral);
+            n -= *value;
+        }
+    }
+    if uppercase {
+        result.to_uppercase()
+    } else {
+        result
+    }
+}
+
+/// Bijective base-26 (1=A, 26=Z, 27=AA), the engine's algorithm on u64.
+fn render_alpha(mut n: u64, uppercase: bool) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let base = if uppercase { b'A' } else { b'a' };
+    let mut result = String::new();
+    while n > 0 {
+        n -= 1;
+        result.insert(0, (base + (n % 26) as u8) as char);
+        n /= 26;
+    }
+    result
+}
+
 /// The cheap text-vs-image preflight: page count plus the image-only page
 /// list, no content conversion. Encrypted documents fail closed
 /// (pdf_oxide's security rule, propagated as-is): a security state is never
@@ -776,6 +950,191 @@ pub fn classify(bytes: Vec<u8>, password: Option<&str>) -> Result<Classification
                     .map(|k| PageKind::from_engine(*k))
                     .collect(),
                 pages_needing_ocr: classification.pages_needing_ocr,
+            })
+        },
+        pdf_error_identity,
+    )
+}
+
+/// One decoded `/P` permission flag set ([`security`]): the engine's
+/// Table 22 decode, carried under this seam's own name — the engine's
+/// type never crosses the seam (the payload's pyclass wraps THIS type,
+/// the way `PageBox` maps to the shared `PageGeometry`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PdfPermissions {
+    /// Bit 3: print (low resolution).
+    pub print_low_res: bool,
+    /// Bit 4: modify (other than annotation / form fill).
+    pub modify: bool,
+    /// Bit 5: copy text and graphics.
+    pub copy: bool,
+    /// Bit 6: annotate and form-fill.
+    pub annotate: bool,
+    /// Bit 9 (rev ≥ 3): fill interactive form fields.
+    pub fill_forms: bool,
+    /// Bit 10 (rev ≥ 3): extract for accessibility.
+    pub accessibility: bool,
+    /// Bit 11 (rev ≥ 3): assemble (insert/rotate/delete pages).
+    pub assemble: bool,
+    /// Bit 12 (rev ≥ 3): print high resolution.
+    pub print_high_res: bool,
+    /// The raw `/P` integer, the engine's `*i as i32` view: a `/P`
+    /// outside i32 (e.g. 4294967292) reports truncated (−4) — lossless
+    /// ONLY within i32, the two's-complement form the spec itself
+    /// writes. Callers enforcing a policy should prefer the named bits
+    /// (advisory per §7.6.3.2) and keep `raw_p` for provenance.
+    pub raw_p: i32,
+}
+
+impl From<pdf_oxide::encryption::PdfPermissions> for PdfPermissions {
+    /// The engine's decoded flag set into this seam's own type: the
+    /// fields are already the same law (the 8 named Table 22 bits plus
+    /// the raw `/P`), so this is a field copy, the `PageBox` precedent.
+    fn from(engine: pdf_oxide::encryption::PdfPermissions) -> Self {
+        PdfPermissions {
+            print_low_res: engine.print_low_res,
+            modify: engine.modify,
+            copy: engine.copy,
+            annotate: engine.annotate,
+            fill_forms: engine.fill_forms,
+            accessibility: engine.accessibility,
+            assemble: engine.assemble,
+            print_high_res: engine.print_high_res,
+            raw_p: engine.raw_p,
+        }
+    }
+}
+
+/// One `pdf_security` answer (issue #208): the document's encryption
+/// state, what the credentials THIS call held could read, the declared
+/// `/P` permission flags, and the owner-password-only inference. The
+/// four fields are read together (the reading rule, stated in
+/// [`security`]'s docstring): they are not one boolean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PdfSecurity {
+    /// The document carries an `/Encrypt` entry (handler present, or the
+    /// trailer names one) — before and regardless of any authentication.
+    pub encrypted: bool,
+    /// Whether the content was readable under the credentials this call
+    /// held: the supplied password's result when one was given, else the
+    /// empty-password open law (`password=None` MEANS the implicit empty
+    /// attempt, never "no attempt"). True for an unencrypted document,
+    /// an owner-password-only one (the empty string opens it), and a
+    /// locked one opened with its password; false for a locked document
+    /// held with no password or a wrong one. NOT "readable" outright:
+    /// see `owner_password_only` for the wrong-supplied-password trap.
+    pub unlocked_with_supplied_password: bool,
+    /// The declared `/P` permission flags: `None` when unencrypted AND
+    /// when the `/Encrypt` dict fails to initialize (malformed shape,
+    /// unsupported `/V`/`/R`, a crypto-policy denial — three states that
+    /// collapse into `encrypted && permissions.is_none()` and are not
+    /// distinguishable here); `Some` otherwise, INCLUDING
+    /// pre-authentication (the raw `/P` off the parsed dict — advisory
+    /// per §7.6.3.2: this probe reports, callers enforce).
+    pub permissions: Option<PdfPermissions>,
+    /// The empty password authenticated (encrypted && the open's own
+    /// implicit empty attempt succeeded): the owner-password-only shape,
+    /// whose content surfaces read fine without any password. An
+    /// inference from the empty-password attempt, never a
+    /// credential-kind probe (the engine never exposes user-vs-owner):
+    /// an empty OWNER password with a non-empty USER password also
+    /// reports true. Honest meaning: "the empty string opens this
+    /// document".
+    pub owner_password_only: bool,
+}
+
+/// The typed encryption/permissions probe (issue #208): report the
+/// document's security state, never unlock beyond the supplied password,
+/// never raise for a state the caller asked about. Composes with the
+/// door WITHOUT being the door: the fail-closed raise stays every
+/// content surface's answer (including this family's, on a locked
+/// document), while THIS surface answers `{encrypted, …}` instead —
+/// state reporting, not an empty-answer masking.
+///
+/// The pass: [`scan_document`] → [`PdfDocument::from_bytes`] (the open's
+/// own two layers, but NOT [`open`]'s door check) → `is_encrypted()` →
+/// `is_authenticated()` captured IMMEDIATELY (the only authentication
+/// that can have happened at that point is the auto-try of the EMPTY
+/// password, so the capture IS "the empty password authenticates" — no
+/// second attempt is ever made for it; a failed empty attempt poisons
+/// nothing: the handler's key stays unset and the object cache is only
+/// ever cleared ON the unauthenticated→authenticated transition) → an
+/// optional supplied-password authenticate → `permissions()`.
+///
+/// Reporting, not raising (the uniformity law): a wrong password is
+/// `Ok(false)`, reported; a locked document with no password reports
+/// `{true, false, …}`; a malformed `/Encrypt` dict reports
+/// `{true, false, None, false}` WITH OR WITHOUT a supplied password —
+/// the report must not depend on the caller's password choice. Raises
+/// only the family's own refusals: the depth scans, a parse failure,
+/// IO, and nothing else. The three states conflated into
+/// `encrypted && permissions.is_none()` — a malformed `/Encrypt`, an
+/// unsupported `/V`/`/R`, and a crypto-policy denial
+/// (`fips_strict`'s R≤4/MD5 refusal) — are not distinguishable in v1:
+/// a caller cannot tell "needs a password" from "this build/policy
+/// refuses the cipher" (deliberate; no typed flag).
+///
+/// The reading rule the fields imply: `readable = !encrypted ||
+/// unlocked_with_supplied_password || owner_password_only`. The DOOR is
+/// deliberately stricter: a wrong supplied password raises on every
+/// content surface even when `owner_password_only` is true (the
+/// owner-only + wrong-password cell reports
+/// `{true, false, Some, true}` while `page_count(…, "wrong")` raises) —
+/// do not read `unlocked == false` as "locked", read the rule.
+///
+/// The others: a supplied password on an UNENCRYPTED document is a no-op
+/// (the engine answers `Ok(true)` — nothing to authenticate), never an
+/// error; one password is tried per call (the supplied one) plus the
+/// open's own single implicit empty attempt — no amplification, no
+/// dictionary walk; `permissions` is advisory per §7.6.3.2 (the probe
+/// reports, callers enforce); and `Some(permissions)` vs `None` is
+/// "needs a password" vs "no password answer exists in this build" —
+/// the conflation above. Runs under [`with_depth_headroom`], like every
+/// entry point.
+pub fn security(bytes: Vec<u8>, password: Option<&str>) -> Result<PdfSecurity, PdfError> {
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            scan_document(&bytes)?;
+            // The auto-try of the empty password happens here, inside
+            // from_bytes, and nowhere else unless a password is supplied.
+            let doc = PdfDocument::from_bytes(bytes)?;
+            // Safe pre-init (handler first, then the trailer).
+            let encrypted = doc.is_encrypted();
+            // Fail-closed preflight, captured BEFORE any supplied
+            // attempt: for a malformed/policy-denied handler this is
+            // `false`, which is the honest answer (spec R3: the only
+            // authentication before this line is from_bytes's own empty
+            // attempt, so no separate probe is needed or made).
+            let empty_unlocks = doc.is_authenticated();
+            let mut unlocked = empty_unlocks;
+            if let Some(pw) = password.as_deref() {
+                unlocked = match doc.authenticate(pw.as_bytes()) {
+                    Ok(v) => v,
+                    // A handler that could not initialize (malformed
+                    // /Encrypt, unsupported V/R, fips_strict's R<=4 MD5
+                    // denial) is ALREADY described by
+                    // encrypted=true + permissions=None: report it,
+                    // never raise on the caller's choice to pass a
+                    // password (the report must not depend on whether
+                    // one was supplied). The predicate's arms, verified:
+                    // a live handler always has permissions (`Some`);
+                    // an init failure always has `None`; this arm is
+                    // defense-in-depth for anything else.
+                    Err(_) if encrypted && doc.permissions().is_none() => false,
+                    Err(e) => return Err(e),
+                };
+            }
+            let owner_password_only = encrypted && empty_unlocks;
+            // Pre-auth this is the raw /P off the parsed dict (measured
+            // `Some(-4)` on a locked fixture): only handler
+            // CONSTRUCTION is gated, and its failure is the None above.
+            let permissions = doc.permissions();
+            Ok(PdfSecurity {
+                encrypted,
+                unlocked_with_supplied_password: unlocked,
+                permissions: permissions.map(PdfPermissions::from),
+                owner_password_only,
             })
         },
         pdf_error_identity,
@@ -5397,6 +5756,785 @@ mod tests {
         }
         for handle in handles {
             assert_eq!(handle.join().unwrap(), expected);
+        }
+    }
+
+    // --- the page-labels probe (issue #207; the A1 ceiling, the R7 door
+    // --- comment; evidence: /tmp/opencode/probe modes labels/labelsoverflow
+    // --- over /tmp/opencode/fixtures/labels_*.pdf, the preserved oracle) ---
+
+    /// The labels fixture builder (the Python suite's `pages_doc`
+    /// pattern): `count` bare MediaBox-only pages, the catalog carrying
+    /// `catalog_extra` verbatim (the `/PageLabels` fragment).
+    fn labeled_pdf(count: usize, catalog_extra: &str) -> Vec<u8> {
+        let kids = (0..count)
+            .map(|page| format!("{} 0 R", 3 + page))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut objects: Vec<Vec<u8>> = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R{catalog_extra} >>").into_bytes(),
+            format!("<< /Type /Pages /Kids [{kids}] /Count {count} >>").into_bytes(),
+        ];
+        objects.extend(
+            (0..count).map(|_| b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec()),
+        );
+        let refs: Vec<&[u8]> = objects.iter().map(|o| o.as_slice()).collect();
+        objects_pdf(&refs)
+    }
+
+    /// The full style matrix, every cell the spec pins, measured against
+    /// the engine on the probe fixtures (values identical there): the
+    /// three numbered styles with /St offsets and prefixes, prefix-only
+    /// (styleless), an unknown style NAME (styleless — the same law),
+    /// a NON-NAME `/S` (keeps the default Decimal — R5's measured
+    /// correction), `/St 0` and `/St -3` (default 1), and a UTF-16BE
+    /// prefix.
+    #[test]
+    fn page_labels_serve_the_style_matrix() {
+        let cases: Vec<(&str, Vec<Option<&str>>)> = vec![
+            // decimal, no tree extras
+            (
+                " /PageLabels << /Nums [0 << /S /D >>] >>",
+                vec![Some("1"), Some("2")],
+            ),
+            // roman lower from value 3 over a 6-page doc + decimal "A-" + styleless "cover"
+            (
+                " /PageLabels << /Nums [0 << /S /r /St 3 >> 3 << /S /D /P (A-) >> 5 << /P (cover) >>] >>",
+                vec![
+                    Some("iii"),
+                    Some("iv"),
+                    Some("v"),
+                    Some("A-1"),
+                    Some("A-2"),
+                    Some("cover"),
+                ],
+            ),
+            // alpha upper with prefix and offset
+            (
+                " /PageLabels << /Nums [0 << /S /A /St 4 /P (p) >>] >>",
+                vec![Some("pD"), Some("pE")],
+            ),
+            // alpha lower from 1
+            (
+                " /PageLabels << /Nums [0 << /S /a >>] >>",
+                vec![Some("a"), Some("b"), Some("c")],
+            ),
+            // prefix-only (/S absent): the constant label, every page
+            (
+                " /PageLabels << /Nums [0 << /P (App-) >>] >>",
+                vec![Some("App-"), Some("App-")],
+            ),
+            // styleless and prefixless: the DECLARED empty label
+            (
+                " /PageLabels << /Nums [0 << /S /D >> 1 << >>] >>",
+                vec![Some("1"), Some("")],
+            ),
+            // unknown style NAME: style None (prefix-only), same law
+            (
+                " /PageLabels << /Nums [0 << /S /X /P (p) >>] >>",
+                vec![Some("p"), Some("p")],
+            ),
+            // /S present but NOT a name: the default Decimal SURVIVES (R5)
+            (
+                " /PageLabels << /Nums [0 << /S 7 /P (p) >>] >>",
+                vec![Some("p1"), Some("p2")],
+            ),
+            // /St 0 and /St -3: not positive, so the default 1
+            (
+                " /PageLabels << /Nums [0 << /S /D /St 0 >>] >>",
+                vec![Some("1"), Some("2")],
+            ),
+            (
+                " /PageLabels << /Nums [0 << /S /D /St -3 >>] >>",
+                vec![Some("1"), Some("2")],
+            ),
+            // UTF-16BE prefix ("Annex " with the BOM)
+            (
+                " /PageLabels << /Nums [0 << /S /D /P <FEFF0041006E006E006500780020> >>] >>",
+                vec![Some("Annex 1"), Some("Annex 2")],
+            ),
+        ];
+        for (fragment, expected) in cases {
+            let count = expected.len();
+            let labels = page_labels(labeled_pdf(count, fragment), None).unwrap();
+            let expected: Vec<Option<String>> = expected
+                .into_iter()
+                .map(|s| s.map(str::to_string))
+                .collect();
+            assert_eq!(labels, expected, "fragment:{fragment}");
+        }
+    }
+
+    /// The render arithmetic is u64 here, never
+    /// [`PageLabelRange::format_label`]'s `u32 + u32`: a legal
+    /// `/St 4294967294` renders through the wrap point without panic and
+    /// without the engine's release-wrap to `"0"` (the probe's
+    /// labelsoverflow mode measured PANIC in debug / `"0"` in release on
+    /// exactly these bytes). An over-u32 `/St` is the ENGINE's own
+    /// truncation at parse (`as u32`), already applied before any render:
+    /// 5000000000 reads back as 705032704, and the rendered numbers carry
+    /// that truncated value (the ceiling comment: /St above u32::MAX is
+    /// not representable in the engine's range struct, and the label the
+    /// reader displays is the truncated one).
+    #[test]
+    fn page_labels_render_in_u64_no_panic_no_wrap() {
+        // /St 4294967294 + 2 pages: u64 render crosses u32::MAX exactly
+        let labels = page_labels(
+            labeled_pdf(3, " /PageLabels << /Nums [0 << /S /D /St 4294967294 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                Some("4294967294".to_string()),
+                Some("4294967295".to_string()),
+                Some("4294967296".to_string()),
+            ]
+        );
+        // /St 5000000000: the engine's u32 truncation (5000000000 mod
+        // 2^32 = 705032704), rendered without panic
+        let labels = page_labels(
+            labeled_pdf(3, " /PageLabels << /Nums [0 << /S /D /St 5000000000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                Some("705032704".to_string()),
+                Some("705032705".to_string()),
+                Some("705032706".to_string()),
+            ]
+        );
+    }
+
+    /// The alpha style is bijective base-26 (no zero glyph): 26 is "Z",
+    /// 27 wraps to "AA" — pinned (R14), and Roman is unbounded on the u64
+    /// render: 4000 is "mmmm" (the engine's subtractive table, one "m"
+    /// per thousand, no u32 ceiling).
+    #[test]
+    fn page_labels_alpha_wraps_z_to_aa_and_roman_is_unbounded() {
+        let labels = page_labels(
+            labeled_pdf(3, " /PageLabels << /Nums [0 << /S /A /St 26 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                Some("Z".to_string()),
+                Some("AA".to_string()),
+                Some("AB".to_string())
+            ]
+        );
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /r /St 4000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![Some("mmmm".to_string())]);
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /R /St 3999 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![Some("MMMCMXCIX".to_string())]);
+    }
+
+    /// The covering rule is "last in the stable-sorted vec with
+    /// start_page ≤ i", so two ranges sharing a start page resolve to the
+    /// LAST in traversal order — within one /Nums array ("second" beats
+    /// "first") and across a /Kids split ("kid" beats "root"; root /Nums
+    /// is traversed before the kids). Measured on the probe fixtures
+    /// (labels_dup_start / labels_dup_kids).
+    #[test]
+    fn page_labels_duplicate_start_page_last_in_traversal_wins() {
+        let labels = page_labels(
+            labeled_pdf(
+                2,
+                " /PageLabels << /Nums [0 << /S /D /P (first) >> 0 << /S /D /P (second) >>] >>",
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            labels,
+            vec![Some("second1".to_string()), Some("second2".to_string())]
+        );
+        // across the /Kids split: root /Nums first, then the kid — the
+        // kid's range is the last with start_page 0
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D /P (root) >>] /Kids [5 0 R] >> >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Nums [0 << /S /D /P (kid) >>] >>".to_vec(),
+        ];
+        let refs: Vec<&[u8]> = objects.iter().map(|o| o.as_slice()).collect();
+        let labels = page_labels(objects_pdf(&refs), None).unwrap();
+        assert_eq!(
+            labels,
+            vec![Some("kid1".to_string()), Some("kid2".to_string())]
+        );
+    }
+
+    /// The hard-error class maps to all-None (the documented masking —
+    /// the content-read-failure law), NOT a raise and NOT a partial list:
+    /// a non-dict /PageLabels, a non-dict label entry, and a non-dict
+    /// /Kids MEMBER (R5's correction: the Kids member is a hard extract
+    /// error, not a degrade; the same all-None list as "no tree" — the
+    /// indistinguishability is the pinned contract).
+    #[test]
+    fn page_labels_hard_errors_are_masked_to_all_none() {
+        // /PageLabels an integer
+        let labels = page_labels(labeled_pdf(2, " /PageLabels 42"), None).unwrap();
+        assert_eq!(labels, vec![None, None]);
+        // a label entry that is not a dict
+        let labels = page_labels(labeled_pdf(2, " /PageLabels << /Nums [0 7] >>"), None).unwrap();
+        assert_eq!(labels, vec![None, None]);
+        // a non-dict /Kids member: a HARD error (never a ranges-so-far
+        // degrade), and the surface still answers all-None
+        let labels = page_labels(
+            labeled_pdf(2, " /PageLabels << /Kids [7] /Nums [0 << /S /D >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![None, None]);
+        // and the no-tree document answers the same list (the caller's
+        // fallback is the same ordinal either way — the masking stated)
+        let labels = page_labels(labeled_pdf(2, ""), None).unwrap();
+        assert_eq!(labels, vec![None, None]);
+    }
+
+    /// A prefix that fails to decode is silently lost (unmapped
+    /// PDFDocEncoding bytes dropped, invalid UTF-16 → None): with `/S`
+    /// absent the page answers `Some("")` (styleless + no prefix — R13's
+    /// law), with a style it answers the bare number.
+    #[test]
+    fn page_labels_undecodable_prefix_is_silently_lost() {
+        // invalid UTF-16: the BOM says UTF-16BE, the units are lone surrogates
+        let labels = page_labels(
+            labeled_pdf(2, " /PageLabels << /Nums [0 << /P <FEFFD800D800> >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![Some(String::new()), Some(String::new())]);
+        // with a style the bare numbers still render
+        let labels = page_labels(
+            labeled_pdf(
+                2,
+                " /PageLabels << /Nums [0 << /S /D /P <FEFFD800D800> >>] >>",
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![Some("1".to_string()), Some("2".to_string())]);
+    }
+
+    /// The structural laws: leading gaps (pages before the first range
+    /// are None — the ONLY None class a covered tree can produce), a
+    /// range past the last page is kept and never covers, the length is
+    /// always page_count, a /Kids intermediate works, and zero pages is
+    /// an empty vec even with a tree declared.
+    #[test]
+    fn page_labels_structure_laws() {
+        // leading gap: pages 0,1 uncovered
+        let labels = page_labels(
+            labeled_pdf(4, " /PageLabels << /Nums [2 << /S /D >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            labels,
+            vec![None, None, Some("1".to_string()), Some("2".to_string())]
+        );
+        // kept-unused: a range starting past the last page never clips
+        let labels = page_labels(
+            labeled_pdf(
+                3,
+                " /PageLabels << /Nums [0 << /S /D >> 10 << /S /r /St 9 >>] >>",
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                Some("1".to_string()),
+                Some("2".to_string()),
+                Some("3".to_string())
+            ]
+        );
+        // /Kids intermediate: two leaves, one covering page each
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R /PageLabels 5 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Kids [6 0 R 7 0 R] >>".to_vec(),
+            b"<< /Nums [0 << /S /r >>] >>".to_vec(),
+            b"<< /Nums [1 << /S /D /P (B-) >>] >>".to_vec(),
+        ];
+        let refs: Vec<&[u8]> = objects.iter().map(|o| o.as_slice()).collect();
+        let labels = page_labels(objects_pdf(&refs), None).unwrap();
+        assert_eq!(labels, vec![Some("i".to_string()), Some("B-1".to_string())]);
+        // zero pages with a declared tree: [] (length == page_count == 0)
+        let labels = page_labels(
+            labeled_pdf(0, " /PageLabels << /Nums [0 << /S /D >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, Vec::<Option<String>>::new());
+        // and every fixture above already pinned length == page_count by
+        // the full-list asserts.
+    }
+
+    /// Page labels are tree data: rotation and crop change nothing (the
+    /// rotate/crop irrelevance pin — the same labels on a /Rotate 90 +
+    /// /CropBox page and a plain one).
+    #[test]
+    fn page_labels_ignore_rotation_and_crop() {
+        let fragment = " /PageLabels << /Nums [0 << /S /r /St 2 >>] >>";
+        let plain = labeled_pdf(2, fragment);
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /r /St 2 >>] >> >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate 90 /CropBox [50 50 562 742] >>".to_vec(),
+        ];
+        let refs: Vec<&[u8]> = objects.iter().map(|o| o.as_slice()).collect();
+        let rotated = objects_pdf(&refs);
+        assert_eq!(
+            page_labels(plain, None).unwrap(),
+            vec![Some("ii".to_string()), Some("iii".to_string())]
+        );
+        assert_eq!(
+            page_labels(rotated, None).unwrap(),
+            vec![Some("ii".to_string())]
+        );
+    }
+
+    /// An RC4-encrypted string's per-object key (Algorithm 1 over the
+    /// fixture's R2 file key): MD5(file_key || obj-num le3 || gen le2),
+    /// truncated to n+5 = 10 bytes. RC4 is its own inverse, so the same
+    /// call encrypts.
+    fn object_string_key(file_key: &[u8], obj: usize) -> Vec<u8> {
+        use md5::{Digest, Md5};
+        let mut hasher = Md5::new();
+        hasher.update(file_key);
+        // bound to locals: `update` takes `impl AsRef<[u8]>`, and a
+        // temporary's defaulted slice borrow is what clippy flags
+        let obj_le = (obj as u32).to_le_bytes();
+        let gen_le = 0u16.to_le_bytes();
+        hasher.update(&obj_le[..3]);
+        hasher.update(&gen_le[..]);
+        let digest = hasher.finalize();
+        digest[..10].to_vec()
+    }
+
+    /// The encrypted-with-`/PageLabels` fixture: a 6-page R2/V1 document
+    /// whose catalog carries the probe's numbering tree with the two
+    /// prefixes (`A-`, `cover`) RC4-encrypted as real string objects
+    /// under the (user-password) file key — the three-way door pin's
+    /// bytes (the pypdf-written fixture saltes per call, so the pin is
+    /// hand-built, byte-deterministic like every fixture here).
+    fn encrypted_labels_pdf(user_pw: &str, owner_pw: &str) -> Vec<u8> {
+        const ID0: [u8; 16] = [0x71; 16];
+        let owner_value = r2_owner_value(owner_pw.as_bytes());
+        let user_value = r2_user_value(user_pw.as_bytes(), &owner_value, -4, &ID0);
+        let file_key = r2_file_key(user_pw.as_bytes(), &owner_value, -4, &ID0);
+        // the prefixes live in object 1 (the catalog), so they encrypt
+        // under object 1's string key
+        let prefix_a = hex(&rc4(&object_string_key(&file_key, 1), b"A-"));
+        let prefix_cover = hex(&rc4(&object_string_key(&file_key, 1), b"cover"));
+        let catalog = format!(
+            "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /r /St 3 >> \
+             3 << /S /D /P <{prefix_a}> >> 5 << /P <{prefix_cover}> >>] >> >>"
+        );
+        let objects: Vec<Vec<u8>> = vec![
+            catalog.into_bytes(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R] /Count 6 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            format!(
+                "<< /Filter /Standard /V 1 /R 2 /O <{}> /U <{}> /P -4 >>",
+                hex(&owner_value),
+                hex(&user_value)
+            )
+            .into_bytes(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+        for (number, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", number + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in &offsets[1..] {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R /Encrypt 9 0 R /ID [<{}> <{}>] >>\n\
+                 startxref\n{xref_at}\n%%EOF",
+                objects.len() + 1,
+                hex(&ID0),
+                hex(&ID0)
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// The encrypted-with-labels fixture three ways (R7/A3): a
+    /// user-locked document raises the DOOR error (no answer at all —
+    /// the extractor engine-side is not auth-gated and would return
+    /// ciphertext prefixes on it, measured on the probe's sec_labels
+    /// fixture: `Èu1`; open() is the ONLY gate, so ciphertext can never
+    /// surface through this probe), a wrong password raises its own
+    /// error, and an owner-password-only document authenticates at open
+    /// and renders the DECRYPTED prefixes.
+    #[test]
+    fn page_labels_on_the_encrypted_fixture_three_ways() {
+        let user_locked = encrypted_labels_pdf("torque", "owner-pw");
+        let err = page_labels(user_locked.clone(), None).unwrap_err();
+        assert!(matches!(err, PdfError::EncryptedPdf), "{err}");
+        let err = page_labels(user_locked, Some("not-the-password")).unwrap_err();
+        assert!(err.to_string().contains("did not unlock"), "{err}");
+        // owner-only: the empty password authenticates, the decrypted
+        // prefixes come through — never ciphertext
+        let owner_only = encrypted_labels_pdf("", "owner-pw");
+        let labels = page_labels(owner_only.clone(), None).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                Some("iii".to_string()),
+                Some("iv".to_string()),
+                Some("v".to_string()),
+                Some("A-1".to_string()),
+                Some("A-2".to_string()),
+                Some("cover".to_string()),
+            ]
+        );
+        // the explicit empty password is the same call; and the data=/
+        // path= parity is the binding layer's (the core takes bytes)
+        assert_eq!(page_labels(owner_only, Some("")).unwrap(), labels);
+    }
+
+    // --- the pdf_security probe (issue #208; the R1 uniformity, the R3
+    // --- capture, the F16-scoped door agreement; evidence:
+    // --- /tmp/opencode/probe modes sec/sec-seq/secpolicy over
+    // --- /tmp/opencode/fixtures/sec_*.pdf) --------------------------------
+
+    /// The malformed-`/Encrypt` fixture builder: a valid two-page
+    /// document whose trailer names an /Encrypt dict of the given
+    /// (broken) body, with the /ID the handler needs to try.
+    fn malformed_encrypt_pdf(encrypt_body: &str) -> Vec<u8> {
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            encrypt_body.as_bytes().to_vec(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+        for (number, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", number + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in &offsets[1..] {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R /Encrypt 5 0 R \
+                 /ID [<00112233445566778899aabbccddeeff> <00112233445566778899aabbccddeeff>] >>\n\
+                 startxref\n{xref_at}\n%%EOF",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// The four-field matrix over the nine cells (spec §3): every cell
+    /// pinned, NONE raising — a wrong password is reported, a locked
+    /// document with no password reports, and the owner-only + wrong
+    /// password trap cell (`{true, false, Some, true}`) is named here.
+    #[test]
+    fn security_reports_the_nine_cell_matrix() {
+        let user_locked = encrypted_pdf("torque", "owner-pw");
+        let owner_only = encrypted_pdf("", "owner-pw");
+        let unencrypted = two_page_pdf("Alpha", "Beta");
+        let perms = |report: &PdfSecurity| report.permissions.unwrap();
+        // unencrypted: no /Encrypt, nothing to authenticate, no /P dict
+        let report = security(unencrypted.clone(), None).unwrap();
+        assert_eq!(
+            report,
+            PdfSecurity {
+                encrypted: false,
+                unlocked_with_supplied_password: true,
+                permissions: None,
+                owner_password_only: false,
+            }
+        );
+        // a password on an UNENCRYPTED document is a no-op (Ok(true)),
+        // never an error and never a state flip
+        let report = security(unencrypted, Some("anything")).unwrap();
+        assert!(report.unlocked_with_supplied_password && !report.encrypted);
+
+        // user-locked, all four password spellings
+        let report = security(user_locked.clone(), None).unwrap();
+        assert!(report.encrypted);
+        assert!(!report.unlocked_with_supplied_password);
+        assert!(!report.owner_password_only);
+        assert_eq!(perms(&report).raw_p, -4);
+        // -4 = all bits set except the low two: every NAMED bit is true
+        assert!(perms(&report).print_low_res);
+        assert!(perms(&report).modify);
+        // the explicit empty string takes the same arm as None (the
+        // empty password's authenticate answers false: reported)
+        let report = security(user_locked.clone(), Some("")).unwrap();
+        assert!(!report.unlocked_with_supplied_password && !report.owner_password_only);
+        // the right password unlocks
+        let report = security(user_locked.clone(), Some("torque")).unwrap();
+        assert_eq!(
+            (
+                report.encrypted,
+                report.unlocked_with_supplied_password,
+                report.owner_password_only
+            ),
+            (true, true, false)
+        );
+        assert_eq!(perms(&report).raw_p, -4);
+        // a wrong password is REPORTED (Ok(false)), not raised
+        let report = security(user_locked.clone(), Some("wrong")).unwrap();
+        assert_eq!(
+            (
+                report.encrypted,
+                report.unlocked_with_supplied_password,
+                report.owner_password_only
+            ),
+            (true, false, false)
+        );
+
+        // owner-password-only: the empty password opens it (None and ""
+        // spellings agree), the owner password also authenticates (the
+        // engine's Algorithm 5), a wrong one is the TRAP cell —
+        // unlocked=false yet owner_password_only=true: the document
+        // reads fine with NO password, and page_count(…, "wrong") raises
+        // on it (the door is stricter than the reading rule; see the
+        // agreement test).
+        let report = security(owner_only.clone(), None).unwrap();
+        assert_eq!(
+            (
+                report.encrypted,
+                report.unlocked_with_supplied_password,
+                report.owner_password_only
+            ),
+            (true, true, true)
+        );
+        let report = security(owner_only.clone(), Some("")).unwrap();
+        assert_eq!(
+            (
+                report.encrypted,
+                report.unlocked_with_supplied_password,
+                report.owner_password_only
+            ),
+            (true, true, true)
+        );
+        let report = security(owner_only.clone(), Some("owner-pw")).unwrap();
+        assert_eq!(
+            (
+                report.encrypted,
+                report.unlocked_with_supplied_password,
+                report.owner_password_only
+            ),
+            (true, true, true)
+        );
+        let report = security(owner_only, Some("wrong")).unwrap();
+        assert_eq!(
+            (
+                report.encrypted,
+                report.unlocked_with_supplied_password,
+                report.owner_password_only
+            ),
+            (true, false, true)
+        );
+        assert_eq!(perms(&report).raw_p, -4);
+    }
+
+    /// The conflation cells: a malformed `/Encrypt` dict, an unsupported
+    /// `/V`, and (child-process) a policy denial all report the SAME
+    /// `{true, false, None, false}` — with or without a supplied
+    /// password (R1's uniformity: the report must not depend on the
+    /// caller's password choice; the pre-R1 pass raised exactly there).
+    #[test]
+    fn security_conflation_cells_report_identically_with_or_without_a_password() {
+        // the empty /Encrypt dict (missing /Filter /O /U)
+        let empty = malformed_encrypt_pdf("<< >>");
+        for password in [None, Some("torque")] {
+            let report = security(empty.clone(), password).unwrap();
+            assert_eq!(
+                report,
+                PdfSecurity {
+                    encrypted: true,
+                    unlocked_with_supplied_password: false,
+                    permissions: None,
+                    owner_password_only: false,
+                },
+                "empty /Encrypt with password {password:?}"
+            );
+        }
+        // a bare-integer /Encrypt entry (invalid type)
+        let mut int_entry = malformed_encrypt_pdf("<< >>");
+        let patched = String::from_utf8(int_entry)
+            .unwrap()
+            .replace("/Encrypt 5 0 R", "/Encrypt 9")
+            .into_bytes();
+        int_entry = patched;
+        for password in [None, Some("torque")] {
+            let report = security(int_entry.clone(), password).unwrap();
+            assert_eq!(
+                (report.encrypted, report.unlocked_with_supplied_password),
+                (true, false),
+                "integer /Encrypt"
+            );
+            assert!(report.permissions.is_none() && !report.owner_password_only);
+        }
+        // an unsupported /V 99
+        let v99 = malformed_encrypt_pdf("<< /Filter /Standard /V 99 /R 9 /O <00> /U <00> /P -4 >>");
+        for password in [None, Some("torque")] {
+            let report = security(v99.clone(), password).unwrap();
+            assert_eq!(
+                report,
+                PdfSecurity {
+                    encrypted: true,
+                    unlocked_with_supplied_password: false,
+                    permissions: None,
+                    owner_password_only: false,
+                },
+                "/V 99 with password {password:?}"
+            );
+        }
+        // the unsupported-/V shape with a WELL-FORMED dict body reports
+        // permissions Some (the /P parses off the dict even though the
+        // handler cannot initialize — measured Some(-4) on the R4-bad
+        // cell), so the None cells above are specifically the
+        // handler-refused ones; the three-way conflation is exactly
+        // encrypted && permissions.is_none().
+        let r4_bad = malformed_encrypt_pdf(
+            "<< /Filter /Standard /V 2 /R 3 /Length 128 \
+             /O <0000000000000000000000000000000000000000000000000000000000000000> \
+             /U <0000000000000000000000000000000000000000000000000000000000000000> /P -4 >>",
+        );
+        let report = security(r4_bad, None).unwrap();
+        assert!(report.encrypted);
+        assert!(!report.unlocked_with_supplied_password);
+        assert_eq!(report.permissions.unwrap().raw_p, -4);
+    }
+
+    /// The `fips_strict` policy cell: crypto::set_policy is set-once and
+    /// process-global, so this cell runs in a CHILD re-execution of this
+    /// test binary (the crash suite's disposable-child discipline): with
+    /// the policy set, an R≤4/MD5 document is the policy-denial shape —
+    /// the SAME `{true, false, None, false}` report with and without a
+    /// password (the guard catches the policy error: encrypted &&
+    /// permissions None → reported false, never raised on the caller's
+    /// choice to pass one).
+    #[test]
+    fn the_fips_strict_policy_cell_reports_in_a_child_process() {
+        if std::env::var("TORS_PDF_PROBES_FIPS_CHILD").as_deref() == Ok("1") {
+            pdf_oxide::crypto::set_policy(pdf_oxide::crypto::SecurityPolicy::fips_strict())
+                .expect("the child process sets the policy exactly once");
+            let locked = encrypted_pdf("torque", "owner-pw");
+            for password in [None, Some("torque")] {
+                let report = security(locked.clone(), password).unwrap();
+                assert_eq!(
+                    report,
+                    PdfSecurity {
+                        encrypted: true,
+                        unlocked_with_supplied_password: false,
+                        permissions: None,
+                        owner_password_only: false,
+                    },
+                    "fips_strict R=2 with password {password:?}"
+                );
+            }
+            // the owner-only shape under the policy: the empty password
+            // cannot authenticate either (the handler never initialized)
+            let owner_only = encrypted_pdf("", "owner-pw");
+            let report = security(owner_only, None).unwrap();
+            assert_eq!(
+                report,
+                PdfSecurity {
+                    encrypted: true,
+                    unlocked_with_supplied_password: false,
+                    permissions: None,
+                    owner_password_only: false,
+                }
+            );
+            return;
+        }
+        let exe = std::env::current_exe().expect("the test executable for the fips child");
+        let output = std::process::Command::new(exe)
+            .arg("the_fips_strict_policy_cell")
+            .env("TORS_PDF_PROBES_FIPS_CHILD", "1")
+            .output()
+            .expect("spawn the fips_strict child process");
+        assert!(
+            output.status.success(),
+            "the fips_strict child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// The door-agreement property, scoped to THIS fixture matrix (F16:
+    /// the `==` is a claim about these fixtures, not a law — a malformed
+    /// page tree breaks the converse): the geometry probe raises exactly
+    /// when the security report says the call held no working
+    /// credentials. Booleans only, and both password spellings (None and
+    /// "") on every cell — "" takes the door's did-not-unlock branch
+    /// while None takes the no-password one, and the agreement holds
+    /// through both. The malformed-Encrypt cells are included: there the
+    /// guard reports and the door raises (both sides agree).
+    #[test]
+    fn the_security_door_agreement_holds_on_the_fixture_matrix() {
+        let fixtures: Vec<(&str, Vec<u8>)> = vec![
+            ("unencrypted", two_page_pdf("Alpha", "Beta")),
+            ("user-locked", encrypted_pdf("torque", "owner-pw")),
+            ("owner-only", encrypted_pdf("", "owner-pw")),
+            ("malformed /Encrypt", malformed_encrypt_pdf("<< >>")),
+            (
+                "unsupported /V",
+                malformed_encrypt_pdf("<< /Filter /Standard /V 99 /R 9 /O <00> /U <00> /P -4 >>"),
+            ),
+        ];
+        for (name, bytes) in fixtures {
+            for password in [None, Some(""), Some("torque"), Some("wrong")] {
+                let report = security(bytes.clone(), password).unwrap();
+                let door_raises = page_geometry(bytes.clone(), password).is_err();
+                assert_eq!(
+                    door_raises,
+                    report.encrypted && !report.unlocked_with_supplied_password,
+                    "{name} with password {password:?}: door {door_raises} vs report"
+                );
+            }
         }
     }
 }

@@ -36,6 +36,8 @@ from tors_documents._tors_documents import (
     PageGeometry,
     PageLayout,
     PageTables,
+    PdfPermissions,
+    PdfSecurity,
     Row,
     Table,
     TextLine,
@@ -60,6 +62,12 @@ from tors_documents._tors_documents import pdf_link_uris as _native_pdf_link_uri
 from tors_documents._tors_documents import (
     pdf_page_count as _native_pdf_page_count,
 )
+from tors_documents._tors_documents import (
+    pdf_page_labels as _native_pdf_page_labels,
+)
+from tors_documents._tors_documents import (
+    pdf_security as _native_pdf_security,
+)
 from tors_documents._tors_documents import sniff as _native_sniff
 from tors_documents._tors_documents import to_markdown as _native_to_markdown
 from tors_documents._tors_documents import to_text as _native_to_text
@@ -75,6 +83,8 @@ __all__ = [
     "PageLayout",
     "PageTables",
     "PdfClassification",
+    "PdfPermissions",
+    "PdfSecurity",
     "Row",
     "Table",
     "TextLine",
@@ -88,6 +98,8 @@ __all__ = [
     "pdf_extract",
     "pdf_link_uris",
     "pdf_page_count",
+    "pdf_page_labels",
+    "pdf_security",
     "sniff",
     "to_markdown",
     "to_text",
@@ -325,6 +337,56 @@ def pdf_page_count(
     ``None`` reads the pdf lane under the finite 512 MiB backstop (a
     memory-safety floor, raised with an explicit ``max_bytes=``)."""
     return _native_pdf_page_count(_coerce_path(path), data, password, backend, max_bytes)
+
+
+def pdf_page_labels(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> list[str | None]:
+    """The page label a reader displays, per page (``path`` or ``data=``):
+    the ISO 32000 §12.4.2 numbering tree and nothing else, one GIL-free
+    pass; ``None`` = the page declares no label (the fabricate-an-ordinal
+    signal — no label is ever fabricated here; the full contract is the
+    native function's docstring). A declared label is always ``str``,
+    including the empty string (a styleless, prefixless range declares
+    it); labels render on u64 arithmetic (a legal ``/St 4294967294``
+    never panics or wraps). ``password=`` for an encrypted PDF (the door
+    governs unchanged: a locked document raises, never ciphertext
+    labels). ``backend=`` is ``"auto"``/``"oxide"`` (the pdf_oxide lane,
+    byte-identical; ``"anydoc"`` is refused: the numbering tree is a
+    surface its reader never renders; its PDF surface is the
+    ``to_markdown``/``to_text`` conversion pair); an explicit
+    ``max_bytes=`` binds before the read, ``None`` reads the pdf lane
+    under the finite 512 MiB backstop (a memory-safety floor, raised
+    with an explicit ``max_bytes=``)."""
+    return _native_pdf_page_labels(_coerce_path(path), data, password, backend, max_bytes)
+
+
+def pdf_security(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> PdfSecurity:
+    """The typed encryption/permissions probe (``path`` or ``data=``):
+    the four security fields (``encrypted``, ``unlocked_with_supplied_password``,
+    ``permissions``, ``owner_password_only``) REPORTED, never a raise on
+    a locked state, never unlocking beyond the supplied password (the
+    full contract is the native function's docstring, the reading rule
+    ``readable = !encrypted || unlocked || owner_password_only`` with
+    it). One GIL-free pass; ``password=`` is tried (and reported, not
+    required: a wrong one is ``unlocked == false``). ``backend=`` is
+    ``"auto"``/``"oxide"`` (the pdf_oxide lane, byte-identical;
+    ``"anydoc"`` is refused: the /Encrypt state is a report its reader
+    never makes; its PDF surface is the ``to_markdown``/``to_text``
+    conversion pair); an explicit ``max_bytes=`` binds before the read,
+    ``None`` reads the pdf lane under the finite 512 MiB backstop (a
+    memory-safety floor, raised with an explicit ``max_bytes=``)."""
+    return _native_pdf_security(_coerce_path(path), data, password, backend, max_bytes)
 
 
 def page_geometry(

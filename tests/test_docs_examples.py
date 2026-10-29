@@ -1075,6 +1075,53 @@ class TestDocumentsGeometryExamples:
             'Cell(text="A", bbox=(100.0, 700.0, 200.0, 100.0), colspan=1, rowspan=1)'
         )
 
+    def test_pdf_page_labels_examples(self) -> None:
+        """docs/api.md's pdf_page_labels section examples, re-derived
+        against the built extension."""
+        import tors.documents
+
+        # the three-style golden (the doc's example)
+        from documents import generate_pdf_page_labels
+
+        labels = tors.documents.pdf_page_labels(data=generate_pdf_page_labels())
+        assert labels == ["iii", "iv", "v", "A-1", "A-2", "cover"]
+
+        # a tree-less PDF: declared nowhere — the caller fabricates the
+        # ordinal (the doc's None example)
+        treeless = tors.documents.pdf_page_labels("tests/engines_corpus/engines_two_page.pdf")
+        assert treeless == [None, None]
+
+    def test_pdf_security_examples(self) -> None:
+        """docs/api.md's pdf_security section examples, re-derived
+        against the built extension."""
+        from test_documents_engines import _encrypted_pdf
+
+        import tors.documents
+
+        # the unencrypted report (the doc's first example)
+        from documents import ENGINES_CORPUS
+
+        report = tors.documents.pdf_security(data=ENGINES_CORPUS["pdf_two_page"])
+        assert (report.encrypted, report.permissions) == (False, None)
+
+        # the locked report, then the unlock (the doc's examples)
+        locked = _encrypted_pdf()
+        report = tors.documents.pdf_security(data=locked)
+        assert (report.encrypted, report.unlocked_with_supplied_password) == (True, False)
+        report = tors.documents.pdf_security(data=locked, password="torque")
+        assert (
+            report.unlocked_with_supplied_password,
+            report.owner_password_only,
+        ) == (True, False)
+
+        # the class sections' repr literals (the F9 Python-shape pins)
+        assert repr(report).startswith(
+            "PdfSecurity(encrypted=True, unlocked_with_supplied_password=True"
+        )
+        permissions = report.permissions
+        assert permissions is not None and permissions.raw_p == -4
+        assert repr(permissions).startswith("PdfPermissions(print_low_res=True")
+
 
 class TestIndexExamples:
     """docs/index.md's quick-start literals."""

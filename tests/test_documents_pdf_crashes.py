@@ -62,6 +62,8 @@ from tors.documents import (
     pdf_extract,
     pdf_link_uris,
     pdf_page_count,
+    pdf_page_labels,
+    pdf_security,
     to_markdown,
     to_text,
 )
@@ -70,8 +72,13 @@ _PDF_TWO_PAGE = ENGINES_CORPUS["pdf_two_page"]
 _REPORT_PDF = Path(__file__).parent / "corpus" / "report.pdf"
 
 # Every public entry point that opens a PDF document (the docs/documents.md
-# signature table): all nine share pdf_impl's open() seam, so the depth bomb
-# must refuse on all of them, not just the ones the reporter happened to try.
+# signature table): all eleven share pdf_impl's open()-shaped seam, so the
+# depth bomb must refuse on all of them, not just the ones the reporter
+# happened to try. pdf_page_labels rides the same open() door (the
+# extractor engine-side is not auth-gated, so the door is its only gate);
+# pdf_security runs the same open-shaped pass minus the door check (it
+# reports the locked state instead of raising) — the depth scans run
+# before the parse either way, so the refusal contract is shared.
 _ENTRY_POINTS = (
     to_markdown,
     to_text,
@@ -80,6 +87,8 @@ _ENTRY_POINTS = (
     page_tables,
     pdf_extract,
     pdf_page_count,
+    pdf_page_labels,
+    pdf_security,
     pdf_classify,
     pdf_link_uris,
 )
