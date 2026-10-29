@@ -1104,7 +1104,19 @@ def test_page_geometry_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     assert all(entry is not None for entry in entries)
 
     def op() -> None:
-        page_geometry(str(path))
+        # 30 sequential passes per sample: the geometry probe is so cheap
+        # (a 500-page read is ~4-5ms) that a single pass cannot be judged
+        # by the ratio machinery on a loaded runner — an 11ms scheduler
+        # stall is 200% of the op's own wall, and the CPU-attribution
+        # excuse reads the detached core's burn as loop-thread work (the
+        # CI failure this band fixes: blocked 11ms of a 5ms operation,
+        # 194%, one sample of three, both on a PR run and on main). A
+        # 30-pass batch puts the op in the band the machinery can judge
+        # (~130ms), keeps the by-design loop blocking sub-ms per tick,
+        # and keeps the teeth: a lost detach blocks ~the batch wall (30x
+        # the O(pages) marshalling), convicted at any load.
+        for _ in range(30):
+            page_geometry(str(path))
 
     asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
 

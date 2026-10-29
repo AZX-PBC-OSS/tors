@@ -1746,6 +1746,7 @@ class TestGilHeartbeat:
                     last = now
 
             hb = asyncio.create_task(heartbeat())
+            started = monotonic()
             try:
                 results = await asyncio.gather(
                     tors.aio.dedup_near_dup(identical, threshold=0.9, method="simhash"),
@@ -1759,11 +1760,21 @@ class TestGilHeartbeat:
                     await hb
                 except asyncio.CancelledError:
                     pass
+            wall = monotonic() - started
             assert results[0] == tors.dedup_near_dup(identical, threshold=0.9, method="simhash")
             assert results[1] == tors.dedup_near_dup(distinct, threshold=0.9, method="minhash")
             assert results[2] == tors.dedup_near_dup(identical, threshold=0.9, method="shingle")
             assert results[3] == tors.dedup_near_dup(distinct, threshold=0.9, method="simhash")
-            assert max(gaps) < 1.0, f"loop stalled {max(gaps) * 1e3:.0f}ms under gather contention"
+            # The #197 load-headroom band, the gather cell finally included:
+            # the ratio against the gather's own wall is the detach contract
+            # (a lost detach blocks ~the whole wall), the 1.0s floor pins the
+            # by-design case. The flat ceiling this replaces failed on loaded
+            # CI runners at 1.5-2.1s stalls against an unmeasured wall —
+            # runner starvation, not a detach regression.
+            assert max(gaps) < max(1.0, 0.3 * wall), (
+                f"loop stalled {max(gaps) * 1e3:.0f}ms of {wall * 1e3:.0f}ms "
+                "under gather contention"
+            )
 
         asyncio.run(run())
 
