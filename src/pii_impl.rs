@@ -298,9 +298,7 @@
 //! identity when nothing matches, `py.detach` around the whole scan on
 //! the Python side (the keys pass rides that same single detach; no new
 //! GIL class), and `sha2` digests computed only for spans that
-//! actually matched (never per candidate). The PEM family's END
-//! index is one linear sweep per pass bucketed by parsed words
-//! (O(ENDs) to build, O(log ENDs) per BEGIN). The degenerate-domain
+//! actually matched (never per candidate). The degenerate-domain
 //! bench (`a.` × 50k) pins the linear domain split.
 
 use std::borrow::Cow;
@@ -1345,8 +1343,11 @@ enum KeyTailClass {
 }
 
 /// One tail-class predicate per class, ASCII-only like the shared one.
+/// The AWS predicate is the one canonical spelling — the secret-token
+/// scanner's `aws_access_key` grammar reuses it verbatim (shared not
+/// duplicated, the `pem_match_at` discipline).
 #[inline]
-fn is_aws_tail_byte(b: u8) -> bool {
+pub(crate) fn is_aws_tail_byte(b: u8) -> bool {
     b.is_ascii_uppercase() || b.is_ascii_digit()
 }
 
@@ -1670,8 +1671,14 @@ pub(crate) fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize,
 /// O(ENDs) to build plus O(log ENDs) per BEGIN: a flood of distinct
 /// BEGIN words against mismatched ENDs — the shape the old per-words
 /// failure memo degraded super-linearly on (~2.87 exponent measured) —
-/// is now a lookup that misses.
-fn pem_match_at(bytes: &[u8], start: usize, index: &mut Option<PemEndIndex>) -> Option<usize> {
+/// is now a lookup that misses. The one canonical spelling, the
+/// secret-token scanner's `pem_key` grammar reuses it verbatim (the
+/// keys rule's own marker machinery, shared not duplicated).
+pub(crate) fn pem_match_at(
+    bytes: &[u8],
+    start: usize,
+    index: &mut Option<PemEndIndex>,
+) -> Option<usize> {
     const BEGIN: &[u8] = b"-----BEGIN ";
     if !bytes[start..].starts_with(BEGIN) {
         return None;
@@ -1751,16 +1758,15 @@ pub(crate) fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
 ///   PEM word byte directly before it (`…CERTIFICATE-----BEGIN …`,
 ///   `-----END-----BEGIN …`, a word-glued head generally): the close's
 ///   five dashes double as the head's five, so no dash of its own
-///   precedes it. The lookback walks the marker's OWN word class
-///   (`is_pem_word_byte`) backward from that byte — the same walk the
-///   marker parse itself pays — and carves on any word run: the carve
-///   only opens the boundary, and the PEM match it leads to still
+///   precedes it. The carve fires on ANY word byte directly before the
+///   head — the carve only opens the boundary, and the PEM match it
+///   leads to still
 ///   requires the full block grammar (both markers, same words), so
 ///   the only input this redacts past the old behavior is a complete,
 ///   self-validating private-key block whose head was word-glued.
 ///   Linear-cheap by the same argument as the marker parse: BEGIN
-///   heads never overlap (each ends in a space), so a lookback can
-///   never cross a previous head and every byte is walked once.
+///   heads never overlap (each ends in a space), so every byte is
+///   walked once.
 ///
 /// Still mid-token (pinned): any run too short to spell the head at
 /// all — no `-----BEGIN ` literal exists to carve. Only BEGIN is
@@ -1779,13 +1785,9 @@ pub(crate) fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
     if !is_pem_word_byte(bytes[pos - 1]) {
         return false;
     }
-    // Shared close: walk the word run ending at `pos` (the close's
-    // last label word) — bounded by the marker's own word class, and
-    // the block grammar downstream self-validates the match.
-    let mut w = pos - 1;
-    while w > 0 && is_pem_word_byte(bytes[w - 1]) {
-        w -= 1;
-    }
+    // Shared close: any word byte directly before the head carves —
+    // the block grammar downstream self-validates the match, so the
+    // lookback this once paid can never sharpen the decision.
     true
 }
 

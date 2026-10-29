@@ -509,20 +509,15 @@ def _pem_head_carve(text: str, i: int) -> bool:
     of pem_head_after_dash_run: a dash directly before the head (the
     previous close's own run), or the SHARED CLOSE, the head's dash run
     entirely the preceding close's — a PEM word byte directly before
-    the head (`…CERTIFICATE-----BEGIN `). The lookback walks the
-    marker's own word class backward from that byte; the carve only
+    the head (`…CERTIFICATE-----BEGIN `). The carve fires on any word
+    byte directly before the head; it only
     opens the boundary, and the block grammar `_pem_span_at` checks
     downstream still requires both markers with the same words."""
     if not text.startswith(_PEM_BEGIN, i):
         return False
     if text[i - 1] == "-":
         return True
-    if text[i - 1] not in _PEM_WORD_CHARS:
-        return False
-    w = i - 1
-    while w > 0 and text[w - 1] in _PEM_WORD_CHARS:
-        w -= 1
-    return True
+    return text[i - 1] in _PEM_WORD_CHARS
 
 
 def _backslash_run_before(text: str, at: int) -> int:

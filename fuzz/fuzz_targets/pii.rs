@@ -587,14 +587,9 @@ fn pem_head_after_dash_run_at(chars: &[char], i: usize) -> bool {
     if chars[i - 1] == '-' {
         return true;
     }
-    if !chars[i - 1].is_ascii_alphanumeric() {
-        return false;
-    }
-    let mut w = i - 1;
-    while w > 0 && chars[w - 1].is_ascii_alphanumeric() {
-        w -= 1;
-    }
-    true
+    // Shared close: any word byte directly before the head carves —
+    // the block grammar downstream self-validates the match.
+    chars[i - 1].is_ascii_alphanumeric()
 }
 
 /// The key match set at one lane mask: every position whose grammar

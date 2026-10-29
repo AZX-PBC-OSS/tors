@@ -173,8 +173,8 @@
 use std::borrow::Cow;
 
 use crate::pii_impl::{
-    PemEndIndex, ansi_csi_ends_before, escape_ends_before, is_key_tail_byte, pem_end_index,
-    pem_head_after_dash_run, pem_marker_end, token_digest,
+    PemEndIndex, ansi_csi_ends_before, escape_ends_before, is_aws_tail_byte, is_key_tail_byte,
+    pem_head_after_dash_run, pem_match_at, token_digest,
 };
 
 /// The secrets surface's own documented default digest salt: the same
@@ -309,13 +309,11 @@ pub struct SecretReport {
     pub spans: Vec<SecretSpan>,
 }
 
-/// The AWS tail alphabet: `[0-9A-Z]`, uppercase letters and digits.
-/// Amazon's own example access key ID carries both `I` and `O`; no
-/// I/O-exclusion or base32 narrowing is documented and none is applied.
-#[inline]
-fn is_aws_tail_byte(b: u8) -> bool {
-    b.is_ascii_uppercase() || b.is_ascii_digit()
-}
+// The AWS tail alphabet: `[0-9A-Z]`, uppercase letters and digits.
+// Amazon's own example access key ID carries both `I` and `O`; no
+// I/O-exclusion or base32 narrowing is documented and none is applied.
+// The predicate lives in `pii_impl` (the keys rule's AWS row scans the
+// same alphabet); this module reuses it — one canonical class.
 
 /// The base62 class GitHub's token bodies use (`a-z A-Z 0-9`), also the
 /// Stripe tail class.
@@ -513,21 +511,10 @@ fn github_legacy_match_at(bytes: &[u8], pos: usize) -> Option<usize> {
     Some(end)
 }
 
-/// The PEM grammar at `pos`, the keys rule's own machinery reused (both
-/// markers, matching label words, the PGP close accepted): the whole
-/// block is the span.
-fn pem_match_at(bytes: &[u8], pos: usize, index: &mut Option<PemEndIndex>) -> Option<usize> {
-    const BEGIN: &[u8] = b"-----BEGIN ";
-    if !bytes[pos..].starts_with(BEGIN) {
-        return None;
-    }
-    let (words_end, body_start) = pem_marker_end(bytes, pos + BEGIN.len())?;
-    let words = &bytes[pos + BEGIN.len()..words_end];
-    let ends = index.get_or_insert_with(|| pem_end_index(bytes));
-    let bucket = ends.get(words)?;
-    let first = bucket.partition_point(|&(cand, _)| cand < body_start);
-    bucket.get(first).map(|&(_, end)| end)
-}
+// The PEM grammar at `pos` is `pii_impl::pem_match_at` itself — the
+// keys rule's own machinery, shared not duplicated (both markers,
+// matching label words, the PGP close accepted): the whole block is
+// the span.
 
 /// One left-to-right scan, every grammar, selected rules only: the
 /// spans in input byte coordinates, ordered by start, non-overlapping
@@ -1087,11 +1074,11 @@ mod tests {
         let block = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\nxyz\n-----END RSA PRIVATE KEY-----\n";
         let expected_tail = format!("PEM~{}\n", digest(block.trim_end_matches('\n')));
         assert_eq!(scrub(block, SecretRules::PEM_KEY), expected_tail);
-        // EC and PKCS#8-with-words spellings; the bare PKCS#8 header
-        // (no algorithm words) is the keys rule's own documented
-        // exclusion and stays one here too... no: the label grammar
-        // REQUIRES words, so `-----BEGIN PRIVATE KEY-----` never
-        // matches, exactly as the keys rule pins it.
+        // EC and PKCS#8-with-words spellings both scrub; the bare
+        // PKCS#8 header (no algorithm words) is the keys rule's own
+        // documented exclusion and stays one here too: the label
+        // grammar REQUIRES words, so `-----BEGIN PRIVATE KEY-----`
+        // never matches, exactly as the keys rule pins it.
         let ec = "-----BEGIN EC PRIVATE KEY-----\naaa\n-----END EC PRIVATE KEY-----";
         assert_eq!(
             scrub(ec, SecretRules::PEM_KEY),
