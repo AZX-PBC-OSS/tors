@@ -39,6 +39,19 @@
 //!   gate in `schema_bigint_refusal`, since the lossy compile of a
 //!   constraint silently accepts neighboring values); `format` is never
 //!   asserted (upstream passes no `format_checker` either: parity).
+//! - **Top-level scalars and the sentinel operand**: the repair parser's
+//!   grammar skips top-level digits outside containers (and unwinds a
+//!   scalar whose inline repair failed), so when the fast path's value
+//!   already failed the root schema and the in-place repair cannot win,
+//!   the fall-through parse yields the `Str("")` "nothing recoverable"
+//!   sentinel. The final validate's refusal then names the REAL value
+//!   (mod.rs re-validates the strict fast path's scalar for the message:
+//!   the enum/const/pattern miss, or `1e400`'s not-JSON-compatible
+//!   overflow refusal — a >f64-max document refuses in schema mode with
+//!   that message, where the schema-less spelling repairs to `inf`);
+//!   without a strict fast-path value (prose, `skip_json_loads`) the
+//!   sentinel's own message stands, and `skip_json_loads` keeps the
+//!   repair parser's verdict even for a scalar the schema would accept.
 //! - **tors-native repairs** (all recorded as diagnostics, all opt-out by
 //!   simply not using schema mode): the key-normalization ladder
 //!   (case/`snake`/`kebab`/`spaces` folding to an exact property) ahead of

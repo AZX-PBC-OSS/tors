@@ -2069,6 +2069,10 @@ class TestEnumErrorMessageMemberCap:
         # The cap's other side: three members render whole, in the crate's
         # "a, b or c" shape, byte-for-byte what the uncapped formatter
         # said (pinned exactly, so a formatter change is a reviewed event).
+        # The operand is the REAL value now (the F-3 fix: the repair
+        # parser's Str("") sentinel unwound the top-level scalar and the
+        # message named "" — it names the document's own value since the
+        # schema path re-validates the strict fast path's scalar).
         with pytest.raises(ValueError) as excinfo:
             repair_json_loads(json.dumps("zzz"), schema={"enum": ["alpha", "beta", "gamma"]})
-        assert str(excinfo.value) == '"" is not one of "alpha", "beta" or "gamma"'
+        assert str(excinfo.value) == '"zzz" is not one of "alpha", "beta" or "gamma"'

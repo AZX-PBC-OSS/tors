@@ -337,6 +337,33 @@ class TestSchemaStandard:
         schema = {"type": "string", "format": "date"}
         assert repair_json_loads('"March 5, 2024"', schema=schema) == "2024-03-05"
 
+    def test_top_level_scalar_refusal_names_the_real_value(self) -> None:
+        # The F-3 class: the repair parser's grammar skips top-level
+        # digits outside containers, so a scalar the fast path refused
+        # (the enum miss) fell through to the Str("") sentinel and the
+        # final validate named "" (`"" is not of type "integer"`). The
+        # refusal is re-run against the fast path's real scalar so the
+        # message names it; the verdict is unchanged.
+        schema = {"type": "integer", "enum": [1, 2]}
+        with pytest.raises(ValueError, match='^5 is not one of'):
+            repair_json_loads("5", schema=schema)
+
+    def test_top_level_quoted_scalar_refusal_names_the_string(self) -> None:
+        # The same class through the parser's inline-repair unwind: the
+        # quoted scalar parses (the fast path refused the type), the
+        # parser's schema-guided parse unwinds it to the sentinel, and
+        # the message named "". It names the value now.
+        with pytest.raises(ValueError, match='^"abc" is not of type "integer"$'):
+            repair_json_loads('"abc"', schema={"type": "integer"})
+
+    def test_over_f64_max_refusal_is_documented_and_named(self) -> None:
+        # The >f64-max document: the schema-less spelling repairs to
+        # `inf` (json_is_valid refuses the overflow), and schema mode
+        # refuses with the non-finite message naming the real problem —
+        # never the sentinel's `""`.
+        with pytest.raises(ValueError, match="non-finite"):
+            repair_json_loads("1e400", schema={"type": "number"})
+
 
 class TestSchemaSalvage:
     def test_selects_first_matching_fragment(self) -> None:
