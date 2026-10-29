@@ -52,7 +52,10 @@ from test_documents_hardening import _hwm_kb, _run_or_fail
 from tors_documents import (
     document_structure,
     page_geometry,
+    page_images,
     page_layout,
+    page_tables,
+    page_text_chars,
     pdf_classify,
     pdf_extract,
     pdf_link_uris,
@@ -385,6 +388,10 @@ PUBLIC_CONVERSION_SURFACE: tuple[tuple[Callable[..., object], bool], ...] = (
     (to_text, False),  # delegates: "the same ... max_bytes= semantics as to_markdown"
     (page_geometry, True),
     (page_layout, True),
+    (page_images, True),
+    # delegates: "the ... max_bytes= ... contracts are page_layout's exactly"
+    (page_tables, False),
+    (page_text_chars, False),
     (pdf_classify, True),
     (pdf_extract, True),
     (pdf_link_uris, True),

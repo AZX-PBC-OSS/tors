@@ -28,10 +28,16 @@ from tors_documents.aio import (
     page_geometry as page_geometry,
 )
 from tors_documents.aio import (
+    page_images as page_images,
+)
+from tors_documents.aio import (
     page_layout as page_layout,
 )
 from tors_documents.aio import (
     page_tables as page_tables,
+)
+from tors_documents.aio import (
+    page_text_chars as page_text_chars,
 )
 from tors_documents.aio import (
     pdf_classify as pdf_classify,
@@ -61,8 +67,10 @@ from tors_documents.aio import (
 __all__ = [
     "document_structure",
     "page_geometry",
+    "page_images",
     "page_layout",
     "page_tables",
+    "page_text_chars",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",

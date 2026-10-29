@@ -56,8 +56,10 @@ import pytest
 from documents import ENGINES_CORPUS
 from tors.documents import (
     page_geometry,
+    page_images,
     page_layout,
     page_tables,
+    page_text_chars,
     pdf_classify,
     pdf_extract,
     pdf_link_uris,
@@ -72,7 +74,7 @@ _PDF_TWO_PAGE = ENGINES_CORPUS["pdf_two_page"]
 _REPORT_PDF = Path(__file__).parent / "corpus" / "report.pdf"
 
 # Every public entry point that opens a PDF document (the docs/documents.md
-# signature table): all eleven share pdf_impl's open()-shaped seam, so the
+# signature table): all thirteen share pdf_impl's open()-shaped seam, so the
 # depth bomb must refuse on all of them, not just the ones the reporter
 # happened to try. pdf_page_labels rides the same open() door (the
 # extractor engine-side is not auth-gated, so the door is its only gate);
@@ -85,6 +87,8 @@ _ENTRY_POINTS = (
     page_geometry,
     page_layout,
     page_tables,
+    page_images,
+    page_text_chars,
     pdf_extract,
     pdf_page_count,
     pdf_page_labels,

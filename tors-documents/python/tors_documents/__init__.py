@@ -44,14 +44,19 @@ from tors_documents._tors_documents import (
     HtmlNode,
     HtmlStructure,
     ImageBox,
+    ImageBytes,
     NeedsOcrError,
+    PageCharsData,
     PageGeometry,
+    PageImageEntry,
+    PageImagesData,
     PageLayout,
     PageTables,
     PdfPermissions,
     PdfSecurity,
     Row,
     Table,
+    TextChar,
     TextLine,
     TextSpan,
     Word,
@@ -73,8 +78,10 @@ from tors_documents._tors_documents import PdfClassification as _NativePdfClassi
 from tors_documents._tors_documents import __version__ as __version__
 from tors_documents._tors_documents import document_structure as _native_document_structure
 from tors_documents._tors_documents import page_geometry as _native_page_geometry
+from tors_documents._tors_documents import page_images as _native_page_images
 from tors_documents._tors_documents import page_layout as _native_page_layout
 from tors_documents._tors_documents import page_tables as _native_page_tables
+from tors_documents._tors_documents import page_text_chars as _native_page_text_chars
 from tors_documents._tors_documents import pdf_classify as _native_pdf_classify
 from tors_documents._tors_documents import pdf_extract as _native_pdf_extract
 from tors_documents._tors_documents import pdf_link_uris as _native_pdf_link_uris
@@ -108,8 +115,12 @@ __all__ = [
     "HtmlNode",
     "HtmlStructure",
     "ImageBox",
+    "ImageBytes",
     "NeedsOcrError",
+    "PageCharsData",
     "PageGeometry",
+    "PageImageEntry",
+    "PageImagesData",
     "PageKind",
     "PageLayout",
     "PageTables",
@@ -118,6 +129,7 @@ __all__ = [
     "PdfSecurity",
     "Row",
     "Table",
+    "TextChar",
     "TextLine",
     "TextSpan",
     "Word",
@@ -130,8 +142,10 @@ __all__ = [
     "__version__",
     "document_structure",
     "page_geometry",
+    "page_images",
     "page_layout",
     "page_tables",
+    "page_text_chars",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",
@@ -566,6 +580,127 @@ def page_tables(
     native stack exhaustion in the pdf_oxide engine): sandbox untrusted
     PDFs (docs/documents.md, SECURITY.md)."""
     return _native_page_tables(
+        _coerce_path(path),
+        data,
+        format,
+        password,
+        backend,
+        pages,
+        max_bytes,
+    )
+
+
+def page_images(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+    decode: str | None = None,
+    max_image_bytes: int | None = None,
+) -> list[PageImagesData]:
+    """The image-bytes probe (the full contract is the native function's
+    docstring): per PDF page, the page's image handles — the UNFILTERED
+    walk (no 8×8 gate, no max-pixels filter, paint order; never
+    ``extract_images``, which silently drops sub-8×8 images and swallows
+    decode errors) — with each image's evidence in the page's declared
+    render space, and — only under ``decode`` — the bytes behind the
+    handles. ``decode=None`` decodes nothing (metadata only);
+    ``decode="container"`` serves the container bytes (a DCT filter
+    anywhere → the JPEG passthrough with DECRYPTION included — the raw
+    stream bytes are ciphertext on an unlocked encrypted PDF and are
+    never served; a bare ``/JPXDecode`` stream → its container sniffed
+    from the signature box, ``"jp2"`` or ``"j2k_codestream"``, served
+    only when the image is inline or the document is unencrypted, else a
+    typed ``unsupported`` error naming the cause);
+    ``decode="pixels"`` decodes to the engine's own classification (Raw,
+    or the typed ``unsupported`` error for JBIG2/JPX on the shipped
+    build — feature-gated). The bytes arm ``data`` is an ALWAYS-PRESENT
+    four-way sum: ``kind`` in
+    ``"not_requested"|"container"|"raw"|"error"``; every arm getter is
+    None unless ``kind`` names it (``bytes``/``container``; ``pixels``/
+    ``width_px``/``height_px``/``components``/``bpc``/``pixel_format``/
+    ``samples_are_raw``/``decode_folded_in``/``icc``/``ccitt``;
+    ``error_kind``/``message``/``scope``/``limit_bytes``/
+    ``needed_bytes``). Caps: 256 MiB per image (chain-aware pre-decode
+    estimate), 512 MiB per call cumulative, the over-cap image a typed
+    ``size_cap`` entry (``scope``/``limit_bytes``/``needed_bytes``) —
+    refused, never truncated; ``max_image_bytes=`` overrides the
+    per-image ceiling (raising it past the engine's env-read
+    ``PDF_OXIDE_MAX_DECOMPRESS_MB`` cannot make the ENGINE decode more).
+    Honesty: an image with missing/non-positive /Width·/Height yields NO
+    handle (this surface cannot see it); a missing/unparseable
+    /ColorSpace reports ``DeviceRGB`` with ``color_space_declared``
+    False; a decode failure is a visible typed entry, siblings intact;
+    office rows carry ``images: []`` with ``format`` provenance (a
+    DOCX's images are real and are not served). Identity:
+    ``(page_index, paint_order)`` pairs with ``page_layout``'s
+    ``images`` — the two surfaces are separate opens, so a changed file
+    between the calls breaks the pairing. ``pages=``,
+    ``backend=``, ``password=``, ``max_bytes=``, and the refusal order
+    are ``page_layout``'s exactly. The whole read+resolve+images pass
+    runs GIL-free. ⚠ A malformed PDF can crash the process (uncatchable
+    native stack exhaustion in the pdf_oxide engine): sandbox untrusted
+    PDFs (docs/documents.md, SECURITY.md)."""
+    return _native_page_images(
+        _coerce_path(path),
+        data,
+        format,
+        password,
+        backend,
+        pages,
+        max_bytes,
+        decode,
+        max_image_bytes,
+    )
+
+
+def page_text_chars(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+) -> list[PageCharsData]:
+    """The char-boxes probe (the full contract is the native function's
+    docstring): per PDF page, the page's per-character boxes from the
+    cached SPAN parse (``extract_spans`` → ``TextSpan::to_chars()`` per
+    span — never ``extract_chars``, which is raw-only and includes
+    content the span path drops at the crop), a flat list in reading
+    order. Each char: ``char`` (one Unicode scalar — code-point
+    indexing), ``bbox`` — ``(x, y, w, h)`` points, bottom-left origin,
+    **y is the BASELINE** (the em-box law: the box extends one font-size
+    upward; descenders hang BELOW the box's bottom edge),
+    ``span_index`` (into ``page_layout``'s ``spans`` — the join law:
+    ``"".join(c.char for c in chars if c.span_index == s) ==
+    spans[s].text`` EXACTLY), ``index_in_span`` (code points: chars
+    ``[i, j)`` of span s ground the substring ``spans[s].text[i:j]``;
+    the whole-span box is the SPAN's own mapped box, never the char
+    union), ``wmode`` (0 horizontal, 1 vertical — a vertical run's char
+    boxes are the engine's flattened fiction, displaced one advance LEFT
+    of their origins and stacked along x: measured; never pretend they
+    are highlight-able), and ``x_measured`` (span-constant: ``True`` =
+    the engine's measured origins — drift ≈ the 0.5 pt tolerance +
+    sub-point interpolation; ``False`` = the prefix-sum/uniform arm —
+    the TJ-kerning drift class, bounded only by measurement; a highlight
+    box built from ``x_measured=False`` chars is APPROXIMATE). On a
+    page whose rotation the engine applied to a span, the chars are
+    derived from the span's unmapped box and mapped forward (the mapped
+    frame's glyph order runs right-to-left — the derivation otherwise
+    lands every box mirrored, ~35 pt off, measured). A page whose box
+    read fails is ``geometry=None`` + ``chars: []``; a content failure
+    is ``chars: []`` with the geometry intact; office rows carry
+    ``chars: []`` with ``format`` provenance. ``pages=``, ``backend=``,
+    ``password=``, ``max_bytes=``, and the refusal order are
+    ``page_layout``'s exactly. The whole read+resolve+chars pass runs
+    GIL-free. ⚠ A malformed PDF can crash the process (uncatchable
+    native stack exhaustion in the pdf_oxide engine): sandbox untrusted
+    PDFs (docs/documents.md, SECURITY.md)."""
+    return _native_page_text_chars(
         _coerce_path(path),
         data,
         format,

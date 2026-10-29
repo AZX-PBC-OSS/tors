@@ -2251,6 +2251,1144 @@ impl PageTables {
     }
 }
 
+/// `tors.documents.page_images(path=None, data=None, format=None,
+/// password=None, backend=None, pages=None, max_bytes=None, decode=None,
+/// max_image_bytes=None) -> list[PageImagesData]`: the image-bytes probe
+/// (issue #205) — per unit of the resolved format's geometry lane, the
+/// unit's geometry plus — PDF pages only — the page's image handles
+/// (the unfiltered Phase-1 walk: no 8×8 gate, no max-pixels filter,
+/// paint order; NEVER `extract_images`, which silently drops sub-8×8
+/// images and swallows per-image decode errors) with each image's
+/// evidence, and — only under `decode` — the bytes behind the handles.
+///
+/// The entry (per image): `bbox` (the mapped box, the same
+/// `map_box_forward` call `page_layout` gives its image boxes — image
+/// handles are always raw user space; `None` when the page's box cannot
+/// be read: [R11], the bytes must not drop for a frame reason),
+/// `width_px`/`height_px` (the DICTIONARY's), `rotation_degrees` (the
+/// CTM angle, evidence not an instruction), `paint_order` (the
+/// page-local identity — the same order `page_layout`'s `images` list),
+/// `color_space` + `color_space_declared` + `indexed_base`,
+/// `bits_per_component` (the DICTIONARY's — R22), `byte_size_compressed`,
+/// `filters` (spelled, outermost first, `Other(k)` keeping its raw name
+/// — R20), `is_inline`, and `data` — the ALWAYS-PRESENT four-arm sum
+/// (R6/F9): `kind == "not_requested"` (no decode asked, or a
+/// containers-only selection left this image out — `filters` say which)
+/// | `"container"` (`bytes` + `container`: `"jpeg" | "jp2" |
+/// "j2k_codestream"`) | `"raw"` (decoded samples that describe
+/// themselves: `pixels`, the payload's own `width_px`/`height_px`/
+/// `components`/`bpc`, the display tag `pixel_format`,
+/// `samples_are_raw`, `decode_folded_in`, `icc`, `ccitt`) | `"error"`
+/// (`error_kind`: `"decode" | "unsupported" | "size_cap"`, `message`,
+/// and `scope`/`limit_bytes`/`needed_bytes` for a size cap). Every arm
+/// getter is None unless `kind` names it (F9) — "no bytes" is never two
+/// different things.
+///
+/// `decode` (R3 as amended): `None` = metadata only, decodes nothing;
+/// `"container"` = decode, containers only — a DCT filter anywhere in
+/// the chain serves its container bytes via the engine's decode()
+/// passthrough (DECRYPTION INCLUDED — F1/R1: raw stream bytes are
+/// ciphertext on an unlocked encrypted PDF, and `raw_compressed_bytes()`
+/// never feeds this surface), a bare `/JPXDecode` stream serves its
+/// container sniffed from the stream's own bytes (the 12-byte JP2
+/// signature box → `"jp2"`, the SOC marker → `"j2k_codestream"`; the
+/// shipped build cannot decode JPX at all (R2, feature-gated) so the
+/// container is the only JPX content this surface can ever serve) —
+/// served ONLY when the image is inline or the document is unencrypted,
+/// else the typed `"unsupported"` error naming the cause (F1); anything
+/// else stays `not_requested`. `"pixels"` = decode every image to the
+/// engine's own classification: Raw — or the typed errors; on the
+/// shipped build a JBIG2/JPX decode is the engine's `Unsupported`
+/// verbatim (R2, feature-gated), a `rendering`/`jpeg2000` build decodes
+/// them (build-dependent, documented). Anything else is the pinned
+/// `ValueError`.
+///
+/// Caps (R7): 256 MiB per image (the chain-aware pre-decode estimate —
+/// the container's own size for a DCT chain, the packed bits for CCITT,
+/// the unpacked one-byte-per-component arithmetic otherwise, the base's
+/// components for Indexed), 512 MiB per call cumulative (estimates
+/// checked before each decode, actuals accumulated after), the over-cap
+/// image a typed `size_cap` entry (`scope: "image" | "call"`,
+/// `limit_bytes`, `needed_bytes`) — refused, NEVER truncated (a
+/// truncated image is a wrong image with no marker). `max_image_bytes=`
+/// overrides the per-image ceiling; raising it past the ENGINE's
+/// env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` (the flate/unpack/Indexed
+/// ceilings it governs) cannot make the engine decode more — the
+/// over-ceiling refusal just moves into the engine's own error (F8).
+///
+/// Honesty laws (R8), stated where the engine leaves them: an image
+/// XObject with a missing or non-positive /Width·/Height yields NO
+/// handle at all (measured: 0 handles — this surface cannot see it); a
+/// Form-XObject subtree's error is dropped by the engine's own
+/// `if let Ok`; a missing or unparseable /ColorSpace reports
+/// `DeviceRGB` with `color_space_declared: false`. A caller who needs
+/// certainty about the paint count must compare `len(images)` with the
+/// render's — no completeness is provable beyond the three gaps above.
+/// A decode failure is a VISIBLE TYPED ENTRY (`data.kind == "error"`),
+/// siblings intact; a content-stream failure is `images: []` with the
+/// geometry intact (the engine's empty-on-error law — a scanned page is
+/// the same shape); a DOCX's images are real and are NOT served (the
+/// office row: `images: []` with `format` provenance — R24); the
+/// no-geometry formats answer one `geometry=None` entry.
+///
+/// The identity key (page_index, paint_order) pairs with `page_layout`'s
+/// `images` list — the two surfaces are separate opens over the bytes
+/// (nothing cached across them, R12): a changed file between the calls
+/// breaks the pairing. Bytes decode EVERY selected image of every
+/// selected page — there is no per-image selection in v1 (R12).
+///
+/// `format`/`password`/`backend`/`max_bytes`/`pages=` and the refusal
+/// order are `page_layout`'s exactly (the capability refusal under the
+/// GIL first, then the password-kind and max_bytes refusals, then the
+/// engine doors, then the `pages=` range against the real count).
+///
+/// GIL model: page_tables' shape — argument marshalling under the GIL,
+/// the capability refusal (on `backend="anydoc"`) under the GIL before
+/// the detach, the whole read+resolve+images pass under one
+/// `py.detach`, then the O(pages) entry construction (the nested images
+/// are the getters', on access, post-detach). ⚠ A malformed PDF can
+/// crash the process (uncatchable native stack exhaustion in the
+/// pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
+/// SECURITY.md).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    format = None,
+    password = None,
+    backend = None,
+    pages = None,
+    max_bytes = None,
+    decode = None,
+    max_image_bytes = None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn page_images(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    format: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    pages: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+    decode: Option<&Bound<'_, PyAny>>,
+    max_image_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PageImagesData>> {
+    let source = parse_source(path, data, "page_images")?;
+    let format = parse_format(format)?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    // The capability refusal fires HERE — the geometry capability table's
+    // own refusal, byte-identical to page_geometry's/page_layout's (one
+    // table, one message), under the GIL, before the detach and before
+    // any byte of the document is read.
+    if backend == Backend::Anydoc
+        && let Some(refusal) = probe_capability_refusal(&source, format, backend)
+    {
+        return Err(document_error(py, refusal)?);
+    }
+    let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    let decode = parse_image_decode(decode)?;
+    let max_image_bytes = parse_max_image_bytes(max_image_bytes)?;
+    let pages = parse_pages(pages)?;
+    let entries = match py.detach(move || {
+        let (bytes, hint) = source
+            .into_geometry_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
+        documents_impl::page_images(
+            bytes,
+            hint.as_deref(),
+            format,
+            backend,
+            pages,
+            &documents_impl::ConvertOptions {
+                password: password.as_deref(),
+                max_bytes,
+            },
+            decode,
+            max_image_bytes,
+        )
+    }) {
+        Ok(entries) => entries,
+        Err(err) => return Err(document_error(py, err)?),
+    };
+    // O(pages) of pyclass construction here; the O(pages × images) nested
+    // construction is the getters', on access, post-detach.
+    Ok(entries
+        .into_iter()
+        .map(|inner| PageImagesData { inner })
+        .collect())
+}
+
+/// The `decode=` argument's parse (R3): `None` → the handles-only mode;
+/// `"container"` / `"pixels"` the two decode modes. A non-str is a
+/// `TypeError` and a non-vocabulary str a `ValueError`, both naming the
+/// argument and repr'ing the value (parse_backend's convention).
+fn parse_image_decode(decode: Option<&Bound<'_, PyAny>>) -> PyResult<tors::pdf_impl::ImageDecode> {
+    use tors::pdf_impl::ImageDecode;
+    let Some(decode) = decode else {
+        return Ok(ImageDecode::None);
+    };
+    let name = decode
+        .cast::<PyString>()
+        .map_err(|_| {
+            PyTypeError::new_err(format!(
+                "decode must be one of ('container', 'pixels'), not {}",
+                py_repr(decode)
+            ))
+        })?
+        .to_str()
+        .map_err(|_| {
+            PyValueError::new_err(format!(
+                "decode must be valid Unicode (no lone surrogates), not {}",
+                py_repr(decode)
+            ))
+        })?;
+    match name {
+        "container" => Ok(ImageDecode::Container),
+        "pixels" => Ok(ImageDecode::Pixels),
+        other => Err(PyValueError::new_err(format!(
+            "decode must be one of ('container', 'pixels'), not {other:?}"
+        ))),
+    }
+}
+
+/// The `max_image_bytes=` argument's parse (the per-image decode cap's
+/// override, R7): a positive int, `parse_max_bytes_on`'s type-vs-value
+/// convention, `ZeroRefusal::Binding` (a zero cap could never serve an
+/// image; refused at the parse, naming the argument).
+fn parse_max_image_bytes(max_image_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
+    let Some(max_image_bytes) = max_image_bytes else {
+        return Ok(None);
+    };
+    if max_image_bytes.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "max_image_bytes must be an int (the per-image decode ceiling in bytes), not a bool",
+        ));
+    }
+    let Ok(limit) = max_image_bytes.extract::<i64>() else {
+        if max_image_bytes.cast::<PyInt>().is_ok() {
+            return Err(PyValueError::new_err(format!(
+                "max_image_bytes {} is too large",
+                py_repr(max_image_bytes)
+            )));
+        }
+        return Err(PyTypeError::new_err(format!(
+            "max_image_bytes must be an int (the per-image decode ceiling in bytes), not {}",
+            py_repr(max_image_bytes)
+        )));
+    };
+    if limit <= 0 {
+        return Err(PyValueError::new_err(format!(
+            "max_image_bytes must be positive (the per-image decode ceiling in bytes), not {limit}"
+        )));
+    }
+    Ok(Some(limit as u64))
+}
+
+/// `tors.documents.page_text_chars(path=None, data=None, format=None,
+/// password=None, backend=None, pages=None, max_bytes=None) ->
+/// list[PageCharsData]`: the char-boxes probe (issue #206) — per unit of
+/// the resolved format's geometry lane, the unit's geometry plus — PDF
+/// pages only — the page's per-character boxes from the CACHED SPAN PARSE
+/// ONLY (`extract_spans` → `TextSpan::to_chars()` per span; never
+/// `extract_chars` as the source — it is raw-only and includes content
+/// the span path drops at the crop; R13: the span parse already runs the
+/// char extractor under the stamp, so this is the consistency choice, not
+/// a parse-independence one).
+///
+/// The char (per entry, a flat list in reading order — span order ×
+/// in-span order): `char` (one Unicode scalar — Python string indices,
+/// code points), `bbox` — `(x, y, w, h)`, points, bottom-left origin of
+/// the page's render space, **y is the BASELINE** (the em-box law: the
+/// box extends one font-size upward; descenders hang BELOW the box's
+/// bottom edge — the same convention as the span surface), `span_index`
+/// (into `page_layout`'s `spans` for the same page — the join law:
+/// `"".join(c.char for c in chars if c.span_index == s) ==
+/// spans[s].text` EXACTLY, pinned across two opens), `index_in_span`
+/// (code-point indexing: chars `[i, j)` of span s ground the substring
+/// `spans[s].text[i:j]`; the whole-span box is the SPAN's own mapped box,
+/// never the char union), `wmode` (0 horizontal, 1 vertical — the
+/// WMode-1 honesty field: a vertical run's char boxes are the engine's
+/// flattened fiction, displaced one advance LEFT of their origins and
+/// stacked along x, measured — a consumer may not pretend they are
+/// highlight-able), and `x_measured` (`true` = the engine's measured
+/// origins — drift ≈ the 0.5 pt tolerance + sub-point interpolation;
+/// `false` = the prefix-sum/uniform arm — the TJ-kerning drift class,
+/// bounded only by measurement: the engine folds Tc/Tw/Tz/TJ into the
+/// widths, so measured drift on every probe fixture is 0.000, and the
+/// analytic bound is `|Σ TJ adjustments before i| × font_size/1000` pt;
+/// a highlight box built from `x_measured: false` chars is APPROXIMATE).
+/// The flags are SPAN-CONSTANT (pinned); `x_measured` mirrors to_chars'
+/// OWN gate (R9), never `!offsets.is_empty()`.
+///
+/// The R4 mirror fix: on a page whose rotation the engine applied to a
+/// span, the pass derives the chars from the span's UNMAPPED box and maps
+/// each char box forward — the mapped frame's glyph order runs
+/// right-to-left while to_chars prefix-sums left-to-right, so the
+/// unmapped derivation is the only one that lands the boxes where the
+/// render draws the ink (measured pre-fix: ~35 pt displaced, chars
+/// overlapping).
+///
+/// Failure semantics: a page whose box read fails is `geometry: None` +
+/// `chars: []` (no frame to map into — page_layout's law); a content
+/// parse failure is `chars: []`, geometry intact (the engine's
+/// empty-on-error law); office rows carry `chars: []` with `format`
+/// provenance (R24); the `pages=`/`backend=`/`password=`/`max_bytes=`
+/// contracts and the refusal order are `page_layout`'s exactly.
+///
+/// GIL model: page_tables' shape (the O(pages × chars) nested
+/// construction is the getters', on access, post-detach). ⚠ A malformed
+/// PDF can crash the process (uncatchable native stack exhaustion in the
+/// pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
+/// SECURITY.md).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    format = None,
+    password = None,
+    backend = None,
+    pages = None,
+    max_bytes = None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn page_text_chars(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    format: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    pages: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PageCharsData>> {
+    let source = parse_source(path, data, "page_text_chars")?;
+    let format = parse_format(format)?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    // The capability refusal fires HERE — byte-identical to the other
+    // geometry surfaces' (one table, one message).
+    if backend == Backend::Anydoc
+        && let Some(refusal) = probe_capability_refusal(&source, format, backend)
+    {
+        return Err(document_error(py, refusal)?);
+    }
+    let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    let pages = parse_pages(pages)?;
+    let entries = match py.detach(move || {
+        let (bytes, hint) = source
+            .into_geometry_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
+        documents_impl::page_text_chars(
+            bytes,
+            hint.as_deref(),
+            format,
+            backend,
+            pages,
+            &documents_impl::ConvertOptions {
+                password: password.as_deref(),
+                max_bytes,
+            },
+        )
+    }) {
+        Ok(entries) => entries,
+        Err(err) => return Err(document_error(py, err)?),
+    };
+    Ok(entries
+        .into_iter()
+        .map(|inner| PageCharsData { inner })
+        .collect())
+}
+
+/// One `page_images` entry: the page's image metadata, and — only where
+/// `decode` asked and the decode succeeded — the bytes.
+///
+/// Exposed DIRECTLY (the `PageGeometry` deviation note applies); `==` is
+/// structural (the four fields).
+#[pyclass]
+pub struct PageImagesData {
+    inner: tors::pdf_impl::PageImagesData,
+}
+
+#[pymethods]
+impl PageImagesData {
+    /// The 0-based page this entry describes — mandatory on every entry,
+    /// because the `pages=` normalization reorders.
+    #[getter]
+    fn page_index(&self) -> usize {
+        self.inner.page_index
+    }
+
+    /// The resolved format's vocabulary name (`to_markdown`'s spelling):
+    /// the entry's provenance marker — on an office row it is what marks
+    /// `images: []` as "not served here" (a DOCX's images are real)
+    /// rather than "no images".
+    #[getter]
+    fn format(&self) -> &str {
+        &self.inner.format
+    }
+
+    /// The page's declared render box (the `page_geometry` entry): `None`
+    /// where the page's box cannot be read or declares no positive
+    /// extent — the images are STILL enumerated ([R11]: the bytes must
+    /// not drop for a frame reason), their `bbox` None.
+    #[getter]
+    fn geometry(&self) -> Option<PageGeometry> {
+        self.inner.geometry.map(|box_| PageGeometry {
+            inner: documents_impl::PageGeometry::from_page_box(box_),
+        })
+    }
+
+    /// The page's images, paint order — the same order `page_layout`'s
+    /// `images` lists (same enumeration, same transform).
+    #[getter]
+    fn images(&self) -> Vec<PageImageEntry> {
+        self.inner
+            .images
+            .iter()
+            .map(|i| PageImageEntry { inner: i.clone() })
+            .collect()
+    }
+
+    /// Structural equality (all four fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        let images = self
+            .inner
+            .images
+            .iter()
+            .map(image_entry_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "PageImagesData(page_index={}, format={:?}, geometry={}, images=[{}])",
+            self.inner.page_index,
+            self.inner.format,
+            match &self.inner.geometry {
+                Some(box_) =>
+                    page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
+                None => "None".to_string(),
+            },
+            images,
+        )
+    }
+}
+
+/// The `PageImagesData.images` element's repr: the entry's own Python
+/// shape (the repr law — never the Rust Debug).
+fn image_entry_repr(entry: &tors::pdf_impl::PageImageEntry) -> String {
+    format!(
+        "PageImageEntry(bbox={}, width_px={}, height_px={}, rotation_degrees={}, \
+         paint_order={}, color_space={:?}, color_space_declared={}, indexed_base={}, \
+         bits_per_component={}, byte_size_compressed={}, filters={:?}, is_inline={}, data={})",
+        match entry.bbox {
+            Some(bbox) => format!("{bbox:?}"),
+            None => "None".to_string(),
+        },
+        entry.width_px,
+        entry.height_px,
+        entry.rotation_degrees,
+        entry.paint_order,
+        entry.color_space,
+        entry.color_space_declared,
+        match &entry.indexed_base {
+            Some(base) => format!("Some({base:?})"),
+            None => "None".to_string(),
+        },
+        entry.bits_per_component,
+        entry.byte_size_compressed,
+        entry.filters,
+        entry.is_inline,
+        image_bytes_repr(&entry.data),
+    )
+}
+
+/// The `PageImageEntry.data` repr: the ImageBytes' own Python shape (the
+/// four-arm sum, each arm's fields as the getters return them).
+fn image_bytes_repr(data: &tors::pdf_impl::ImageBytes) -> String {
+    use tors::pdf_impl::{ContainerFormat, ImageBytes as IB};
+    match data {
+        IB::NotRequested => "ImageBytes(kind='not_requested')".to_string(),
+        IB::Container { bytes, container } => format!(
+            "ImageBytes(kind='container', bytes=<{} bytes>, container={:?})",
+            bytes.len(),
+            match container {
+                ContainerFormat::Jpeg => "jpeg",
+                ContainerFormat::Jp2 => "jp2",
+                ContainerFormat::J2kCodestream => "j2k_codestream",
+            }
+        ),
+        IB::Raw {
+            pixels,
+            width_px,
+            height_px,
+            components,
+            bits_per_component,
+            pixel_format,
+            samples_are_raw,
+            decode_folded_in,
+            icc,
+            ccitt,
+        } => format!(
+            "ImageBytes(kind='raw', pixels=<{} bytes>, width_px={}, height_px={}, \
+             components={}, bpc={}, pixel_format={:?}, samples_are_raw={}, \
+             decode_folded_in={}, icc={}, ccitt={})",
+            pixels.len(),
+            width_px,
+            height_px,
+            components,
+            bits_per_component,
+            match pixel_format {
+                tors::pdf_impl::PixelFormat::RGB => "rgb",
+                tors::pdf_impl::PixelFormat::Grayscale => "grayscale",
+                tors::pdf_impl::PixelFormat::CMYK => "cmyk",
+            },
+            samples_are_raw,
+            decode_folded_in,
+            icc,
+            match ccitt {
+                Some(params) => format!(
+                    "(k={}, columns={}, rows={}, black_is_1={}, end_of_line={}, \
+                     encoded_byte_align={}, end_of_block={})",
+                    params.k,
+                    params.columns,
+                    params.rows.map_or("None".to_string(), |r| r.to_string()),
+                    params.black_is_1,
+                    params.end_of_line,
+                    params.encoded_byte_align,
+                    params.end_of_block
+                ),
+                None => "None".to_string(),
+            }
+        ),
+        IB::Error(error) => match error {
+            tors::pdf_impl::ImageDataError::Decode(message) => {
+                format!("ImageBytes(kind='error', error_kind='decode', message={message:?})")
+            }
+            tors::pdf_impl::ImageDataError::Unsupported(message) => {
+                format!("ImageBytes(kind='error', error_kind='unsupported', message={message:?})")
+            }
+            tors::pdf_impl::ImageDataError::SizeCap {
+                scope,
+                limit_bytes,
+                needed_bytes,
+            } => format!(
+                "ImageBytes(kind='error', error_kind='size_cap', scope={:?}, \
+                 limit_bytes={}, needed_bytes={})",
+                match scope {
+                    tors::pdf_impl::CapScope::Image => "image",
+                    tors::pdf_impl::CapScope::Call => "call",
+                },
+                limit_bytes,
+                needed_bytes
+            ),
+        },
+    }
+}
+
+/// One image ([`PageImagesData.images`]): the handle's evidence always,
+/// the bytes only under opt-in decode.
+///
+/// Exposed DIRECTLY; `==` is structural (all thirteen fields).
+#[pyclass]
+pub struct PageImageEntry {
+    inner: tors::pdf_impl::PageImageEntry,
+}
+
+#[pymethods]
+impl PageImageEntry {
+    /// The image's axis-aligned box, `(x, y, w, h)`: points, bottom-left
+    /// origin of the page's render space — the same mapped box
+    /// `page_layout`'s `ImageBox` carries. `None` when the page's box
+    /// cannot be read ([R11]: no frame to map into — the bytes are still
+    /// served).
+    #[getter]
+    fn bbox(&self) -> Option<(f32, f32, f32, f32)> {
+        self.inner.bbox
+    }
+
+    /// The image's pixel width (the DICTIONARY's /Width — the decoded
+    /// buffer's own dims ride `data`).
+    #[getter]
+    fn width_px(&self) -> u32 {
+        self.inner.width_px
+    }
+
+    /// The image's pixel height (the dictionary's).
+    #[getter]
+    fn height_px(&self) -> u32 {
+        self.inner.height_px
+    }
+
+    /// The CTM's rotation angle in degrees, `atan2`-normalized to
+    /// [0, 360) — evidence, not an instruction.
+    #[getter]
+    fn rotation_degrees(&self) -> f32 {
+        self.inner.rotation_degrees
+    }
+
+    /// Page-local identity/z-order: the index among the page's painted
+    /// images, in content-stream order — pairs with `page_layout`'s
+    /// `images[paint_order]` (separate opens: a changed file between the
+    /// calls breaks the pairing).
+    #[getter]
+    fn paint_order(&self) -> u32 {
+        self.inner.paint_order
+    }
+
+    /// The resolved color space, spelled: `"DeviceGray" | "DeviceRGB" |
+    /// "DeviceCMYK" | "Indexed" | "CalGray" | "CalRGB" | "Lab" |
+    /// "ICCBased(n)" | "Separation" | "DeviceN" | "Pattern"`.
+    #[getter]
+    fn color_space(&self) -> &str {
+        &self.inner.color_space
+    }
+
+    /// Whether the resolved color space is engine-verified (R8): the
+    /// engine falls back to `DeviceRGB` when a dictionary's /ColorSpace
+    /// is absent or unparseable (and decode() then fails on that same
+    /// dictionary), so a `DeviceRGB` entry whose decode was not attempted
+    /// and successful reads `false` (the guess, marked); true for any
+    /// space the fallback cannot produce, and for a decode that
+    /// succeeded.
+    #[getter]
+    fn color_space_declared(&self) -> bool {
+        self.inner.color_space_declared
+    }
+
+    /// For an Indexed image, the de-indexed base space's name; None
+    /// otherwise.
+    #[getter]
+    fn indexed_base(&self) -> Option<String> {
+        self.inner.indexed_base.clone()
+    }
+
+    /// /BitsPerComponent — the DICTIONARY's value (R22); the decoded
+    /// buffer's own depth rides `data` (a consumer computing a stride
+    /// from this field's 16 would read an 8-byte buffer).
+    #[getter]
+    fn bits_per_component(&self) -> u8 {
+        self.inner.bits_per_component
+    }
+
+    /// /Length — the compressed stream's size in bytes (an inline
+    /// image's: the stored bytes between ID/EI).
+    #[getter]
+    fn byte_size_compressed(&self) -> u64 {
+        self.inner.byte_size_compressed
+    }
+
+    /// The filter chain, outermost first, spelled (`"FlateDecode"`, …);
+    /// an unlisted filter keeps its raw PDF name (R20).
+    #[getter]
+    fn filters(&self) -> Vec<String> {
+        self.inner.filters.clone()
+    }
+
+    /// Inline (BI/ID/EI) vs an XObject Do.
+    #[getter]
+    fn is_inline(&self) -> bool {
+        self.inner.is_inline
+    }
+
+    /// The decode result — the ALWAYS-PRESENT four-arm sum (R6/F9):
+    /// `kind` is `"not_requested" | "container" | "raw" | "error"` and
+    /// every other getter is None unless `kind` names it.
+    #[getter]
+    fn data(&self) -> ImageBytes {
+        ImageBytes {
+            inner: self.inner.data.clone(),
+        }
+    }
+
+    /// Structural equality (all thirteen fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        image_entry_repr(&self.inner)
+    }
+}
+
+/// The opt-in decode result ([`PageImageEntry.data`]): the always-present
+/// four-arm sum (R6). `kind` discriminates (`"not_requested" |
+/// "container" | "raw" | "error"`); every arm getter is None unless
+/// `kind` names it (F9) — "no bytes" is never two different things.
+///
+/// Exposed DIRECTLY; `==` is structural (the whole arm).
+#[pyclass]
+pub struct ImageBytes {
+    inner: tors::pdf_impl::ImageBytes,
+}
+
+#[pymethods]
+impl ImageBytes {
+    /// The arm: `"not_requested"` (no decode asked, or a containers-only
+    /// selection left this image out — the entry's `filters` say which),
+    /// `"container"` (the container bytes: the engine's decode()
+    /// passthrough — decryption included; `"jp2"`/`"j2k_codestream"` for
+    /// a bare JPX stream, F1's sniff), `"raw"` (decoded samples that
+    /// describe themselves), or `"error"` (a typed refusal: decode,
+    /// unsupported, or size cap).
+    #[getter]
+    fn kind(&self) -> &str {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::NotRequested => "not_requested",
+            IB::Container { .. } => "container",
+            IB::Raw { .. } => "raw",
+            IB::Error(_) => "error",
+        }
+    }
+
+    /// The container bytes — None unless `kind == "container"` (F9).
+    #[getter]
+    fn bytes(&self) -> Option<Vec<u8>> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Container { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        }
+    }
+
+    /// What the container bytes are: `"jpeg" | "jp2" |
+    /// "j2k_codestream"` — None unless `kind == "container"` (F9).
+    #[getter]
+    fn container(&self) -> Option<&'static str> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Container {
+                container: tors::pdf_impl::ContainerFormat::Jpeg,
+                ..
+            } => Some("jpeg"),
+            IB::Container {
+                container: tors::pdf_impl::ContainerFormat::Jp2,
+                ..
+            } => Some("jp2"),
+            IB::Container {
+                container: tors::pdf_impl::ContainerFormat::J2kCodestream,
+                ..
+            } => Some("j2k_codestream"),
+            _ => None,
+        }
+    }
+
+    /// The sample bytes — None unless `kind == "raw"` (F9).
+    #[getter]
+    fn pixels(&self) -> Option<Vec<u8>> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw { pixels, .. } => Some(pixels.clone()),
+            _ => None,
+        }
+    }
+
+    /// The decoded buffer's width — None unless `kind == "raw"`.
+    #[getter]
+    fn width_px(&self) -> Option<u32> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw { width_px, .. } => Some(*width_px),
+            _ => None,
+        }
+    }
+
+    /// The decoded buffer's height — None unless `kind == "raw"`.
+    #[getter]
+    fn height_px(&self) -> Option<u32> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw { height_px, .. } => Some(*height_px),
+            _ => None,
+        }
+    }
+
+    /// The decoded buffer's component count (the Indexed case names the
+    /// base's — the expansion's stride; the engine's `DeviceN` answer is
+    /// its parser's flat 4 even when the real ink count differs — the
+    /// buffer LENGTH is the truth there) — None unless `kind == "raw"`.
+    #[getter]
+    fn components(&self) -> Option<u8> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw { components, .. } => Some(*components),
+            _ => None,
+        }
+    }
+
+    /// The decoded buffer's bits per component (8 whenever a transform
+    /// rewrote the samples; the dictionary's own value when the buffer
+    /// stayed packed — CCITT, Lab, a non-1/3/4-component space) — None
+    /// unless `kind == "raw"`.
+    #[getter]
+    fn bpc(&self) -> Option<u8> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw {
+                bits_per_component, ..
+            } => Some(*bits_per_component),
+            _ => None,
+        }
+    }
+
+    /// The engine's display tag for the buffer: `"rgb" | "grayscale" |
+    /// "cmyk"` — a 1/3/4-byte tag that can LIE about the stride (R16:
+    /// Lab → `"rgb"` over Lab samples; an `ICCBased(2)` → `"rgb"` over a
+    /// packed 2-component buffer): `components`/`bpc` are the honest
+    /// stride. None unless `kind == "raw"`.
+    #[getter]
+    fn pixel_format(&self) -> Option<&'static str> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw {
+                pixel_format: tors::pdf_impl::PixelFormat::RGB,
+                ..
+            } => Some("rgb"),
+            IB::Raw {
+                pixel_format: tors::pdf_impl::PixelFormat::Grayscale,
+                ..
+            } => Some("grayscale"),
+            IB::Raw {
+                pixel_format: tors::pdf_impl::PixelFormat::CMYK,
+                ..
+            } => Some("cmyk"),
+            _ => None,
+        }
+    }
+
+    /// Whether the samples are still the values the image dictionary's
+    /// own entries are expressed in — TRUE is the COMMON case (R25: an
+    /// 8-bpc image with no non-default /Decode in a 1/3/4-component
+    /// space keeps it; it means "nothing transformed this buffer", never
+    /// "undecoded"). None unless `kind == "raw"`.
+    #[getter]
+    fn samples_are_raw(&self) -> Option<bool> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw {
+                samples_are_raw, ..
+            } => Some(*samples_are_raw),
+            _ => None,
+        }
+    }
+
+    /// Whether a non-default `/Decode` array is already mapped into the
+    /// samples — strictly narrower than `!samples_are_raw` (R6's
+    /// un-collapsed pair): a consumer that applies `/Decode` itself
+    /// (separation-plate routing) must read this one. None unless
+    /// `kind == "raw"`.
+    #[getter]
+    fn decode_folded_in(&self) -> Option<bool> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw {
+                decode_folded_in, ..
+            } => Some(*decode_folded_in),
+            _ => None,
+        }
+    }
+
+    /// Whether an ICC profile rode the decode — NAME-ONLY (R23): the
+    /// profile's bytes are deliberately not carried (they can be hundreds
+    /// of KiB and are shared per document); the space is named by the
+    /// entry's `color_space`/`indexed_base`. None unless `kind == "raw"`.
+    #[getter]
+    fn icc(&self) -> Option<bool> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw { icc, .. } => Some(*icc),
+            _ => None,
+        }
+    }
+
+    /// The CCITT parameters the packed codestream cannot be decoded
+    /// without (R10/F6: the packed stream is served VERBATIM — the
+    /// consumer has no PDF to read /DecodeParms from): the tuple
+    /// `(k, columns, rows, black_is_1, end_of_line, encoded_byte_align,
+    /// end_of_block)` — all seven fields the engine carries; `rows` is
+    /// None when undeclared. None for every non-CCITT image and unless
+    /// `kind == "raw"`.
+    #[getter]
+    #[allow(clippy::type_complexity)] // the seven params ride one tuple
+    fn ccitt(&self) -> Option<(i64, u32, Option<u32>, bool, bool, bool, bool)> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Raw {
+                ccitt: Some(params),
+                ..
+            } => Some((
+                params.k,
+                params.columns,
+                params.rows,
+                params.black_is_1,
+                params.end_of_line,
+                params.encoded_byte_align,
+                params.end_of_block,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Why the decode failed: `"decode"` (the engine's decode() failed —
+    /// the message is its Display), `"unsupported"` (a filter this build
+    /// cannot decode — retrying cannot fix it; the message is the
+    /// engine's feature-naming string verbatim on the shipped build), or
+    /// `"size_cap"` (this seam's ceiling refused BEFORE decoding — see
+    /// `scope`). None unless `kind == "error"` (F9).
+    #[getter]
+    fn error_kind(&self) -> Option<&'static str> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Error(tors::pdf_impl::ImageDataError::Decode(_)) => Some("decode"),
+            IB::Error(tors::pdf_impl::ImageDataError::Unsupported(_)) => Some("unsupported"),
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap { .. }) => Some("size_cap"),
+            _ => None,
+        }
+    }
+
+    /// The failure's message (the engine's own text, or the composed F1
+    /// refusal for an encrypted image whose container cannot be served) —
+    /// None unless `kind == "error"`.
+    #[getter]
+    fn message(&self) -> Option<String> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Error(tors::pdf_impl::ImageDataError::Decode(message))
+            | IB::Error(tors::pdf_impl::ImageDataError::Unsupported(message)) => {
+                Some(message.clone())
+            }
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap { .. }) => {
+                Some("the image's decode estimate exceeded the ceiling".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Which ceiling fired: `"image"` (the image's own estimate over the
+    /// per-image cap) or `"call"` (the cumulative budget the image would
+    /// push past) — None unless `kind == "error"` AND `error_kind ==
+    /// "size_cap"`.
+    #[getter]
+    fn scope(&self) -> Option<&'static str> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap {
+                scope: tors::pdf_impl::CapScope::Image,
+                ..
+            }) => Some("image"),
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap {
+                scope: tors::pdf_impl::CapScope::Call,
+                ..
+            }) => Some("call"),
+            _ => None,
+        }
+    }
+
+    /// The ceiling that fired, in bytes: the per-image cap (the default
+    /// 256 MiB or the `max_image_bytes=` override) for `scope ==
+    /// "image"`, the 512 MiB per-call budget for `scope == "call"` —
+    /// None unless `error_kind == "size_cap"`.
+    #[getter]
+    fn limit_bytes(&self) -> Option<u64> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap { limit_bytes, .. }) => {
+                Some(*limit_bytes)
+            }
+            _ => None,
+        }
+    }
+
+    /// The bytes the work needed: the image's own estimate for `scope ==
+    /// "image"`, the call's cumulative total had the image been served
+    /// for `scope == "call"` — None unless `error_kind == "size_cap"`.
+    #[getter]
+    fn needed_bytes(&self) -> Option<u64> {
+        use tors::pdf_impl::ImageBytes as IB;
+        match &self.inner {
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap { needed_bytes, .. }) => {
+                Some(*needed_bytes)
+            }
+            _ => None,
+        }
+    }
+
+    /// Structural equality (the whole arm).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        image_bytes_repr(&self.inner)
+    }
+}
+
+/// One `page_text_chars` entry: the page's chars from the cached span
+/// parse, reading order.
+///
+/// Exposed DIRECTLY; `==` is structural (the four fields).
+#[pyclass]
+pub struct PageCharsData {
+    inner: tors::pdf_impl::PageCharsData,
+}
+
+#[pymethods]
+impl PageCharsData {
+    /// The 0-based page this entry describes — mandatory on every entry,
+    /// because the `pages=` normalization reorders.
+    #[getter]
+    fn page_index(&self) -> usize {
+        self.inner.page_index
+    }
+
+    /// The resolved format's vocabulary name (`to_markdown`'s spelling):
+    /// the entry's provenance marker — on an office row `chars: []` is
+    /// the per-format capability statement (chars are PDF-only in v1),
+    /// not "no text".
+    #[getter]
+    fn format(&self) -> &str {
+        &self.inner.format
+    }
+
+    /// The page's declared render box (the `page_geometry` entry): `None`
+    /// where the page's box cannot be read or declares no positive
+    /// extent — then `chars` is empty too (no frame to map into).
+    #[getter]
+    fn geometry(&self) -> Option<PageGeometry> {
+        self.inner.geometry.map(|box_| PageGeometry {
+            inner: documents_impl::PageGeometry::from_page_box(box_),
+        })
+    }
+
+    /// The page's chars, reading order (span order × in-span order).
+    #[getter]
+    fn chars(&self) -> Vec<TextChar> {
+        self.inner
+            .chars
+            .iter()
+            .map(|c| TextChar { inner: c.clone() })
+            .collect()
+    }
+
+    /// Structural equality (all four fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        let chars = self
+            .inner
+            .chars
+            .iter()
+            .map(text_char_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "PageCharsData(page_index={}, format={:?}, geometry={}, chars=[{}])",
+            self.inner.page_index,
+            self.inner.format,
+            match &self.inner.geometry {
+                Some(box_) =>
+                    page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
+                None => "None".to_string(),
+            },
+            chars,
+        )
+    }
+}
+
+/// The `PageCharsData.chars` element's repr (the repr law).
+fn text_char_repr(ch: &tors::pdf_impl::TextCharBox) -> String {
+    format!(
+        "TextChar(char={:?}, bbox={:?}, span_index={}, index_in_span={}, wmode={}, x_measured={})",
+        ch.ch, ch.bbox, ch.span_index, ch.index_in_span, ch.wmode, ch.x_measured,
+    )
+}
+
+/// One character ([`PageCharsData.chars`]): the advance box from the
+/// baseline, in the page's render space — the per-char extension of the
+/// span surface's em-box law.
+///
+/// Exposed DIRECTLY; `==` is structural (all six fields).
+#[pyclass]
+pub struct TextChar {
+    inner: tors::pdf_impl::TextCharBox,
+}
+
+#[pymethods]
+impl TextChar {
+    /// The character (one Unicode scalar — Python string indices are
+    /// code points, so `spans[s].text[i:j]` slicing aligns with
+    /// `index_in_span`).
+    #[getter]
+    fn char(&self) -> char {
+        self.inner.ch
+    }
+
+    /// `(x, y, w, h)`: points, bottom-left origin of the page's render
+    /// space; **y is the BASELINE** — the box extends one font-size
+    /// upward (the em-box law; descenders hang BELOW the box's bottom
+    /// edge), h is the span's font size, w the char's advance. Boxes are
+    /// unclipped; the page box is the consumer's clip.
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        self.inner.bbox
+    }
+
+    /// The owning span's index in `page_layout`'s `spans` list for this
+    /// page — the join law makes `"".join(chars' char)` ==
+    /// `spans[span_index].text` EXACTLY.
+    #[getter]
+    fn span_index(&self) -> usize {
+        self.inner.span_index
+    }
+
+    /// The char's index WITHIN its span, in code points — chars
+    /// `[i, j)` of span s ground the substring `spans[s].text[i:j]`
+    /// (their union box). The WHOLE-span box is the span's own mapped
+    /// box, never the char union.
+    #[getter]
+    fn index_in_span(&self) -> usize {
+        self.inner.index_in_span
+    }
+
+    /// The span's writing mode: 0 horizontal, 1 vertical. The WMode-1
+    /// honesty field — a vertical run's char boxes are the engine's
+    /// flattened fiction (displaced one advance LEFT of their origins,
+    /// stacked along x, measured): a consumer may not pretend
+    /// `wmode == 1` chars are highlight-able.
+    #[getter]
+    fn wmode(&self) -> u8 {
+        self.inner.wmode
+    }
+
+    /// How the char's x was derived — SPAN-CONSTANT (pinned): `true` =
+    /// the engine's measured origins (drift ≈ the 0.5 pt tolerance +
+    /// sub-point interpolation); `false` = the prefix-sum/uniform arm
+    /// (the TJ-kerning drift class — the engine folds Tc/Tw/Tz/TJ into
+    /// the widths, so measured drift on every probe fixture is 0.000;
+    /// the analytic bound is `|Σ TJ adjustments before i| ×
+    /// font_size/1000` pt). A highlight box built from `x_measured:
+    /// false` chars is APPROXIMATE.
+    #[getter]
+    fn x_measured(&self) -> bool {
+        self.inner.x_measured
+    }
+
+    /// Structural equality (all six fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        text_char_repr(&self.inner)
+    }
+}
+
 /// `tors.documents.document_structure(path, data=None, format=None,
 /// backend=None, max_bytes=None) -> DocumentStructure`: or
 /// `document_structure(data=...)`: the structure surface (issues
@@ -5311,6 +6449,11 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Table>()?;
     m.add_class::<Row>()?;
     m.add_class::<Cell>()?;
+    m.add_class::<PageImagesData>()?;
+    m.add_class::<PageImageEntry>()?;
+    m.add_class::<ImageBytes>()?;
+    m.add_class::<PageCharsData>()?;
+    m.add_class::<TextChar>()?;
     m.add_class::<PdfSecurity>()?;
     m.add_class::<PdfPermissions>()?;
     m.add_class::<DocumentStructure>()?;
@@ -5334,6 +6477,8 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(page_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(page_layout, m)?)?;
     m.add_function(wrap_pyfunction!(page_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(page_images, m)?)?;
+    m.add_function(wrap_pyfunction!(page_text_chars, m)?)?;
     m.add_function(wrap_pyfunction!(document_structure, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_classify, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_extract, m)?)?;

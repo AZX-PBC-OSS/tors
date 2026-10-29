@@ -33,6 +33,8 @@ PDF carries ASCII + latin-1 text only.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import re
 import zipfile
@@ -1927,7 +1929,12 @@ def generate_pdf_layout(
         extras += f" /CropBox {cropbox}"
     xobject_entry = ""
     if image_ops is not None or images:
-        xobject_entry = f" /XObject << /Im1 {content_number + 1} 0 R >>"
+        # every image XObject is mapped (/Im1../ImN) — a content stream
+        # may reference several distinct XObjects (the broken-image
+        # fixture's healthy+truncated pair)
+        first = content_number + 1
+        entries = " ".join(f"/Im{i + 1} {first + i} 0 R" for i in range(len(images or [1])))
+        xobject_entry = f" /XObject << {entries} >>"
     resources = (
         "<< /Font << "
         + " ".join(f"/F{1 + i} {4 + i} 0 R" for i in range(len(fonts)))
@@ -2053,6 +2060,306 @@ def generate_pdf_layout_two_images() -> bytes:
     return generate_pdf_layout(
         b"q 50 0 0 50 100 100 cm /Im1 Do Q\nq 60 0 0 60 300 400 cm /Im1 Do Q",
         images=[LAYOUT_RED_1X1],
+    )
+
+
+# --- the page_images fixtures (issue #205; the probe's measured bytes) ------
+
+# A committed 301-byte 8×8 JPEG (ImageMagick, 2026-10-29; the probe's
+# tiny.jpg, base64-inlined so the fixture is byte-deterministic): the
+# DCT-container fixtures' payload.
+_TINY_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsK"
+    "CwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQU"
+    "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAIAAgDAREA"
+    "AhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACP/EABgQAAIDAAAAAAAAAAAAAAAAAAABFmOR/8QA"
+    "FQEBAQAAAAAAAAAAAAAAAAAABwj/xAAXEQADAQAAAAAAAAAAAAAAAAAAF2Oh/9oADAMBAAIRAxEA"
+    "PwAbT6xaOKPlhRzhrp//2Q=="
+)
+assert len(_TINY_JPEG) == 301 and _TINY_JPEG[:2] == b"\xff\xd8"
+
+# The JP2 signature box (ISO/IEC 15944-1 §I.5.1): length 12 + type `jP  ` +
+# the 0x0D0A870A break — the sniff's "jp2" shape.
+JP2_SIGNATURE_BOX = bytes(
+    [0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A]
+)
+
+
+def _image_xobject(dict_entries: str, data: bytes) -> bytes:
+    """An image XObject stream object: `dict_entries` after /Length."""
+    return (
+        f"<< /Length {len(data)} {dict_entries} >>\nstream\n".encode("ascii")
+        + data
+        + b"\nendstream"
+    )
+
+
+def generate_pdf_layout_dct(*, garbage: bool = False) -> bytes:
+    """The DCT-container fixture: the committed 301-byte 8×8 JPEG behind
+    /Filter /DCTDecode (``garbage=True``: a 1-byte junk payload — the
+    R19 pin that the container passthrough never PARSES the JPEG: a
+    parsed 1-byte JPEG would error)."""
+    data = b"\x00" if garbage else _TINY_JPEG
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode",
+                data,
+            )
+        ],
+    )
+
+
+def generate_pdf_layout_gradient(size: int = 64) -> bytes:
+    """The scanned-page fixture for the pixels decode: a `size`×`size`
+    DeviceGray FlateDecode image whose samples are the row-major gradient
+    ``(y*256 // size)`` — deterministic, so the decoded pixels are pinned
+    byte-for-byte against the source."""
+    samples = bytes(y * 256 // size for y in range(size) for _ in range(size))
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 64 /Height 64"
+                " /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+                zlib.compress(samples),
+            )
+        ],
+    )
+
+
+def generate_pdf_layout_gradient_source(size: int = 64) -> bytes:
+    """The gradient fixture's own sample bytes (the decode pin's oracle)."""
+    return bytes(y * 256 // size for y in range(size) for _ in range(size))
+
+
+def generate_pdf_layout_jpx(kind: str = "jp2") -> bytes:
+    """The bare-/JPXDecode fixtures: ``"jp2"`` (the JP2 signature box +
+    junk — the sniff's ``jp2`` shape), ``"soc"`` (the SOC marker FF 4F —
+    the ``j2k_codestream`` shape), ``"junk"`` (neither — the typed
+    ``decode`` error). The shipped wheel cannot decode JPX at all
+    (feature-gated), so the container is the only JPX content the surface
+    can ever serve."""
+    data = {
+        "jp2": JP2_SIGNATURE_BOX + b"junk-not-a-real-codestream",
+        "soc": b"\xff\x4f\x00\x01\x02",
+        "junk": b"\x00\x01\x02\x03",
+    }[kind]
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode",
+                data,
+            )
+        ],
+    )
+
+
+def generate_pdf_layout_ccitt() -> bytes:
+    """The CCITT fixture: G4 (K -1) 8×8, 1 bpc, the probe's 9 packed
+    bytes — decode() returns the stream VERBATIM (in == out, measured),
+    so the payload's seven /DecodeParms fields are the only way a
+    consumer can decode it."""
+    payload = bytes(range(9))
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace /DeviceGray /BitsPerComponent 1"
+                " /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 /Rows 8 >>",
+                payload,
+            )
+        ],
+    )
+
+
+def generate_pdf_layout_broken_image() -> bytes:
+    """The decode-failure fixture: a healthy red 1×1 (paint order 0) and
+    a truncated FlateDecode stream (paint order 1) — the typed Decode
+    entry with its sibling intact."""
+    return generate_pdf_layout(
+        b"q 50 0 0 50 100 100 cm /Im1 Do Q\nq 50 0 0 50 300 400 cm /Im2 Do Q",
+        images=[
+            LAYOUT_RED_1X1,
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+                b"\x78\x01\x01truncated",
+            ),
+        ],
+    )
+
+
+def generate_pdf_layout_huge_image() -> bytes:
+    """The cap fixture: /Width 20000 /Height 20000 /DeviceRGB
+    /FlateDecode with a CORRUPT deflate body — the estimate (1.2 GB)
+    refuses with the typed SizeCap BEFORE the labour (a fired arithmetic
+    check answers ``size_cap``; a labouring engine would answer
+    ``decode``)."""
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 20000 /Height 20000"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+                b"\x00\x01\x02",
+            )
+        ],
+    )
+
+
+def generate_pdf_layout_indexed() -> bytes:
+    """The Indexed fixture: 8×8, 8 bpc, a 4-entry RGB palette, a 64-byte
+    index stream — the expansion measured (192 RGB bytes from 64 index
+    samples, ``samples_are_raw`` False)."""
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace [/Indexed /DeviceRGB 3 <FF0000 00FF00 0000FF 000000>]"
+                " /BitsPerComponent 8 /Filter /FlateDecode",
+                zlib.compress(bytes(64)),
+            )
+        ],
+    )
+
+
+def generate_pdf_layout_missing_colorspace() -> bytes:
+    """The R8 fixture: an image XObject with NO /ColorSpace — the engine
+    reports its DeviceRGB default (color_space_declared False) and the
+    decode fails on that same dictionary."""
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /BitsPerComponent 8 /Filter /DCTDecode",
+                b"\x00",
+            )
+        ],
+    )
+
+
+def _r2_rc4(key: bytes, data: bytes) -> bytes:
+    """RC4 (the R2/V1 stream cipher), for the encrypted-image fixtures."""
+    state = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + state[i] + key[i % len(key)]) & 0xFF
+        state[i], state[j] = state[j], state[i]
+    out = bytearray()
+    i = j = 0
+    for byte in data:
+        i = (i + 1) & 0xFF
+        j = (j + state[i]) & 0xFF
+        state[i], state[j] = state[j], state[i]
+        out.append(byte ^ state[(state[i] + state[j]) & 0xFF])
+    return bytes(out)
+
+
+def _r2_encrypted_image_pdf(
+    user_pw: str, image_dict: str, image_data: bytes
+) -> bytes:
+    """An R2/V1-encrypted (RC4-40) one-page PDF carrying an image XObject
+    and the content stream that draws it — both streams RC4-encrypted
+    with their per-object keys (MD5(file_key ‖ obj# 3LE ‖ gen# 2LE),
+    truncated to 10 bytes at n=5). The probe's enc.pdf shape."""
+
+    pad = bytes(
+        [
+            0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00,
+            0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6,
+            0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53,
+            0x69, 0x7A,
+        ]
+    )
+    id0 = bytes([0x71] * 16)
+
+    def padded(password: str) -> bytes:
+        raw = password.encode("ascii")[:32]
+        return raw + pad[: 32 - len(raw)]
+
+    owner_value = _r2_rc4(hashlib.md5(padded("owner-pw")).digest()[:5], pad)
+    file_key = (
+        hashlib.md5(
+            padded(user_pw) + owner_value + (-4).to_bytes(4, "little", signed=True) + id0
+        ).digest()[:5]
+    )
+    user_value = _r2_rc4(file_key, pad)
+
+    def object_key(obj: int) -> bytes:
+        mixing = hashlib.md5(
+            file_key + obj.to_bytes(4, "little")[:3] + b"\x00\x00"
+        ).digest()
+        return mixing[:10]
+
+    content = b"q 100 0 0 100 50 600 cm /Im1 Do Q"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 4 0 R >> >>"
+            b" /MediaBox [0 0 612 792] /Contents 5 0 R >>"
+        ),
+        _image_xobject(image_dict, _r2_rc4(object_key(4), image_data)),
+        (
+            f"<< /Length {len(content)} >>\nstream\n".encode("ascii")
+            + _r2_rc4(object_key(5), content)
+            + b"\nendstream"
+        ),
+        (
+            "<< /Filter /Standard /V 1 /R 2 /O <".encode("ascii")
+            + owner_value.hex().encode("ascii")
+            + b"> /U <"
+            + user_value.hex().encode("ascii")
+            + b"> /P -4 >>"
+        ),
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode("ascii") + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode("ascii")
+    out += b"0000000000 65535 f \n"
+    for offset in offsets[1:]:
+        out += f"{offset:010} 00000 n \n".encode("ascii")
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R /Encrypt 6 0 R"
+        f" /ID [<%s> <%s>] >>\nstartxref\n{xref_at}\n%%EOF"
+    ).encode("ascii") % (id0.hex().encode("ascii"), id0.hex().encode("ascii"))
+    return bytes(out)
+
+
+def generate_pdf_encrypted_dct() -> bytes:
+    """The R1 pin's fixture: an RC4-40 PDF whose DCT image is ENCRYPTED —
+    the container must come back DECRYPTED (ff d8, the JPEG's own bytes)
+    from decode(), never the ciphertext raw stream bytes."""
+    return _r2_encrypted_image_pdf(
+        "user",
+        "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+        " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode",
+        _TINY_JPEG,
+    )
+
+
+def generate_pdf_encrypted_jpx() -> bytes:
+    """The F1 refusal's fixture: an RC4-40 PDF whose bare-/JPXDecode
+    image is ENCRYPTED — its container bytes would be ciphertext and the
+    shipped build cannot decode the filter: the typed ``unsupported``
+    refusal naming both causes."""
+    return _r2_encrypted_image_pdf(
+        "user",
+        "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+        " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode",
+        JP2_SIGNATURE_BOX + b"junk",
     )
 
 

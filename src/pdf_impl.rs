@@ -148,9 +148,10 @@ use pdf_oxide::document::PdfDocument;
 // Public: the payload crate's error mapping and `documents_impl`'s
 // `PagesError` both name this type through `pdf_impl`.
 pub use pdf_oxide::Error as PdfError;
-use pdf_oxide::extractors::images::{
-    ColorSpace, ImageData, PdfFilter, PdfImageHandle, PixelFormat,
-};
+// Public: `ImageBytes::Raw`'s `pixel_format` field names this type, so
+// the payload crate's binding needs it reachable through `pdf_impl`.
+pub use pdf_oxide::extractors::images::PixelFormat;
+use pdf_oxide::extractors::images::{ColorSpace, ImageData, PdfFilter, PdfImageHandle};
 use pdf_oxide::extractors::{PageLabelExtractor, PageLabelRange, PageLabelStyle};
 use pdf_oxide::{AnnotationSubtype, LinkAction};
 
