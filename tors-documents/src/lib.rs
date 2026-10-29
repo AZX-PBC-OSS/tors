@@ -2245,6 +2245,1623 @@ impl PageTables {
     }
 }
 
+/// `tors.documents.document_structure(path, data=None, format=None,
+/// backend=None, max_bytes=None) -> DocumentStructure`: or
+/// `document_structure(data=...)`: the structure surface (issues
+/// #209/#210/#211) — one report whose resolved `format` discriminates and
+/// whose `payload` is exactly one of the three per-format structures:
+///
+/// - **docx** (`DocxStructure`): the body's blocks in document order from
+///   the office_oxide RAW layer — headings (`level` clamped 1..=6 plus
+///   the raw 0-based `outline_level`; the ladder is direct
+///   `w:outlineLvl` → the stylesheet's basedOn chain → the Heading1..9
+///   style-ID convention → the style-NAME convention), list state from
+///   the EFFECTIVE properties (style-carried `numPr` included), the
+///   block's visible text (hidden runs resolved, breaks/tabs, text-box
+///   prose recursed, form fields), tables (grid verbatim, gridSpan- and
+///   vMerge-derived spans, `tblCaption`), hyperlinks (href/anchor split),
+///   real pictures (rid + extension + declared extents ÷ 12700), the
+///   section partition (`section_breaks` + the count law), note counts,
+///   and `unreadable_parts`.
+/// - **xlsx** (`XlsxStructure`): the worksheets (hidden and macro sheets
+///   served, each carrying its own name and state), the workbook's
+///   chart/dialog sheet names, the used range COMPUTED from the parsed
+///   cells (styled-empty cells included; the declared `<dimension>` rides
+///   beside it for provenance), the cells with values AS THE FILE STATES
+///   THEM (`type`-discriminated bool | float | str | None, shared strings
+///   dereferenced to their full text, `t="d"` the only date shape),
+///   formula text + cached value both labeled, merged ranges, sheet
+///   hyperlinks (href/anchor split), comments, and defined names.
+/// - **html** (`HtmlStructure`): the conversion lane's own parse run once
+///   with the structure collector on (no second parser, no second
+///   opinion): the flat node array (parents precede children), the NINE
+///   reachable kinds, heading `id` attributes, link annotations with byte
+///   ranges and url/title, table grids with row/col/spans/header cells —
+///   the conversion output is discarded; the surface returns structure
+///   only.
+///
+/// Entries carry container anchors, never boxes — no coordinates anywhere
+/// (a docx section index, a cell reference, a node id: those are the
+/// anchors; a caller wanting office/PDF coordinates is on
+/// page_geometry/page_tables/page_layout).
+///
+/// `backend` names the engine lane: `"auto"` is the default and `"oxide"`
+/// is identical on the served office rows (the structure lane is a
+/// property of the format). The refused formats refuse on EVERY backend —
+/// a format-level `ValueError` ("document_structure cannot serve …")
+/// fired before the backend check, so `(pdf, anydoc)` answers the pdf
+/// refusal, never an anydoc-template message whose "use backend='auto'"
+/// tail would be a lie: pdf (its answer is already geometry + tables),
+/// doc/xls/ppt (office_oxide's converter-internal IR is not a raw layer),
+/// pptx (the raw layer is reachable; the surface is not built yet), and
+/// rtf/odt/ods/odp/epub/csv (no parse tree anywhere — the format converts
+/// fine; "no structure surface", never "unreadable"). The served office
+/// rows refuse `backend="anydoc"` as a capability (`ValueError`); html's
+/// forced backends are conversion's own `UnsupportedBackend` pair
+/// byte-identical.
+///
+/// `format` names the format explicitly (extension spelling, no dot,
+/// case-insensitive; the container aliases `docm`/`xlsm` resolve onto
+/// their served bases). The explicit name is trusted and NEVER re-sniffed
+/// — the conversion lane's own precedence, so `format="html"` on docx
+/// bytes is the html lane's own binary-input refusal, and the fix-it is
+/// `sniff()`. The one container-dependent name is the Excel kind's OLE
+/// case: an OLE container under the Excel kind is a legacy xls workbook
+/// OR an encrypted xlsx package (both CFB, indistinguishable without a
+/// full legacy parse) and refuses with the union message naming both.
+///
+/// There is NO `password=` parameter: no served format accepts one (the
+/// engines are office_oxide's raw readers and the html collector; an
+/// encrypted OOXML package is a typed engine `ValueError`, a PDF refuses
+/// first, and a Rust caller passing one into the core gets the explicit
+/// refusal — never a silently-ignored argument).
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`):
+/// an explicit budget binds pre-read exactly as on every other entry
+/// point, and `None` keeps the 32 MiB default ceiling on every served row
+/// (the office legs' audit-and-ceiling pairing and the html lane's
+/// — the conversion lane's ~23× measured amplification is a LOWER bound
+/// for the structure lane, which also holds the node array). Zero is
+/// refused core-side, sequenced after the capability refusal. The entry
+/// cap is separate and honest: [`MAX_STRUCTURE_ENTRIES`]
+/// (`tors.documents.MAX_STRUCTURE_ENTRIES`) bounds the PAYLOAD's entry
+/// lists at 200,000 in document order, with `entries_truncated` on the
+/// affected payload and all sheet/range/merge/name metadata complete — a
+/// marshalling bound, never a refusal.
+///
+/// Errors: `OSError` for a missing/unreadable file; `ValueError` for
+/// bytes that resolve to no format (`sniff()` is the fix-it), an unknown
+/// `format=` name, a bad backend name, every refused format row (GIL-side,
+/// resolved from `format=`/the 64 KiB prefix alone, before any read — a
+/// positive content-resolve to a refused kind stops at the prefix and
+/// refuses), the Excel-OLE union, `backend="anydoc"` on a served office
+/// row, an over-budget input, `max_bytes=0`, a malformed/encrypted
+/// document, an office container that will not parse or pass the
+/// decompression audit, and an over-ceiling input.
+///
+/// GIL model: the argument marshalling plus the capability probe (a
+/// bounded 64 KiB prefix read) under the GIL; the whole
+/// read+resolve+structure pass under one `py.detach`; then O(payload) of
+/// native-object construction post-detach (the payload pyclasses are
+/// thin getters over plain core structs — structural `==` throughout).
+/// The html lane parses UNTRUSTED markup with the same engine the
+/// conversion pair uses; see docs/documents.md, SECURITY.md.
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    format = None,
+    backend = None,
+    max_bytes = None,
+))]
+pub fn document_structure(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    format: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DocumentStructure> {
+    let source = parse_source(path, data, "document_structure")?;
+    let format = parse_format(format)?;
+    let backend = parse_backend(backend)?;
+    // The capability refusal fires HERE — under the GIL, before the
+    // detach and before any byte of the document is read — for EVERY
+    // backend (the format-level family precedes the backend check; the
+    // geometry surfaces' probe is anydoc-only because their refusals
+    // are, and this surface's are not). The probe resolves from the
+    // format name, the content markers in the 64 KiB prefix, or the
+    // name hint's extension — the same precedence the core's resolve
+    // runs — and defers when even the prefix cannot resolve (the
+    // core's authoritative resolve is the only truth).
+    if let Some(refusal) = probe_structure_refusal(&source, format, backend) {
+        return Err(document_error(py, refusal)?);
+    }
+    // There is no password= parameter to parse (F25): no served format
+    // accepts one, and the core's own check keeps the Rust seam honest.
+    // The zero value threads through (`parse_max_bytes_on`): the core's
+    // sequenced check is this surface's zero refusal.
+    let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    let report = match py.detach(move || {
+        let (bytes, hint) = source
+            .into_structure_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
+        documents_impl::document_structure(
+            bytes,
+            hint.as_deref(),
+            format,
+            backend,
+            &documents_impl::ConvertOptions {
+                password: None,
+                max_bytes,
+            },
+        )
+    }) {
+        Ok(report) => report,
+        Err(err) => return Err(document_error(py, err)?),
+    };
+    // O(1) of native construction here — the payload pyclasses are thin
+    // getters, materializing their entries on access (the PageTables
+    // residue class).
+    Ok(DocumentStructure { inner: report })
+}
+
+/// The structure surface's pre-read capability probe (the
+/// `probe_capability_refusal` twin, keyed on the structure table and
+/// fired for EVERY backend): the format-level refusal the call will
+/// raise, resolved as far as the format resolves without the
+/// authoritative read. `None` defers to the core (unresolvable prefix /
+/// a served row).
+fn probe_structure_refusal(
+    source: &Source<'_>,
+    format: Option<&str>,
+    backend: Backend,
+) -> Option<DocumentError> {
+    let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
+        Source::Data(bytes) => {
+            documents_impl::probe_structure_capability(bytes, None, format, backend)
+        }
+        Source::Path(path) => {
+            let gated = std::fs::metadata(path)
+                .map_err(|_| ())
+                .and_then(|meta| refuse_non_regular(path, meta.file_type()).map_err(|_| ()));
+            if gated.is_err() {
+                return None;
+            }
+            let mut file = std::fs::File::open(path).ok()?;
+            let (prefix, _over) =
+                documents_impl::read_bounded_into(&mut file, Vec::new(), SNIFF_PREFIX).ok()?;
+            documents_impl::probe_structure_capability(&prefix, path.to_str(), format, backend)
+        }
+    };
+    probed.err()
+}
+
+/// The `document_structure` report: the resolved format's vocabulary name
+/// and exactly one per-format payload. The payload getter is the ONE
+/// discriminating accessor (`isinstance(report.payload, DocxStructure)`
+/// narrows); `==` is structural (the whole report).
+#[pyclass]
+pub struct DocumentStructure {
+    inner: documents_impl::StructureReport,
+}
+
+#[pymethods]
+impl DocumentStructure {
+    /// The resolved format's vocabulary name (the `to_markdown` spelling,
+    /// the container-aware `xls`/`xlsx` case included): provenance, and
+    /// the same spelling the refusals use.
+    #[getter]
+    fn format(&self) -> &str {
+        self.inner.format
+    }
+
+    /// The per-format structure: exactly one of `DocxStructure`,
+    /// `XlsxStructure`, or `HtmlStructure` — narrow with `isinstance`.
+    /// A fresh native object per access (the `PageLayout.geometry`
+    /// precedent), structurally equal to its siblings.
+    #[getter]
+    fn payload(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.inner.payload {
+            documents_impl::StructurePayload::Docx(inner) => Ok(Py::new(
+                py,
+                DocxStructure {
+                    inner: inner.clone(),
+                },
+            )?
+            .into_any()),
+            documents_impl::StructurePayload::Xlsx(inner) => Ok(Py::new(
+                py,
+                XlsxStructure {
+                    inner: inner.clone(),
+                },
+            )?
+            .into_any()),
+            documents_impl::StructurePayload::Html(inner) => Ok(Py::new(
+                py,
+                HtmlStructure {
+                    inner: inner.clone(),
+                },
+            )?
+            .into_any()),
+        }
+    }
+
+    /// Structural equality: two reports are equal exactly when their
+    /// formats and payloads are (the core owns plain `PartialEq`
+    /// structs — office_oxide's own types carry no `PartialEq`, so the
+    /// seam's types are the comparison's home).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DocumentStructure(format={:?}, payload={})",
+            self.inner.format,
+            structure_payload_repr(&self.inner.payload)
+        )
+    }
+}
+
+/// The payload pyclasses' shared repr shape: each payload's own class
+/// name and fields, the way its own `__repr__` prints standalone.
+fn structure_payload_repr(payload: &documents_impl::StructurePayload) -> String {
+    match payload {
+        documents_impl::StructurePayload::Docx(inner) => docx_structure_repr(inner),
+        documents_impl::StructurePayload::Xlsx(inner) => xlsx_structure_repr(inner),
+        documents_impl::StructurePayload::Html(inner) => html_structure_repr(inner),
+    }
+}
+
+/// The payload lists' repr: the entries as their own classes' Python
+/// shapes, capped so a repr of a capped payload stays usable (the
+/// truncation marker is part of the shape).
+fn structure_list_repr<T>(entries: &[T], repr: impl Fn(&T) -> String) -> String {
+    if entries.is_empty() {
+        return "[]".to_string();
+    }
+    let shown = entries.len().min(3);
+    let items = entries[..shown]
+        .iter()
+        .map(repr)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rest = if entries.len() > shown {
+        format!(", … {} more", entries.len() - shown)
+    } else {
+        String::new()
+    };
+    format!("[{items}{rest}]")
+}
+
+fn docx_link_repr(link: &documents_impl::DocxLink) -> String {
+    format!(
+        "DocxLink(text={:?}, href={}, anchor={})",
+        link.text,
+        option_str_repr(link.href.as_deref()),
+        option_str_repr(link.anchor.as_deref()),
+    )
+}
+
+fn docx_image_repr(image: &documents_impl::DocxImage) -> String {
+    format!(
+        "DocxImage(relationship_id={:?}, file_ext={}, description={}, width_pt={}, height_pt={}, inline={}, decorative={})",
+        image.relationship_id,
+        option_str_repr(image.file_ext.as_deref()),
+        option_str_repr(image.description.as_deref()),
+        option_float_repr(image.width_pt),
+        option_float_repr(image.height_pt),
+        image.inline,
+        image.decorative,
+    )
+}
+
+fn option_str_repr(value: Option<&str>) -> String {
+    match value {
+        Some(text) => format!("{text:?}"),
+        None => "None".to_string(),
+    }
+}
+
+fn option_float_repr(value: Option<f32>) -> String {
+    match value {
+        Some(number) => format!("{number:?}"),
+        None => "None".to_string(),
+    }
+}
+
+fn docx_cell_repr(cell: &documents_impl::DocxCell) -> String {
+    format!(
+        "DocxCell(row={}, col={}, text={:?}, row_span={}, col_span={})",
+        cell.row, cell.col, cell.text, cell.row_span, cell.col_span,
+    )
+}
+
+fn docx_table_repr(table: &documents_impl::DocxTable) -> String {
+    format!(
+        "DocxTable(rows={}, cols={}, cells={}, caption={})",
+        table.rows,
+        table.cols,
+        structure_list_repr(&table.cells, docx_cell_repr),
+        option_str_repr(table.caption.as_deref()),
+    )
+}
+
+fn docx_block_repr(block: &documents_impl::DocxBlock) -> String {
+    format!(
+        "DocxBlock(index={}, section={}, kind={:?}, text={:?}, level={}, outline_level={}, table={}, links={}, images={})",
+        block.index,
+        block.section,
+        block.kind,
+        block.text,
+        option_match_repr(block.level),
+        option_match_repr(block.outline_level),
+        block
+            .table
+            .as_ref()
+            .map(docx_table_repr)
+            .unwrap_or_else(|| "None".to_string()),
+        structure_list_repr(&block.links, docx_link_repr),
+        structure_list_repr(&block.images, docx_image_repr),
+    )
+}
+
+fn option_match_repr(value: Option<impl std::fmt::Display>) -> String {
+    match value {
+        Some(number) => format!("{number}"),
+        None => "None".to_string(),
+    }
+}
+
+fn docx_structure_repr(docx: &documents_impl::DocxStructure) -> String {
+    format!(
+        "DocxStructure(blocks={}, sections={}, footnotes={}, endnotes={}, comments={}, entries_truncated={})",
+        structure_list_repr(&docx.blocks, docx_block_repr),
+        docx.sections,
+        docx.footnotes,
+        docx.endnotes,
+        docx.comments,
+        docx.entries_truncated,
+    )
+}
+
+fn xlsx_cell_repr(cell: &documents_impl::XlsxCell) -> String {
+    format!(
+        "XlsxCell(ref={:?}, row={}, col={}, type={:?}, value={}, formula={}, has_cached_value={})",
+        cell.reference,
+        cell.row,
+        cell.col,
+        cell.kind,
+        xlsx_scalar_repr(cell.value.as_ref()),
+        option_str_repr(cell.formula.as_deref()),
+        cell.has_cached_value,
+    )
+}
+
+fn xlsx_scalar_repr(value: Option<&documents_impl::XlsxScalar>) -> String {
+    match value {
+        None => "None".to_string(),
+        Some(documents_impl::XlsxScalar::Bool(true)) => "True".to_string(),
+        Some(documents_impl::XlsxScalar::Bool(false)) => "False".to_string(),
+        Some(documents_impl::XlsxScalar::Number(number)) => format!("{number:?}"),
+        Some(documents_impl::XlsxScalar::Text(text)) => format!("{text:?}"),
+    }
+}
+
+fn xlsx_hyperlink_repr(link: &documents_impl::XlsxHyperlink) -> String {
+    format!(
+        "XlsxHyperlink(cell_ref={:?}, href={}, anchor={})",
+        link.cell_ref,
+        option_str_repr(link.href.as_deref()),
+        option_str_repr(link.anchor.as_deref()),
+    )
+}
+
+fn xlsx_comment_repr(comment: &documents_impl::XlsxComment) -> String {
+    format!(
+        "XlsxComment(cell_ref={:?}, author={}, text={:?})",
+        comment.cell_ref,
+        option_str_repr(comment.author.as_deref()),
+        comment.text,
+    )
+}
+
+fn xlsx_defined_name_repr(name: &documents_impl::XlsxDefinedName) -> String {
+    format!(
+        "XlsxDefinedName(name={:?}, value={:?}, local_sheet_id={}, local_sheet_name={}, hidden={})",
+        name.name,
+        name.value,
+        option_match_repr(name.local_sheet_id),
+        option_str_repr(name.local_sheet_name.as_deref()),
+        name.hidden,
+    )
+}
+
+fn xlsx_sheet_repr(sheet: &documents_impl::XlsxSheet) -> String {
+    format!(
+        "XlsxSheet(name={:?}, state={:?}, used_range={}, declared_dimension={}, max_row={}, max_col={}, cells={}, merged_cells={:?}, hyperlinks={}, comments={})",
+        sheet.name,
+        sheet.state,
+        option_str_repr(sheet.used_range.as_deref()),
+        option_str_repr(sheet.declared_dimension.as_deref()),
+        option_match_repr(sheet.max_row),
+        option_match_repr(sheet.max_col),
+        structure_list_repr(&sheet.cells, xlsx_cell_repr),
+        sheet.merged_cells,
+        structure_list_repr(&sheet.hyperlinks, xlsx_hyperlink_repr),
+        structure_list_repr(&sheet.comments, xlsx_comment_repr),
+    )
+}
+
+fn xlsx_structure_repr(xlsx: &documents_impl::XlsxStructure) -> String {
+    format!(
+        "XlsxStructure(sheets={}, chartsheets={:?}, defined_names={}, date1904={}, unreadable_sheets={:?}, entries_truncated={})",
+        structure_list_repr(&xlsx.sheets, xlsx_sheet_repr),
+        xlsx.chartsheets,
+        structure_list_repr(&xlsx.defined_names, xlsx_defined_name_repr),
+        xlsx.date1904,
+        xlsx.unreadable_sheets,
+        xlsx.entries_truncated,
+    )
+}
+
+fn html_annotation_repr(annotation: &documents_impl::HtmlAnnotation) -> String {
+    format!(
+        "HtmlAnnotation(kind={:?}, start={}, end={}, url={}, title={})",
+        annotation.kind,
+        annotation.start,
+        annotation.end,
+        option_str_repr(annotation.url.as_deref()),
+        option_str_repr(annotation.title.as_deref()),
+    )
+}
+
+fn html_grid_cell_repr(cell: &documents_impl::HtmlGridCell) -> String {
+    format!(
+        "HtmlGridCell(row={}, col={}, row_span={}, col_span={}, is_header={}, content={:?})",
+        cell.row, cell.col, cell.row_span, cell.col_span, cell.is_header, cell.content,
+    )
+}
+
+fn html_grid_repr(grid: &documents_impl::HtmlGrid) -> String {
+    format!(
+        "HtmlGrid(rows={}, cols={}, cells={})",
+        grid.rows,
+        grid.cols,
+        structure_list_repr(&grid.cells, html_grid_cell_repr),
+    )
+}
+
+fn html_attributes_repr(attributes: &Option<std::collections::HashMap<String, String>>) -> String {
+    match attributes {
+        None => "None".to_string(),
+        Some(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let pairs = keys
+                .iter()
+                .map(|key| format!("{key:?}: {:?}", map[*key]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{pairs}}}")
+        }
+    }
+}
+
+fn html_node_repr(node: &documents_impl::HtmlNode) -> String {
+    format!(
+        "HtmlNode(id={:?}, kind={:?}, text={}, level={}, parent={}, attributes={}, annotations={})",
+        node.id,
+        node.kind,
+        option_str_repr(node.text.as_deref()),
+        option_match_repr(node.level),
+        option_match_repr(node.parent),
+        html_attributes_repr(&node.attributes),
+        structure_list_repr(&node.annotations, html_annotation_repr),
+    )
+}
+
+fn html_structure_repr(html: &documents_impl::HtmlStructure) -> String {
+    format!(
+        "HtmlStructure(nodes={}, entries_truncated={})",
+        structure_list_repr(&html.nodes, html_node_repr),
+        html.entries_truncated,
+    )
+}
+
+/// The DOCX payload (the `document_structure` report's `payload` for a
+/// docx): thin getters over the core's plain struct; `==` is structural.
+#[pyclass]
+pub struct DocxStructure {
+    inner: documents_impl::DocxStructure,
+}
+
+#[pymethods]
+impl DocxStructure {
+    /// The body's blocks, body order.
+    #[getter]
+    fn blocks(&self) -> Vec<DocxBlock> {
+        self.inner
+            .blocks
+            .iter()
+            .map(|block| DocxBlock {
+                inner: block.clone(),
+            })
+            .collect()
+    }
+
+    /// The body partition law: `section_breaks.len() + 1`.
+    #[getter]
+    fn sections(&self) -> usize {
+        self.inner.sections
+    }
+
+    /// `body.section_breaks` verbatim (anchor math for `block.section`).
+    #[getter]
+    fn section_breaks(&self) -> Vec<usize> {
+        self.inner.section_breaks.clone()
+    }
+
+    /// Footnote body count.
+    #[getter]
+    fn footnotes(&self) -> usize {
+        self.inner.footnotes
+    }
+
+    /// Endnote body count.
+    #[getter]
+    fn endnotes(&self) -> usize {
+        self.inner.endnotes
+    }
+
+    /// Comment body count.
+    #[getter]
+    fn comments(&self) -> usize {
+        self.inner.comments
+    }
+
+    /// The raw layer's unreadable parts, verbatim (the report-the-loss
+    /// law).
+    #[getter]
+    fn unreadable_parts(&self) -> Vec<String> {
+        self.inner.unreadable_parts.clone()
+    }
+
+    /// True when the blocks stopped at `MAX_STRUCTURE_ENTRIES` (the
+    /// marshalling bound; the metadata above stays complete).
+    #[getter]
+    fn entries_truncated(&self) -> bool {
+        self.inner.entries_truncated
+    }
+
+    /// Structural equality (all eight fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        docx_structure_repr(&self.inner)
+    }
+}
+
+/// One DOCX body block.
+#[pyclass]
+pub struct DocxBlock {
+    inner: documents_impl::DocxBlock,
+}
+
+#[pymethods]
+impl DocxBlock {
+    /// Position in `body.elements` (the stable container anchor).
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.index
+    }
+
+    /// The covering section (the count of `section_breaks <= index`).
+    #[getter]
+    fn section(&self) -> usize {
+        self.inner.section
+    }
+
+    /// `"heading" | "list_item" | "paragraph" | "table"` — the heading
+    /// wins over the list (a numbered heading is a heading carrying
+    /// numPr).
+    #[getter]
+    fn kind(&self) -> &str {
+        self.inner.kind
+    }
+
+    /// The block's visible text (the walk's own rules; `""` for table
+    /// blocks — the cells carry the text).
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// Headings only: the markdown depth, clamped 1..=6.
+    #[getter]
+    fn level(&self) -> Option<u8> {
+        self.inner.level
+    }
+
+    /// Headings only: the ladder's raw 0-based outline level.
+    #[getter]
+    fn outline_level(&self) -> Option<u8> {
+        self.inner.outline_level
+    }
+
+    /// The raw `w:pStyle` string.
+    #[getter]
+    fn style_id(&self) -> Option<String> {
+        self.inner.style_id.clone()
+    }
+
+    /// The numbering instance, whenever the EFFECTIVE properties carry
+    /// `numPr` with `numId != 0` (a numbered heading's included).
+    #[getter]
+    fn num_id(&self) -> Option<u32> {
+        self.inner.num_id
+    }
+
+    /// The numbering level.
+    #[getter]
+    fn ilvl(&self) -> Option<u8> {
+        self.inner.ilvl
+    }
+
+    /// The resolved number format's own name ("decimal", "bullet", …).
+    #[getter]
+    fn list_format(&self) -> Option<String> {
+        self.inner.list_format.clone()
+    }
+
+    /// The level's effective start (startOverride-aware).
+    #[getter]
+    fn start_number(&self) -> Option<u32> {
+        self.inner.start_number
+    }
+
+    /// `kind == "table"` only: the grid.
+    #[getter]
+    fn table(&self) -> Option<DocxTable> {
+        self.inner
+            .table
+            .clone()
+            .map(|table| DocxTable { inner: table })
+    }
+
+    /// The block's hyperlinks, in order.
+    #[getter]
+    fn links(&self) -> Vec<DocxLink> {
+        self.inner
+            .links
+            .iter()
+            .map(|link| DocxLink {
+                inner: link.clone(),
+            })
+            .collect()
+    }
+
+    /// The block's real pictures, in order.
+    #[getter]
+    fn images(&self) -> Vec<DocxImage> {
+        self.inner
+            .images
+            .iter()
+            .map(|image| DocxImage {
+                inner: image.clone(),
+            })
+            .collect()
+    }
+
+    /// Structural equality.
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        docx_block_repr(&self.inner)
+    }
+}
+
+/// One DOCX table's grid.
+#[pyclass]
+pub struct DocxTable {
+    inner: documents_impl::DocxTable,
+}
+
+#[pymethods]
+impl DocxTable {
+    /// The grid's row count.
+    #[getter]
+    fn rows(&self) -> usize {
+        self.inner.rows
+    }
+
+    /// The grid's column count (`grid.len()`).
+    #[getter]
+    fn cols(&self) -> usize {
+        self.inner.cols
+    }
+
+    /// The `w:tblGrid` column widths, twips, verbatim.
+    #[getter]
+    fn col_widths_twips(&self) -> Vec<i32> {
+        self.inner.col_widths_twips.clone()
+    }
+
+    /// The present cells, row-major (vMerge-continue cells emitted as
+    /// their own cells, inside the Restart span).
+    #[getter]
+    fn cells(&self) -> Vec<DocxCell> {
+        self.inner
+            .cells
+            .iter()
+            .map(|cell| DocxCell {
+                inner: cell.clone(),
+            })
+            .collect()
+    }
+
+    /// The `w:tblCaption` accessibility caption.
+    #[getter]
+    fn caption(&self) -> Option<String> {
+        self.inner.caption.clone()
+    }
+
+    /// Structural equality (all five fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        docx_table_repr(&self.inner)
+    }
+}
+
+/// One DOCX table cell.
+#[pyclass]
+pub struct DocxCell {
+    inner: documents_impl::DocxCell,
+}
+
+#[pymethods]
+impl DocxCell {
+    /// 0-based row.
+    #[getter]
+    fn row(&self) -> usize {
+        self.inner.row
+    }
+
+    /// 0-based starting column (gridSpan accumulation).
+    #[getter]
+    fn col(&self) -> usize {
+        self.inner.col
+    }
+
+    /// The cell's text.
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// The row span (the vMerge walk; 1 otherwise).
+    #[getter]
+    fn row_span(&self) -> usize {
+        self.inner.row_span
+    }
+
+    /// The column span (`w:gridSpan`, clamped 1..=1000).
+    #[getter]
+    fn col_span(&self) -> usize {
+        self.inner.col_span
+    }
+
+    /// Structural equality (all five fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        docx_cell_repr(&self.inner)
+    }
+}
+
+/// One DOCX hyperlink.
+#[pyclass]
+pub struct DocxLink {
+    inner: documents_impl::DocxLink,
+}
+
+#[pymethods]
+impl DocxLink {
+    /// The hyperlink's runs' text.
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// The external URL (rels-resolved); `None` for an internal link.
+    #[getter]
+    fn href(&self) -> Option<String> {
+        self.inner.href.clone()
+    }
+
+    /// The internal bookmark name; `None` for an external link.
+    #[getter]
+    fn anchor(&self) -> Option<String> {
+        self.inner.anchor.clone()
+    }
+
+    /// The URI fragment when an external link also declares `w:anchor`.
+    #[getter]
+    fn fragment(&self) -> Option<String> {
+        self.inner.fragment.clone()
+    }
+
+    /// The screen-tip tooltip, when declared.
+    #[getter]
+    fn tooltip(&self) -> Option<String> {
+        self.inner.tooltip.clone()
+    }
+
+    /// Structural equality (all five fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        docx_link_repr(&self.inner)
+    }
+}
+
+/// One DOCX picture.
+#[pyclass]
+pub struct DocxImage {
+    inner: documents_impl::DocxImage,
+}
+
+#[pymethods]
+impl DocxImage {
+    /// The relationship id (joins to the package's image parts; bytes
+    /// never cross this surface).
+    #[getter]
+    fn relationship_id(&self) -> &str {
+        &self.inner.relationship_id
+    }
+
+    /// The image part's extension from the package's map ("png", …).
+    #[getter]
+    fn file_ext(&self) -> Option<String> {
+        self.inner.file_ext.clone()
+    }
+
+    /// The alt text (`wp:docPr/@descr`).
+    #[getter]
+    fn description(&self) -> Option<String> {
+        self.inner.description.clone()
+    }
+
+    /// The declared width, points (EMU ÷ 12700.0); `None` when the
+    /// declared extent is not positive.
+    #[getter]
+    fn width_pt(&self) -> Option<f32> {
+        self.inner.width_pt
+    }
+
+    /// The declared height, points (the same law).
+    #[getter]
+    fn height_pt(&self) -> Option<f32> {
+        self.inner.height_pt
+    }
+
+    /// True for an inline drawing, false for a floating anchor.
+    #[getter]
+    fn inline(&self) -> bool {
+        self.inner.inline
+    }
+
+    /// The `adec:decorative` flag (the alt-less placeholder).
+    #[getter]
+    fn decorative(&self) -> bool {
+        self.inner.decorative
+    }
+
+    /// Structural equality (all seven fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        docx_image_repr(&self.inner)
+    }
+}
+
+/// The XLSX payload (the `document_structure` report's `payload` for an
+/// xlsx): thin getters over the core's plain struct; `==` is structural.
+#[pyclass]
+pub struct XlsxStructure {
+    inner: documents_impl::XlsxStructure,
+}
+
+#[pymethods]
+impl XlsxStructure {
+    /// The worksheets, sheet order, hidden and macro sheets served.
+    #[getter]
+    fn sheets(&self) -> Vec<XlsxSheet> {
+        self.inner
+            .sheets
+            .iter()
+            .map(|sheet| XlsxSheet {
+                inner: sheet.clone(),
+            })
+            .collect()
+    }
+
+    /// The workbook's chart/dialog sheet names.
+    #[getter]
+    fn chartsheets(&self) -> Vec<String> {
+        self.inner.chartsheets.clone()
+    }
+
+    /// The workbook-level defined names.
+    #[getter]
+    fn defined_names(&self) -> Vec<XlsxDefinedName> {
+        self.inner
+            .defined_names
+            .iter()
+            .map(|name| XlsxDefinedName {
+                inner: name.clone(),
+            })
+            .collect()
+    }
+
+    /// The 1904 date system flag.
+    #[getter]
+    fn date1904(&self) -> bool {
+        self.inner.date1904
+    }
+
+    /// Names of sheets whose part could not be parsed (the intact sheets
+    /// are served; the loss is on record).
+    #[getter]
+    fn unreadable_sheets(&self) -> Vec<String> {
+        self.inner.unreadable_sheets.clone()
+    }
+
+    /// True when cells stopped at `MAX_STRUCTURE_ENTRIES`.
+    #[getter]
+    fn entries_truncated(&self) -> bool {
+        self.inner.entries_truncated
+    }
+
+    /// Structural equality (all six fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        xlsx_structure_repr(&self.inner)
+    }
+}
+
+/// One XLSX worksheet.
+#[pyclass]
+pub struct XlsxSheet {
+    inner: documents_impl::XlsxSheet,
+}
+
+#[pymethods]
+impl XlsxSheet {
+    /// The sheet's display name.
+    #[getter]
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    /// `"visible" | "hidden" | "veryHidden"`.
+    #[getter]
+    fn state(&self) -> &str {
+        self.inner.state
+    }
+
+    /// The used range, computed from the parsed cells (styled-empty
+    /// cells included); `None` for a sheet with no cells.
+    #[getter]
+    fn used_range(&self) -> Option<String> {
+        self.inner.used_range.clone()
+    }
+
+    /// The declared `<dimension>` string, verbatim (provenance, never
+    /// the used range's source).
+    #[getter]
+    fn declared_dimension(&self) -> Option<String> {
+        self.inner.declared_dimension.clone()
+    }
+
+    /// The used range's max row index, 0-based; `None` for an empty
+    /// sheet.
+    #[getter]
+    fn max_row(&self) -> Option<usize> {
+        self.inner.max_row
+    }
+
+    /// The used range's max column index, 0-based; `None` for an empty
+    /// sheet.
+    #[getter]
+    fn max_col(&self) -> Option<usize> {
+        self.inner.max_col
+    }
+
+    /// The present cells, row-major, sparse.
+    #[getter]
+    fn cells(&self) -> Vec<XlsxCell> {
+        self.inner
+            .cells
+            .iter()
+            .map(|cell| XlsxCell {
+                inner: cell.clone(),
+            })
+            .collect()
+    }
+
+    /// The merged ranges as ref strings.
+    #[getter]
+    fn merged_cells(&self) -> Vec<String> {
+        self.inner.merged_cells.clone()
+    }
+
+    /// The sheet's hyperlinks.
+    #[getter]
+    fn hyperlinks(&self) -> Vec<XlsxHyperlink> {
+        self.inner
+            .hyperlinks
+            .iter()
+            .map(|link| XlsxHyperlink {
+                inner: link.clone(),
+            })
+            .collect()
+    }
+
+    /// The sheet's cell comments.
+    #[getter]
+    fn comments(&self) -> Vec<XlsxComment> {
+        self.inner
+            .comments
+            .iter()
+            .map(|comment| XlsxComment {
+                inner: comment.clone(),
+            })
+            .collect()
+    }
+
+    /// Structural equality (all ten fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        xlsx_sheet_repr(&self.inner)
+    }
+}
+
+/// One XLSX cell: the value as the file states it, discriminated by
+/// `type`, never coerced.
+#[pyclass]
+pub struct XlsxCell {
+    inner: documents_impl::XlsxCell,
+}
+
+#[pymethods]
+impl XlsxCell {
+    /// The cell reference ("B3").
+    #[getter]
+    #[pyo3(name = "ref")]
+    fn cell_reference(&self) -> &str {
+        &self.inner.reference
+    }
+
+    /// 0-based row.
+    #[getter]
+    fn row(&self) -> usize {
+        self.inner.row
+    }
+
+    /// 0-based column.
+    #[getter]
+    fn col(&self) -> usize {
+        self.inner.col
+    }
+
+    /// `"number" | "string" | "boolean" | "error" | "date" | "empty"` —
+    /// `date` is ONLY the `t="d"` ISO-8601 branch (a serial number with
+    /// a date format stays `"number"`: the seam cannot decode the
+    /// number-format stylesheet).
+    #[getter]
+    #[pyo3(name = "type")]
+    fn cell_type(&self) -> &str {
+        self.inner.kind
+    }
+
+    /// The value by `type`: bool | float | str | None (shared strings
+    /// dereferenced to their FULL text — no markdown-lane truncation).
+    #[getter]
+    fn value(&self, py: Python<'_>) -> Py<PyAny> {
+        match &self.inner.value {
+            None => py.None().into_any(),
+            Some(documents_impl::XlsxScalar::Bool(value)) => value
+                .into_pyobject(py)
+                .unwrap()
+                .as_any()
+                .clone()
+                .unbind()
+                .into_any(),
+            Some(documents_impl::XlsxScalar::Number(value)) => value
+                .into_pyobject(py)
+                .unwrap()
+                .as_any()
+                .clone()
+                .unbind()
+                .into_any(),
+            Some(documents_impl::XlsxScalar::Text(value)) => value
+                .into_pyobject(py)
+                .unwrap()
+                .as_any()
+                .clone()
+                .unbind()
+                .into_any(),
+        }
+    }
+
+    /// The `<f>` formula text, verbatim.
+    #[getter]
+    fn formula(&self) -> Option<String> {
+        self.inner.formula.clone()
+    }
+
+    /// Formula cells: whether a cached value rode the file.
+    #[getter]
+    fn has_cached_value(&self) -> bool {
+        self.inner.has_cached_value
+    }
+
+    /// Structural equality (all seven fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        xlsx_cell_repr(&self.inner)
+    }
+}
+
+/// One defined name.
+#[pyclass]
+pub struct XlsxDefinedName {
+    inner: documents_impl::XlsxDefinedName,
+}
+
+#[pymethods]
+impl XlsxDefinedName {
+    /// The name.
+    #[getter]
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    /// The formula/reference value, verbatim.
+    #[getter]
+    fn value(&self) -> &str {
+        &self.inner.value
+    }
+
+    /// The sheet the name is scoped to, 0-based into the WORKBOOK's own
+    /// sheet list (chartsheets included), verbatim; `None` for a
+    /// workbook-level name.
+    #[getter]
+    fn local_sheet_id(&self) -> Option<u32> {
+        self.inner.local_sheet_id
+    }
+
+    /// That sheet's display name, resolved from the workbook's sheet
+    /// list when in range.
+    #[getter]
+    fn local_sheet_name(&self) -> Option<String> {
+        self.inner.local_sheet_name.clone()
+    }
+
+    /// The name's hidden flag.
+    #[getter]
+    fn hidden(&self) -> bool {
+        self.inner.hidden
+    }
+
+    /// Structural equality (all five fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        xlsx_defined_name_repr(&self.inner)
+    }
+}
+
+/// One XLSX sheet hyperlink.
+#[pyclass]
+pub struct XlsxHyperlink {
+    inner: documents_impl::XlsxHyperlink,
+}
+
+#[pymethods]
+impl XlsxHyperlink {
+    /// The cell the link sits on.
+    #[getter]
+    fn cell_ref(&self) -> &str {
+        &self.inner.cell_ref
+    }
+
+    /// The external URL; `None` for an internal location.
+    #[getter]
+    fn href(&self) -> Option<String> {
+        self.inner.href.clone()
+    }
+
+    /// The internal location; `None` for a URL.
+    #[getter]
+    fn anchor(&self) -> Option<String> {
+        self.inner.anchor.clone()
+    }
+
+    /// The tooltip, when declared.
+    #[getter]
+    fn tooltip(&self) -> Option<String> {
+        self.inner.tooltip.clone()
+    }
+
+    /// Structural equality (all four fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        xlsx_hyperlink_repr(&self.inner)
+    }
+}
+
+/// One XLSX cell comment.
+#[pyclass]
+pub struct XlsxComment {
+    inner: documents_impl::XlsxComment,
+}
+
+#[pymethods]
+impl XlsxComment {
+    /// The cell the comment is attached to.
+    #[getter]
+    fn cell_ref(&self) -> &str {
+        &self.inner.cell_ref
+    }
+
+    /// The comment's author, when the part names one.
+    #[getter]
+    fn author(&self) -> Option<String> {
+        self.inner.author.clone()
+    }
+
+    /// The comment's text.
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// Structural equality (all three fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        xlsx_comment_repr(&self.inner)
+    }
+}
+
+/// The HTML payload (the `document_structure` report's `payload` for
+/// html): thin getters over the core's plain struct; `==` is structural.
+#[pyclass]
+pub struct HtmlStructure {
+    inner: documents_impl::HtmlStructure,
+}
+
+#[pymethods]
+impl HtmlStructure {
+    /// The nodes, reading order, parents before children.
+    #[getter]
+    fn nodes(&self) -> Vec<HtmlNode> {
+        self.inner
+            .nodes
+            .iter()
+            .map(|node| HtmlNode {
+                inner: node.clone(),
+            })
+            .collect()
+    }
+
+    /// True when nodes stopped at `MAX_STRUCTURE_ENTRIES` (the kept
+    /// prefix stays index-sound; children filtered to kept indices).
+    #[getter]
+    fn entries_truncated(&self) -> bool {
+        self.inner.entries_truncated
+    }
+
+    /// Structural equality (both fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        html_structure_repr(&self.inner)
+    }
+}
+
+/// One HTML node (the nine reachable kinds).
+#[pyclass]
+pub struct HtmlNode {
+    inner: documents_impl::HtmlNode,
+}
+
+#[pymethods]
+impl HtmlNode {
+    /// The crate's deterministic node id.
+    #[getter]
+    fn id(&self) -> &str {
+        &self.inner.id
+    }
+
+    /// The parent node's index (`None` for roots) — always earlier.
+    #[getter]
+    fn parent(&self) -> Option<u32> {
+        self.inner.parent
+    }
+
+    /// The children's indices, reading order.
+    #[getter]
+    fn children(&self) -> Vec<u32> {
+        self.inner.children.clone()
+    }
+
+    /// The crate's per-node attribute map — headings carry `{"id": …}`
+    /// when the source heading had one; image nodes carry `None` (the
+    /// collector drops img attributes: declared dimensions are NOT
+    /// served — the disclosed v1 gap).
+    #[getter]
+    fn attributes(&self) -> Option<std::collections::HashMap<String, String>> {
+        self.inner.attributes.clone()
+    }
+
+    /// The node kind: `"heading" | "paragraph" | "list" | "list_item" |
+    /// "table" | "image" | "code" | "quote" | "group"` — the nine the
+    /// live collector emits (an unreachable variant is a typed refusal,
+    /// never a silent kind=None).
+    #[getter]
+    fn kind(&self) -> &str {
+        self.inner.kind
+    }
+
+    /// The node's text (heading/paragraph/list_item/code).
+    #[getter]
+    fn text(&self) -> Option<String> {
+        self.inner.text.clone()
+    }
+
+    /// Heading level 1-6 (a Group: the level that created it).
+    #[getter]
+    fn level(&self) -> Option<u8> {
+        self.inner.level
+    }
+
+    /// List: whether ordered.
+    #[getter]
+    fn ordered(&self) -> Option<bool> {
+        self.inner.ordered
+    }
+
+    /// Code: the language, when declared.
+    #[getter]
+    fn language(&self) -> Option<String> {
+        self.inner.language.clone()
+    }
+
+    /// Group: the section label — the creating heading's text (the
+    /// crate's `label` and `heading_text` are the same string).
+    #[getter]
+    fn label(&self) -> Option<String> {
+        self.inner.label.clone()
+    }
+
+    /// Image: the src URL.
+    #[getter]
+    fn src(&self) -> Option<String> {
+        self.inner.src.clone()
+    }
+
+    /// Image: the alt text.
+    #[getter]
+    fn alt(&self) -> Option<String> {
+        self.inner.alt.clone()
+    }
+
+    /// Table: the grid.
+    #[getter]
+    fn grid(&self) -> Option<HtmlGrid> {
+        self.inner.grid.clone().map(|grid| HtmlGrid { inner: grid })
+    }
+
+    /// Inline annotations, byte offsets into `text`.
+    #[getter]
+    fn annotations(&self) -> Vec<HtmlAnnotation> {
+        self.inner
+            .annotations
+            .iter()
+            .map(|annotation| HtmlAnnotation {
+                inner: annotation.clone(),
+            })
+            .collect()
+    }
+
+    /// Structural equality (all fourteen fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        html_node_repr(&self.inner)
+    }
+}
+
+/// One HTML table grid.
+#[pyclass]
+pub struct HtmlGrid {
+    inner: documents_impl::HtmlGrid,
+}
+
+#[pymethods]
+impl HtmlGrid {
+    /// The grid's row count.
+    #[getter]
+    fn rows(&self) -> u32 {
+        self.inner.rows
+    }
+
+    /// The grid's column count.
+    #[getter]
+    fn cols(&self) -> u32 {
+        self.inner.cols
+    }
+
+    /// The origin cells, ordered by (row, col), sparse under spans.
+    #[getter]
+    fn cells(&self) -> Vec<HtmlGridCell> {
+        self.inner
+            .cells
+            .iter()
+            .map(|cell| HtmlGridCell {
+                inner: cell.clone(),
+            })
+            .collect()
+    }
+
+    /// Structural equality (all three fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        html_grid_repr(&self.inner)
+    }
+}
+
+/// One HTML grid cell.
+#[pyclass]
+pub struct HtmlGridCell {
+    inner: documents_impl::HtmlGridCell,
+}
+
+#[pymethods]
+impl HtmlGridCell {
+    /// The cell's text.
+    #[getter]
+    fn content(&self) -> &str {
+        &self.inner.content
+    }
+
+    /// 0-based row.
+    #[getter]
+    fn row(&self) -> u32 {
+        self.inner.row
+    }
+
+    /// 0-based column.
+    #[getter]
+    fn col(&self) -> u32 {
+        self.inner.col
+    }
+
+    /// The row span (1 unless a merge covers).
+    #[getter]
+    fn row_span(&self) -> u32 {
+        self.inner.row_span
+    }
+
+    /// The column span (1 unless a merge covers).
+    #[getter]
+    fn col_span(&self) -> u32 {
+        self.inner.col_span
+    }
+
+    /// Whether this is a header cell (`<th>`).
+    #[getter]
+    fn is_header(&self) -> bool {
+        self.inner.is_header
+    }
+
+    /// Structural equality (all six fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        html_grid_cell_repr(&self.inner)
+    }
+}
+
+/// One inline annotation on an HTML node's text.
+#[pyclass]
+pub struct HtmlAnnotation {
+    inner: documents_impl::HtmlAnnotation,
+}
+
+#[pymethods]
+impl HtmlAnnotation {
+    /// The annotation kind ("link", "bold", …).
+    #[getter]
+    fn kind(&self) -> &str {
+        self.inner.kind
+    }
+
+    /// Start byte offset into the node's text (inclusive).
+    #[getter]
+    fn start(&self) -> u32 {
+        self.inner.start
+    }
+
+    /// End byte offset (exclusive).
+    #[getter]
+    fn end(&self) -> u32 {
+        self.inner.end
+    }
+
+    /// Link: the href, verbatim (no decoding, no resolution).
+    #[getter]
+    fn url(&self) -> Option<String> {
+        self.inner.url.clone()
+    }
+
+    /// Link: the `title` attribute, when declared.
+    #[getter]
+    fn title(&self) -> Option<String> {
+        self.inner.title.clone()
+    }
+
+    /// Structural equality (all five fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        html_annotation_repr(&self.inner)
+    }
+}
+
 /// `tors.documents.pdf_link_uris(path, data=None, password=None,
 /// backend="auto", max_bytes=None) -> list[list[str]]`: or
 /// `pdf_link_uris(data=...)`: the
@@ -2828,6 +4445,30 @@ impl Source<'_> {
         self.read_input(max_bytes, format, backend, Spine::Geometry)
     }
 
+    /// The bytes and the name hint: the STRUCTURE surface's entry. No
+    /// no-read door: every served row consumes the bytes (the office
+    /// legs parse the container, the html lane parses the markup), and
+    /// every refused row is refused earlier — the binding-level
+    /// capability probe (fired for every backend, from `format=`/the 64
+    /// KiB prefix/extension alone) rejects them before this read runs.
+    /// Reusing either sibling spine's read is the trap the review
+    /// closed: `into_geometry_input`'s no-read door would answer
+    /// `format="html"` with ZERO bytes (html is a no-geometry format —
+    /// an empty structure where the real one lives), and the conversion
+    /// spine's ceiling treats pdf as unmetered and meters refused rows,
+    /// so a 40 MiB odt would get a ceiling refusal instead of "no
+    /// structure surface for odt". Every served row meters at the 32
+    /// MiB default; an explicit budget binds pre-read as everywhere;
+    /// the zero value threads through (CoreSide).
+    fn into_structure_input(
+        self,
+        max_bytes: Option<usize>,
+        format: Option<&str>,
+        backend: Backend,
+    ) -> Result<(Vec<u8>, Option<String>), InputError> {
+        self.read_input(max_bytes, format, backend, Spine::Structure)
+    }
+
     /// [`Source::into_input`]/[`Source::into_geometry_input`]'s shared
     /// body, keyed by which routing table meters the read.
     fn read_input(
@@ -2924,6 +4565,18 @@ impl Source<'_> {
                                 backend,
                                 MAX_INPUT_READ,
                             ),
+                            // The structure surface's every served row
+                            // meters at the 32 MiB default (the html
+                            // lane included: the conversion lane's ~23x
+                            // measured amplification is a LOWER bound
+                            // for the structure lane, which also holds
+                            // the node array); refused rows never reach
+                            // this read (the capability probe refuses
+                            // them under the GIL), and an unresolvable
+                            // prefix meters — the safe direction, the
+                            // core's authoritative resolve refusing it
+                            // post-read anyway.
+                            Spine::Structure => documents_impl::DEFAULT_ANYDOC_INPUT_LIMIT,
                         };
                         // Phase 2: continue from the SAME file (position is already past
                         // the prefix), prepending the prefix we already read.
@@ -2964,11 +4617,14 @@ impl Source<'_> {
 /// office_oxide, and HTML lanes meter at the 32 MiB default) or the
 /// geometry surface's ([`documents_impl::provisional_geometry_read_ceiling`]
 /// — the office row alone meters; the pdf row and the no-geometry row
-/// carry no default ceiling).
+/// carry no default ceiling). The structure spine
+/// ([`Source::into_structure_input`]) is the third: no no-read door, and
+/// every served row meters at the 32 MiB default.
 #[derive(Clone, Copy, PartialEq)]
 enum Spine {
     Conversion,
     Geometry,
+    Structure,
 }
 
 /// io::OutOfMemory from the bounded reader means the input was too large to
@@ -3651,9 +5307,28 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Cell>()?;
     m.add_class::<PdfSecurity>()?;
     m.add_class::<PdfPermissions>()?;
+    m.add_class::<DocumentStructure>()?;
+    m.add_class::<DocxStructure>()?;
+    m.add_class::<DocxBlock>()?;
+    m.add_class::<DocxTable>()?;
+    m.add_class::<DocxCell>()?;
+    m.add_class::<DocxLink>()?;
+    m.add_class::<DocxImage>()?;
+    m.add_class::<XlsxStructure>()?;
+    m.add_class::<XlsxSheet>()?;
+    m.add_class::<XlsxCell>()?;
+    m.add_class::<XlsxDefinedName>()?;
+    m.add_class::<XlsxHyperlink>()?;
+    m.add_class::<XlsxComment>()?;
+    m.add_class::<HtmlStructure>()?;
+    m.add_class::<HtmlNode>()?;
+    m.add_class::<HtmlGrid>()?;
+    m.add_class::<HtmlGridCell>()?;
+    m.add_class::<HtmlAnnotation>()?;
     m.add_function(wrap_pyfunction!(page_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(page_layout, m)?)?;
     m.add_function(wrap_pyfunction!(page_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(document_structure, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_classify, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_extract, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_link_uris, m)?)?;

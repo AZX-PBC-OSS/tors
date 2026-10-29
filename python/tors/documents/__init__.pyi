@@ -814,3 +814,543 @@ def page_tables(
     PDF can crash the process (uncatchable native stack exhaustion in
     the pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
     SECURITY.md)."""
+
+class DocumentStructure:
+    """The ``document_structure`` report: the resolved format's vocabulary
+    name and exactly one per-format payload — narrow with
+    ``isinstance(report.payload, ...)`` (the compile-time one-of is the
+    core's enum; a ``format`` string cannot narrow it statically). ``==``
+    is structural (both fields)."""
+    @property
+    def format(self) -> str:
+        """The resolved format's vocabulary name (the ``to_markdown``
+        spelling, the container-aware ``xls``/``xlsx`` case included):
+        provenance, and the same spelling the refusals use."""
+    @property
+    def payload(self) -> DocxStructure | XlsxStructure | HtmlStructure:
+        """The per-format structure: exactly one of the three payload
+        classes by construction. A fresh native object per access,
+        structurally equal to its siblings."""
+
+class DocxStructure:
+    """The docx payload: the body's blocks in document order from the
+    office_oxide RAW layer (headings via the ladder, effective-property
+    list state, block text, tables, links, real pictures), the section
+    partition, the note counts, and the unreadable parts. Entries carry
+    container anchors, never boxes. ``==`` is structural (all eight
+    fields)."""
+    @property
+    def blocks(self) -> list[DocxBlock]:
+        """The body's blocks, body order, one entry per body element."""
+    @property
+    def sections(self) -> int:
+        """The body partition law: ``section_breaks``' length + 1 — NOT
+        the declared SectionProperties count (a document with no
+        body-level sectPr is ONE section; declared sizes belong to
+        ``page_geometry``)."""
+    @property
+    def section_breaks(self) -> list[int]:
+        """``body.section_breaks`` verbatim: section i covers body
+        elements ``[prev_break, section_breaks[i])`` — anchor math for
+        ``block.section``."""
+    @property
+    def footnotes(self) -> int:
+        """Footnote body count (v1 keeps note BODIES out; the counts are
+        the cheap part)."""
+    @property
+    def endnotes(self) -> int:
+        """Endnote body count."""
+    @property
+    def comments(self) -> int:
+        """Comment body count."""
+    @property
+    def unreadable_parts(self) -> list[str]:
+        """Header/footer/note parts that exist but could not be read or
+        parsed, verbatim (the report-the-loss law — content IS partial
+        here, the loss on record)."""
+    @property
+    def entries_truncated(self) -> bool:
+        """True when the blocks stopped at ``MAX_STRUCTURE_ENTRIES``
+        (the 200,000-entry marshalling bound — never a refusal; the
+        metadata above stays complete)."""
+
+class DocxBlock:
+    """One docx body block; ``==`` is structural (all fourteen fields)."""
+    @property
+    def index(self) -> int:
+        """Position in ``body.elements`` (the stable container anchor)."""
+    @property
+    def section(self) -> int:
+        """The covering section (the count of ``section_breaks <=
+        index``)."""
+    @property
+    def kind(self) -> str:
+        """``"heading" | "list_item" | "paragraph" | "table"`` — heading
+        wins over list (a numbered heading is a heading carrying
+        numPr)."""
+    @property
+    def text(self) -> str:
+        """The block's visible text: runs joined, hidden runs resolved
+        through the style chain, breaks/tabs verbatim, text-box prose
+        recursed, form-field display text surfaced, note-ref marks
+        skipped; ``""`` for table blocks (the cells carry the text)."""
+    @property
+    def level(self) -> int | None:
+        """Headings only: the markdown depth, ``clamp(outline + 1,
+        1..=6)`` (every markdown renderer prints ``######`` at depth
+        7-9; the raw depth is ``outline_level``)."""
+    @property
+    def outline_level(self) -> int | None:
+        """Headings only: the ladder's raw 0-based outline level. The
+        ladder: direct ``w:outlineLvl`` -> the stylesheet's basedOn
+        chain -> the ``Heading1..9`` style-ID convention -> the
+        ``heading N`` style-NAME convention — the convention rung is a
+        documented SUPERSET of the ``backend="oxide"`` markdown's
+        two-rung ladder."""
+    @property
+    def style_id(self) -> str | None:
+        """The raw ``w:pStyle`` string ("Heading1", "Caption", ...) —
+        the document's own name."""
+    @property
+    def num_id(self) -> int | None:
+        """The numbering instance, whenever the EFFECTIVE properties
+        carry numPr with numId != 0 — style-carried numPr included
+        (Word's "List Bullet"/"List Number" styles hold it in the
+        style), a numbered heading's included. Inside table cells the
+        table-style LAYER is unreachable (crate-private), so cell-level
+        list state misses table-style numPr — disclosed."""
+    @property
+    def ilvl(self) -> int | None:
+        """The numbering level (0-based)."""
+    @property
+    def list_format(self) -> str | None:
+        """The resolved number format's own name ("decimal", "bullet",
+        "lower_letter", ...): the file's vocabulary, never a rendered
+        marker."""
+    @property
+    def start_number(self) -> int | None:
+        """The level's effective start (startOverride-aware) — the
+        level's own start, NOT a rendered ordinal (the markdown lane
+        renumbers sequentially)."""
+    @property
+    def table(self) -> DocxTable | None:
+        """``kind == "table"`` only: the grid."""
+    @property
+    def links(self) -> list[DocxLink]:
+        """The block's hyperlinks, in order."""
+    @property
+    def images(self) -> list[DocxImage]:
+        """The block's real pictures, in order (a DrawingML shape with
+        no relationship id is filtered)."""
+
+class DocxTable:
+    """One docx table's grid; ``==`` is structural (all five fields)."""
+    @property
+    def rows(self) -> int:
+        """The grid's row count."""
+    @property
+    def cols(self) -> int:
+        """The grid's column count (``grid.len()``)."""
+    @property
+    def col_widths_twips(self) -> list[int]:
+        """The ``w:tblGrid`` column widths, twips, verbatim."""
+    @property
+    def cells(self) -> list[DocxCell]:
+        """The present cells, row-major (a vMerge-continue cell is
+        emitted as its own cell, inside the Restart span it continues)."""
+    @property
+    def caption(self) -> str | None:
+        """The ``w:tblCaption`` accessibility caption (the raw layer's
+        only caption field)."""
+
+class DocxCell:
+    """One docx table cell; ``==`` is structural (all five fields)."""
+    @property
+    def row(self) -> int:
+        """0-based row."""
+    @property
+    def col(self) -> int:
+        """0-based starting column (gridSpan accumulation)."""
+    @property
+    def text(self) -> str:
+        """The cell's text (the same block walk as body blocks,
+        trimmed)."""
+    @property
+    def row_span(self) -> int:
+        """The row span: a vMerge Restart plus the same-column Continue
+        cells below it; 1 otherwise."""
+    @property
+    def col_span(self) -> int:
+        """The column span (``w:gridSpan``, clamped 1..=1000)."""
+
+class DocxLink:
+    """One docx hyperlink; ``==`` is structural (all five fields)."""
+    @property
+    def text(self) -> str:
+        """The hyperlink's runs' text."""
+    @property
+    def href(self) -> str | None:
+        """The external URL (rels-resolved); ``None`` for an internal
+        link."""
+    @property
+    def anchor(self) -> str | None:
+        """The internal bookmark name; ``None`` for an external link."""
+    @property
+    def fragment(self) -> str | None:
+        """The URI fragment when an external link also declares
+        ``w:anchor``."""
+    @property
+    def tooltip(self) -> str | None:
+        """The screen-tip tooltip, when declared."""
+
+class DocxImage:
+    """One docx picture (a drawing with a relationship id; bytes never
+    cross this surface); ``==`` is structural (all seven fields)."""
+    @property
+    def relationship_id(self) -> str:
+        """The relationship id (``a:blip/@r:embed``, or a linked
+        picture's ``@r:link``)."""
+    @property
+    def file_ext(self) -> str | None:
+        """The image part's extension from the package's map ("png",
+        ...); ``None`` when the part is not in the map."""
+    @property
+    def description(self) -> str | None:
+        """The alt text (``wp:docPr/@descr``)."""
+    @property
+    def width_pt(self) -> float | None:
+        """The declared width, points (EMU / 12700.0); ``None`` when the
+        declared extent is not positive (an undeclared extent is 0)."""
+    @property
+    def height_pt(self) -> float | None:
+        """The declared height, points (the same law)."""
+    @property
+    def inline(self) -> bool:
+        """True for an inline drawing, false for a floating anchor."""
+    @property
+    def decorative(self) -> bool:
+        """The ``adec:decorative`` flag (the alt-less placeholder
+        pictures assistive technology skips)."""
+
+class XlsxStructure:
+    """The xlsx payload: the worksheets (kind-filtered from the raw
+    layer's own list), the chart/dialog sheet names, defined names, the
+    unreadable sheets. ``==`` is structural (all six fields)."""
+    @property
+    def sheets(self) -> list[XlsxSheet]:
+        """The worksheets, sheet order, hidden and macro sheets served —
+        built from the raw layer's OWN worksheet list (never zip'd
+        against ``workbook.sheets``, which also names chartsheets and
+        partless sheets)."""
+    @property
+    def chartsheets(self) -> list[str]:
+        """The workbook's chart/dialog sheet names (kind-tagged entries
+        with no cells in the raw layer's list)."""
+    @property
+    def defined_names(self) -> list[XlsxDefinedName]:
+        """The workbook-level defined names."""
+    @property
+    def date1904(self) -> bool:
+        """The 1904 date system flag."""
+    @property
+    def unreadable_sheets(self) -> list[str]:
+        """Names of sheets whose part could not be parsed (the intact
+        sheets are served; the loss is on record)."""
+    @property
+    def entries_truncated(self) -> bool:
+        """True when the cells stopped at ``MAX_STRUCTURE_ENTRIES`` (the
+        sheet/range/merge/name metadata stays complete)."""
+
+class XlsxSheet:
+    """One xlsx worksheet; ``==`` is structural (all ten fields)."""
+    @property
+    def name(self) -> str:
+        """The sheet's display name."""
+    @property
+    def state(self) -> str:
+        """``"visible" | "hidden" | "veryHidden"``."""
+    @property
+    def used_range(self) -> str | None:
+        """The used range, COMPUTED from the parsed cells — min/max over
+        every present cell, styled-but-empty included — rendered
+        ``"A1:D10"``. NOT the declared ``<dimension>`` (attacker-
+        controlled, frequently absent); ``None`` for a sheet with no
+        cells."""
+    @property
+    def declared_dimension(self) -> str | None:
+        """The declared ``<dimension>`` string, verbatim (provenance,
+        never the used range's source)."""
+    @property
+    def max_row(self) -> int | None:
+        """The used range's max row index, 0-based; ``None`` for an
+        empty sheet."""
+    @property
+    def max_col(self) -> int | None:
+        """The used range's max column index, 0-based (the same law)."""
+    @property
+    def cells(self) -> list[XlsxCell]:
+        """The present cells, row-major, sparse."""
+    @property
+    def merged_cells(self) -> list[str]:
+        """The merged ranges as ref strings ("B2:C3"), verbatim."""
+    @property
+    def hyperlinks(self) -> list[XlsxHyperlink]:
+        """The sheet's hyperlinks, part order."""
+    @property
+    def comments(self) -> list[XlsxComment]:
+        """The sheet's cell comments, document order."""
+
+class XlsxCell:
+    """One xlsx cell: the value AS THE FILE STATES IT, discriminated by
+    ``type``, never coerced; ``==`` is structural (all seven fields)."""
+    @property
+    def ref(self) -> str:
+        """The cell reference ("B3")."""
+    @property
+    def row(self) -> int:
+        """0-based row."""
+    @property
+    def col(self) -> int:
+        """0-based column."""
+    @property
+    def type(self) -> str:
+        """``"number" | "string" | "boolean" | "error" | "date" |
+        "empty"`` — ``date`` is ONLY the ``t="d"`` ISO-8601 branch (a
+        serial number with a date number-format stays ``"number"``: the
+        seam cannot decode the number-format stylesheet)."""
+    @property
+    def value(self) -> bool | float | str | None:
+        """The value by ``type``: number -> float, boolean -> bool,
+        string/error -> str, date -> the ISO string, empty -> None.
+        Shared strings are DEREFERENCED to their FULL text (no
+        markdown-lane 32,768-char truncation — a disclosed divergence
+        from ``to_markdown``'s DoS guard)."""
+    @property
+    def formula(self) -> str | None:
+        """The ``<f>`` formula text, verbatim."""
+    @property
+    def has_cached_value(self) -> bool:
+        """Formula cells: whether a cached value rode the file (a
+        formula whose cached ``<v>`` is absent reports False; a
+        ``t="e"`` cell with no ``<v>`` parses to the empty error string
+        and reports True)."""
+
+class XlsxDefinedName:
+    """One defined name; ``==`` is structural (all five fields)."""
+    @property
+    def name(self) -> str:
+        """The name."""
+    @property
+    def value(self) -> str:
+        """The formula/reference value, verbatim."""
+    @property
+    def local_sheet_id(self) -> int | None:
+        """The sheet the name is scoped to, 0-based into the WORKBOOK's
+        own sheet list (chartsheets included), verbatim; ``None`` for a
+        workbook-level name."""
+    @property
+    def local_sheet_name(self) -> str | None:
+        """That sheet's display name, resolved from the workbook's sheet
+        list when in range."""
+    @property
+    def hidden(self) -> bool:
+        """The name's hidden flag."""
+
+class XlsxHyperlink:
+    """One xlsx sheet hyperlink; ``==`` is structural (all four
+    fields)."""
+    @property
+    def cell_ref(self) -> str:
+        """The cell the link sits on."""
+    @property
+    def href(self) -> str | None:
+        """The external URL; ``None`` for an internal location."""
+    @property
+    def anchor(self) -> str | None:
+        """The internal location (sheet/cell); ``None`` for a URL."""
+    @property
+    def tooltip(self) -> str | None:
+        """The tooltip, when declared."""
+
+class XlsxComment:
+    """One xlsx cell comment; ``==`` is structural (all three fields)."""
+    @property
+    def cell_ref(self) -> str:
+        """The cell the comment is attached to."""
+    @property
+    def author(self) -> str | None:
+        """The comment's author, when the part names one."""
+    @property
+    def text(self) -> str:
+        """The comment's text."""
+
+class HtmlStructure:
+    """The html payload: the conversion lane's own parse run once with
+    the structure collector on — the flat node array, the conversion
+    output discarded (no second tables list: the Table nodes carry the
+    grids). ``==`` is structural (both fields)."""
+    @property
+    def nodes(self) -> list[HtmlNode]:
+        """The nodes, reading order, parents before children (the
+        auto-built Group tree IS the heading tree)."""
+    @property
+    def entries_truncated(self) -> bool:
+        """True when nodes stopped at ``MAX_STRUCTURE_ENTRIES``: the kept
+        prefix stays index-sound (parents are always earlier) and every
+        kept node's children is filtered to kept indices."""
+
+class HtmlNode:
+    """One html node (the NINE reachable kinds — "heading", "paragraph",
+    "list", "list_item", "table", "image", "code", "quote", "group"; an
+    unreachable variant is a typed refusal, never a silent kind=None);
+    ``==`` is structural (all fourteen fields)."""
+    @property
+    def id(self) -> str:
+        """The crate's deterministic node id."""
+    @property
+    def parent(self) -> int | None:
+        """The parent node's index (``None`` for roots) — always
+        earlier."""
+    @property
+    def children(self) -> list[int]:
+        """The children's indices, reading order."""
+    @property
+    def attributes(self) -> dict[str, str] | None:
+        """The crate's per-node attribute map — headings carry
+        ``{"id": ...}`` when the source heading had one; image nodes
+        carry ``None`` (the collector drops img attributes: declared
+        image dimensions are NOT served — the disclosed v1 gap, the
+        visitor-feature path the v1.x completion)."""
+    @property
+    def kind(self) -> str:
+        """The node kind (the nine reachable ones)."""
+    @property
+    def text(self) -> str | None:
+        """The node's text (heading/paragraph/list_item/code)."""
+    @property
+    def level(self) -> int | None:
+        """Heading level 1-6 (a Group: the level that created it)."""
+    @property
+    def ordered(self) -> bool | None:
+        """List: whether ordered."""
+    @property
+    def language(self) -> str | None:
+        """Code: the language, when declared."""
+    @property
+    def label(self) -> str | None:
+        """Group: the section label — the creating heading's text (the
+        crate's ``label`` and ``heading_text`` are the same string)."""
+    @property
+    def src(self) -> str | None:
+        """Image: the src URL."""
+    @property
+    def alt(self) -> str | None:
+        """Image: the alt text."""
+    @property
+    def grid(self) -> HtmlGrid | None:
+        """Table: the grid. Nested tables: the inner grid is ALSO
+        collected (its own Table node, the inner table closing first)
+        while the outer cell carries the flattened text — the observed
+        collector behavior, disclosed."""
+    @property
+    def annotations(self) -> list[HtmlAnnotation]:
+        """Inline annotations, byte offsets into ``text``. A link's
+        enclosing section is the nearest GROUP ancestor (walk ``parent``;
+        headings have no children — a heading CREATES a Group sibling,
+        and a link on a heading lives on the Heading node itself)."""
+
+class HtmlGrid:
+    """One html table grid; ``==`` is structural (all three fields)."""
+    @property
+    def rows(self) -> int:
+        """The grid's row count."""
+    @property
+    def cols(self) -> int:
+        """The grid's column count."""
+    @property
+    def cells(self) -> list[HtmlGridCell]:
+        """The origin cells, ordered by (row, col), sparse under spans.
+        A table's first bare ``<tr>`` (no thead/tbody wrapper) is the
+        collector's own header inference."""
+
+class HtmlGridCell:
+    """One html grid cell; ``==`` is structural (all six fields)."""
+    @property
+    def content(self) -> str:
+        """The cell's text."""
+    @property
+    def row(self) -> int:
+        """0-based row."""
+    @property
+    def col(self) -> int:
+        """0-based column."""
+    @property
+    def row_span(self) -> int:
+        """The row span (1 unless a merge covers)."""
+    @property
+    def col_span(self) -> int:
+        """The column span (1 unless a merge covers)."""
+    @property
+    def is_header(self) -> bool:
+        """Whether this is a header cell (a ``<th>``, or a row under a
+        ``<thead>``/first-bare-row)."""
+
+class HtmlAnnotation:
+    """One inline annotation on an html node's text; ``==`` is
+    structural (all five fields)."""
+    @property
+    def kind(self) -> str:
+        """``"link" | "bold" | "italic" | "underline" |
+        "strikethrough" | "code" | "subscript" | "superscript" |
+        "highlight"``."""
+    @property
+    def start(self) -> int:
+        """Start byte offset into the node's text (inclusive)."""
+    @property
+    def end(self) -> int:
+        """End byte offset (exclusive)."""
+    @property
+    def url(self) -> str | None:
+        """Link: the href, verbatim (no decoding, no resolution)."""
+    @property
+    def title(self) -> str | None:
+        """Link: the ``title`` attribute, when declared."""
+
+def document_structure(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
+) -> DocumentStructure:
+    """The structure surface (issues #209/#210/#211): one report whose
+    ``format`` discriminates and whose ``payload`` is exactly one of
+    :class:`DocxStructure` / :class:`XlsxStructure` / :class:`HtmlStructure`
+    (isinstance narrowing). docx: the raw layer's blocks (headings via the
+    ladder — ``level`` clamped 1..=6 plus the raw ``outline_level`` —
+    effective-property list state, block text, table grids with
+    gridSpan/vMerge spans, links, real pictures, the section partition,
+    note counts, unreadable_parts); xlsx: the worksheets (hidden/macro
+    served, chart/dialog tabs named), the used range COMPUTED from the
+    parsed cells, values as the file states them (``type``-discriminated,
+    shared strings dereferenced to full text, ``t="d"`` the only date
+    shape), formulas text+cache both labeled, merges, hyperlinks,
+    comments, defined names; html: the conversion lane's own parse with
+    the structure collector on (the nine reachable node kinds, heading id
+    attributes, link annotations with byte ranges, table grids with
+    spans/header flags) — the conversion output discarded. Entries carry
+    container anchors, never boxes. Every refused format (pdf,
+    doc/xls/ppt, pptx, rtf/odt/ods/odp/epub/csv) refuses on EVERY backend
+    with a format-level ValueError fired before any read (pdf's answer is
+    already page_layout/page_tables; "no structure surface", never
+    "unreadable"); the served office rows refuse ``"anydoc"`` as a
+    capability; html's forced backends are conversion's own
+    UnsupportedBackend pair; an OLE container under the Excel kind
+    refuses with the legacy-xls-or-encrypted-xlsx union message.
+    ``format=`` is trusted and never re-sniffed (``sniff()`` is the
+    fix-it). There is NO ``password=``: no served format accepts one. An
+    explicit ``max_bytes=`` binds before the read; ``None`` keeps the
+    32 MiB default ceiling on every served row; the 200,000-entry payload
+    cap truncates with ``entries_truncated`` (metadata stays complete),
+    never refusing. The whole read+resolve+structure pass runs
+    GIL-free."""

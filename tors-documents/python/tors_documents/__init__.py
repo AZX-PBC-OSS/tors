@@ -31,6 +31,18 @@ from enum import Enum
 
 from tors_documents._tors_documents import (
     Cell,
+    DocumentStructure,
+    DocxBlock,
+    DocxCell,
+    DocxImage,
+    DocxLink,
+    DocxStructure,
+    DocxTable,
+    HtmlAnnotation,
+    HtmlGrid,
+    HtmlGridCell,
+    HtmlNode,
+    HtmlStructure,
     ImageBox,
     NeedsOcrError,
     PageGeometry,
@@ -43,6 +55,12 @@ from tors_documents._tors_documents import (
     TextLine,
     TextSpan,
     Word,
+    XlsxCell,
+    XlsxComment,
+    XlsxDefinedName,
+    XlsxHyperlink,
+    XlsxSheet,
+    XlsxStructure,
 )
 from tors_documents._tors_documents import PdfClassification as _NativePdfClassification
 
@@ -53,6 +71,7 @@ from tors_documents._tors_documents import PdfClassification as _NativePdfClassi
 # import and needs a static fallback pin that drifts stale in source
 # checkouts).
 from tors_documents._tors_documents import __version__ as __version__
+from tors_documents._tors_documents import document_structure as _native_document_structure
 from tors_documents._tors_documents import page_geometry as _native_page_geometry
 from tors_documents._tors_documents import page_layout as _native_page_layout
 from tors_documents._tors_documents import page_tables as _native_page_tables
@@ -75,7 +94,19 @@ from tors_documents._tors_documents import to_text as _native_to_text
 __all__ = [
     "Backend",
     "Cell",
+    "DocumentStructure",
+    "DocxBlock",
+    "DocxCell",
+    "DocxImage",
+    "DocxLink",
+    "DocxStructure",
+    "DocxTable",
     "Format",
+    "HtmlAnnotation",
+    "HtmlGrid",
+    "HtmlGridCell",
+    "HtmlNode",
+    "HtmlStructure",
     "ImageBox",
     "NeedsOcrError",
     "PageGeometry",
@@ -90,7 +121,14 @@ __all__ = [
     "TextLine",
     "TextSpan",
     "Word",
+    "XlsxCell",
+    "XlsxComment",
+    "XlsxDefinedName",
+    "XlsxHyperlink",
+    "XlsxSheet",
+    "XlsxStructure",
     "__version__",
+    "document_structure",
     "page_geometry",
     "page_layout",
     "page_tables",
@@ -534,6 +572,54 @@ def page_tables(
         password,
         backend,
         pages,
+        max_bytes,
+    )
+
+
+def document_structure(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> DocumentStructure:
+    """The structure surface (issues #209/#210/#211; the full contract is
+    the native function's docstring): one report whose ``format``
+    discriminates and whose ``payload`` is exactly one of
+    :class:`DocxStructure` / :class:`XlsxStructure` / :class:`HtmlStructure`
+    — narrow with ``isinstance(report.payload, ...)``. docx: the body's
+    blocks (headings with ``level`` clamped 1..=6 plus the raw
+    ``outline_level``, effective-property list state, block text, tables
+    with gridSpan/vMerge spans and ``tblCaption``, links, real pictures,
+    the section partition, note counts, ``unreadable_parts``); xlsx: the
+    worksheets (hidden/macro served, chart/dialog tabs named), the used
+    range COMPUTED from the parsed cells, values as the file states them
+    (``type``-discriminated, shared strings dereferenced to full text,
+    ``t="d"`` the only date shape), formulas text+cache both labeled,
+    merges, hyperlinks, comments, defined names; html: the conversion
+    lane's own parse with the structure collector on (the nine reachable
+    node kinds, heading ``id`` attributes, link annotations with byte
+    ranges and url/title, table grids with spans and header flags) — the
+    conversion output discarded. Entries carry container anchors, never
+    boxes. ``backend=`` is ``"auto"``/``"oxide"`` (identical on the served
+    office rows); every refused format (pdf, doc/xls/ppt, pptx,
+    rtf/odt/ods/odp/epub/csv) refuses on every backend with a
+    format-level ``ValueError`` fired before any read (``pdf``'s answer is
+    already ``page_layout``/``page_tables``), the served office rows refuse
+    ``"anydoc"`` as a capability, html's forced backends are conversion's
+    own ``UnsupportedBackend`` pair, and an OLE container under the Excel
+    kind refuses with the legacy-xls-or-encrypted-xlsx union message.
+    ``format=`` is trusted and never re-sniffed (``sniff()`` is the
+    fix-it). There is NO ``password=``: no served format accepts one. An
+    explicit ``max_bytes=`` binds before the read; ``None`` keeps the
+    32 MiB default ceiling on every served row; the 200,000-entry payload
+    cap truncates with ``entries_truncated`` (metadata stays complete),
+    never refusing. The whole read+resolve+structure pass runs GIL-free."""
+    return _native_document_structure(
+        _coerce_path(path),
+        data,
+        format,
+        backend,
         max_bytes,
     )
 

@@ -50,6 +50,7 @@ from pathlib import Path
 import pytest
 from test_documents_hardening import _hwm_kb, _run_or_fail
 from tors_documents import (
+    document_structure,
     page_geometry,
     page_layout,
     pdf_classify,
@@ -390,6 +391,9 @@ PUBLIC_CONVERSION_SURFACE: tuple[tuple[Callable[..., object], bool], ...] = (
     (pdf_page_count, True),
     (pdf_page_labels, True),
     (pdf_security, True),
+    # the structure surface: its None doctrine is its own (no pdf lane, so
+    # no 512 MiB backstop to name — the 32 MiB default on every served row)
+    (document_structure, False),
 )
 
 

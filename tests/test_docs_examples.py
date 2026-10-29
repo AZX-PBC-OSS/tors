@@ -1175,3 +1175,29 @@ class TestIndexExamples:
         cls = tors.documents.pdf_classify(str(path))
         assert not cls.image_only, "a born-digital page is not a scan"
         assert cls.pages_needing_ocr == []
+
+
+class TestDocumentStructureExamples:
+    """docs/api.md's document_structure section example (the structure
+    surface's worked example), re-derived against the built extension."""
+
+    def test_document_structure_example(self) -> None:
+        import sys
+
+        import tors.documents
+
+        sys.path.insert(0, "tests")
+        from documents import generate_xlsx_structure
+
+        report = tors.documents.document_structure(data=generate_xlsx_structure())
+        assert report.format == "xlsx"
+        payload = report.payload
+        assert isinstance(payload, tors.documents.XlsxStructure)
+        assert [(sheet.name, sheet.state, sheet.used_range) for sheet in payload.sheets] == [
+            ("Visible", "visible", "A1:D5"),
+            ("Hidden", "hidden", None),
+            ("VeryHidden", "veryHidden", None),
+        ]
+        assert payload.chartsheets == ["ChartTab"]
+        cell = payload.sheets[0].cells[0]
+        assert (cell.ref, cell.type, cell.value) == ("A1", "string", "unit label")

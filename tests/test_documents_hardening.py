@@ -61,6 +61,7 @@ from typing import Any
 
 import pytest
 from tors_documents import (
+    document_structure,
     page_geometry,
     page_layout,
     page_tables,
@@ -184,6 +185,7 @@ class TestNonRegularPathsAreTypedRefusals:
             page_geometry,
             page_layout,
             page_tables,
+            document_structure,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -278,6 +280,21 @@ class TestAnExplicitBudgetBindsEveryLane:
     def test_the_html_lane_refuses_under_an_explicit_budget(self) -> None:
         with pytest.raises(ValueError, match="ceiling"):
             to_text(data=b"<html><body><p>budgeted</p></body></html>", max_bytes=4)
+
+    def test_the_structure_lanes_refuse_under_an_explicit_budget(self) -> None:
+        """document_structure joins the budget sweep (every entry point
+        from birth): an explicit budget binds pre-read on every served
+        row — the office legs (the container parses into resident memory)
+        and the html lane (the collector holds input, DOM, and node
+        array) — while the refused formats never reach the read, so their
+        refusal is the capability message, never a ceiling one (the R7
+        observable's data= half)."""
+        with pytest.raises(ValueError, match="ceiling"):
+            document_structure(data=b"<html><body><p>budgeted</p></body></html>", max_bytes=4)
+        with pytest.raises(ValueError, match="ceiling"):
+            document_structure(data=b"PK\x03\x04" + b"\x00" * 64, format="xlsx", max_bytes=4)
+        with pytest.raises(ValueError, match="cannot serve pdf"):
+            document_structure(data=b"%PDF-1.4" + b"\x00" * 64, format="pdf", max_bytes=4)
 
     def test_a_budget_the_input_fits_under_still_converts(self, tmp_path: Path) -> None:
         """The budget refuses nothing it should not: a roomy explicit
@@ -426,6 +443,7 @@ class TestNulInPathIsAValueError:
             page_geometry,
             page_layout,
             page_tables,
+            document_structure,
             pdf_page_count,
             pdf_classify,
             pdf_page_labels,
@@ -466,6 +484,7 @@ class TestPathCoercionNamesTheArgument:
             page_geometry,
             page_layout,
             page_tables,
+            document_structure,
             pdf_classify,
             pdf_extract,
             pdf_page_count,

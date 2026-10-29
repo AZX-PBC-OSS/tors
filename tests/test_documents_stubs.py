@@ -52,6 +52,9 @@ try:
     import tors_documents
     from tors_documents import (
         Cell,
+        DocumentStructure,
+        DocxStructure,
+        HtmlStructure,
         ImageBox,
         PageLayout,
         PageTables,
@@ -60,6 +63,8 @@ try:
         TextLine,
         TextSpan,
         Word,
+        XlsxStructure,
+        document_structure,
         page_geometry,
     )
     from tors_documents import aio as payload_aio
@@ -509,3 +514,150 @@ def test_page_geometry_getters_are_exactly_the_four_read_only_fields() -> None:
     (askew,) = page_geometry(data=generate_pdf_rotate(45))
     assert askew.rotation == 0, "a non-right-angle /Rotate reports 0"
     assert seen == domain, f"the sweep must reach every position: {seen}"
+
+
+def test_document_structure_classes_carry_exactly_the_field_lists() -> None:
+    """The structure payload's frozen-shape contract, stub side (the
+    PageTables getter pin's pattern): each payload class declares EXACTLY
+    its field list as read-only properties in BOTH package stubs, and the
+    live classes agree — the one-of payload narrowing
+    (``isinstance(report.payload, ...)``) included. The renamed getters
+    (``ref``/``type`` on XlsxCell) are the fields the Python surface
+    spells, not the Rust field names."""
+    field_lists = {
+        "DocumentStructure": ["format", "payload"],
+        "DocxStructure": [
+            "blocks",
+            "sections",
+            "section_breaks",
+            "footnotes",
+            "endnotes",
+            "comments",
+            "unreadable_parts",
+            "entries_truncated",
+        ],
+        "DocxBlock": [
+            "index",
+            "section",
+            "kind",
+            "text",
+            "level",
+            "outline_level",
+            "style_id",
+            "num_id",
+            "ilvl",
+            "list_format",
+            "start_number",
+            "table",
+            "links",
+            "images",
+        ],
+        "DocxTable": ["rows", "cols", "col_widths_twips", "cells", "caption"],
+        "DocxCell": ["row", "col", "text", "row_span", "col_span"],
+        "DocxLink": ["text", "href", "anchor", "fragment", "tooltip"],
+        "DocxImage": [
+            "relationship_id",
+            "file_ext",
+            "description",
+            "width_pt",
+            "height_pt",
+            "inline",
+            "decorative",
+        ],
+        "XlsxStructure": [
+            "sheets",
+            "chartsheets",
+            "defined_names",
+            "date1904",
+            "unreadable_sheets",
+            "entries_truncated",
+        ],
+        "XlsxSheet": [
+            "name",
+            "state",
+            "used_range",
+            "declared_dimension",
+            "max_row",
+            "max_col",
+            "cells",
+            "merged_cells",
+            "hyperlinks",
+            "comments",
+        ],
+        "XlsxCell": ["ref", "row", "col", "type", "value", "formula", "has_cached_value"],
+        "XlsxDefinedName": [
+            "name",
+            "value",
+            "local_sheet_id",
+            "local_sheet_name",
+            "hidden",
+        ],
+        "XlsxHyperlink": ["cell_ref", "href", "anchor", "tooltip"],
+        "XlsxComment": ["cell_ref", "author", "text"],
+        "HtmlStructure": ["nodes", "entries_truncated"],
+        "HtmlNode": [
+            "id",
+            "parent",
+            "children",
+            "attributes",
+            "kind",
+            "text",
+            "level",
+            "ordered",
+            "language",
+            "label",
+            "src",
+            "alt",
+            "grid",
+            "annotations",
+        ],
+        "HtmlGrid": ["rows", "cols", "cells"],
+        "HtmlGridCell": ["content", "row", "col", "row_span", "col_span", "is_header"],
+        "HtmlAnnotation": ["kind", "start", "end", "url", "title"],
+    }
+    for stub in (_PAYLOAD_STUB, _SHIM_STUB):
+        for name, fields in field_lists.items():
+            node = _stub_class(stub, name)
+            properties: set[str] = set()
+            setters: set[str] = set()
+            assignments: list[str] = []
+            for stmt in node.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    decorators = stmt.decorator_list
+                    if any(
+                        isinstance(dec, ast.Attribute) and dec.attr == "setter"
+                        for dec in decorators
+                    ):
+                        setters.add(stmt.name)
+                    elif any(
+                        isinstance(dec, ast.Name) and dec.id == "property" for dec in decorators
+                    ):
+                        properties.add(stmt.name)
+                elif isinstance(stmt, ast.AnnAssign):
+                    assignments.append(stmt.target.id)
+            assert properties == set(fields), f"{stub}: {name} property set drifted: {properties}"
+            assert not setters, f"{stub}: {name} grew a setter: {setters}"
+            assert not assignments, f"{stub}: {name} has a writable attribute: {assignments}"
+    # the live classes agree (the renamed getters are the Python names)
+    live_classes = {
+        "DocumentStructure": DocumentStructure,
+        "DocxStructure": DocxStructure,
+        "XlsxStructure": XlsxStructure,
+        "HtmlStructure": HtmlStructure,
+    }
+    for name, fields in field_lists.items():
+        live_class = live_classes.get(name)
+        if live_class is None:
+            # the nested entry classes: resolve through a live report
+            from documents import generate_docx_structure
+
+            report = document_structure(data=generate_docx_structure())
+            payload = report.payload
+            for entry in payload.blocks:
+                if type(entry).__name__ == name:
+                    live_class = type(entry)
+                    break
+            if live_class is None:
+                continue
+        live = {n for n in vars(live_class) if not n.startswith("_")}
+        assert live == set(fields), f"{name}: the live getter set drifted: {live}"

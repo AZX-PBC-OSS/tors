@@ -1125,6 +1125,387 @@ def generate_html_rich() -> bytes:
     return HTML_DOCUMENT.encode("utf-8")
 
 
+# --- the document-structure fixtures (issues #209/#210/#211) -----------
+#
+# The structure surface reads the RAW layers (office_oxide's
+# DocxDocument/XlsxDocument, the html-to-markdown-rs structure collector),
+# so these fixtures carry what the raw readers actually need and the
+# conversion lane never looks at: the styles/numbering relationships in
+# document.xml.rels (office_oxide resolves the stylesheet through the
+# document part's OWN relationships — the conversion lane's fixture above
+# omits them and is correct for it), the note and header parts, the media
+# part an image rid points at, the chartsheet relationship, and the
+# declared <dimension> that lies. Byte-deterministic through `_zip_bytes`
+# like every generator here; consumed by the structure suite
+# (tests/test_documents_engines.py's TestDocumentStructure) via `data=`,
+# never by the pinned engines corpus (whose committed copies these would
+# otherwise have to re-derive).
+
+STRUCTURE_H1 = "Structure Report"
+STRUCTURE_H2 = "Imaging Program"
+STRUCTURE_H3_NAME = "Imaging Detail"
+STRUCTURE_LINK_URL = "https://handbook.example.com/structure"
+STRUCTURE_ANCHOR = "imaging-anchor"
+STRUCTURE_IMAGE_URL = "https://example.com/units-chart.png"
+STRUCTURE_IMAGE_ALT = "units chart"
+
+
+def _docx_structure_drawing(rid: str | None, *, cx: int = 1_905_000, cy: int = 1_270_000,
+                            alt: str | None = None, decorative: bool = False,
+                            shape: bool = False) -> str:
+    """One `<w:drawing>`: a picture (`rid`, the declared EMU extent, alt
+    text, the decorative flag) or a vector shape (no rid — the
+    shape-filtered case)."""
+    wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    pic = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+    descr = f' descr="{_xml_escape(alt)}"' if alt else ""
+    extent = f'<wp:extent cx="{cx}" cy="{cy}"/>' if cx or cy else ""
+    if decorative:
+        doc_pr = (
+            f'<wp:docPr{descr}><adec:decorative xmlns:adec="{a}" val="1"/></wp:docPr>'
+        )
+    else:
+        doc_pr = f'<wp:docPr{descr}/>'
+    if shape:
+        graphic = (
+            f'<a:graphic xmlns:a="{a}"><a:graphicData>'
+            '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+            '<wps:spPr><a:prstGeom prst="rect"/></wps:spPr></wps:wsp>'
+            "</a:graphicData></a:graphic>"
+        )
+    else:
+        embed = f'<a:blip r:embed="{rid}"/>' if rid else "<a:blip/>"
+        graphic = (
+            f'<a:graphic xmlns:a="{a}"><a:graphicData>'
+            f'<pic:pic xmlns:pic="{pic}"><pic:blipFill>{embed}</pic:blipFill></pic:pic>'
+            "</a:graphicData></a:graphic>"
+        )
+    return (
+        f'<w:drawing><wp:inline xmlns:wp="{wp}">'
+        f"{extent}{doc_pr}{graphic}</wp:inline></w:drawing>"
+    )
+
+
+def generate_docx_structure() -> bytes:
+    """The structure fixture's docx: every raw-layer pin in one body —
+    a style-outline heading and a style-NAME-convention heading (the
+    parity pair), a direct outlineLvl 7 (the clamp case), a
+    style-carried numPr list, a numbered heading, the block-text walk
+    (tab/br/hidden run), an external and an internal hyperlink, the
+    picture pair (declared extent + 0-extent) plus a shape-only drawing
+    and a decorative image, a gridSpan + vMerge table with a caption, two
+    in-paragraph sectPr (three sections), a footnote carrying a
+    hyperlink, and an unreadable header part."""
+    w = _W_NS
+    r = _DOC_NS
+    document = _XML_DECL + f"""<w:document xmlns:w="{w}" xmlns:r="{r}"><w:body>""" + "".join(
+        [
+            # the agreeing parity case: pStyle -> stylesheet outlineLvl
+            f'<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'
+            f"<w:r><w:t>{RICH_H1}</w:t></w:r></w:p>",
+            # the divergent parity case: only the style NAME says heading
+            # (the structure's convention rung; the oxide markdown's
+            # two-rung ladder renders plain text)
+            f'<w:p><w:pPr><w:pStyle w:val="FancyH3"/></w:pPr>'
+            f"<w:r><w:t>{STRUCTURE_H3_NAME}</w:t></w:r></w:p>",
+            # the clamp case: direct outlineLvl 7 -> level 6, raw 7
+            '<w:p><w:pPr><w:outlineLvl w:val="7"/></w:pPr>'
+            "<w:r><w:t>Deep heading</w:t></w:r></w:p>",
+            # the style-carried numPr list ("List Paragraph" holds it in
+            # the STYLE) plus a direct numPr item
+            '<w:p><w:pPr><w:pStyle w:val="ListPx"/></w:pPr>'
+            "<w:r><w:t>styled bullet</w:t></w:r></w:p>",
+            '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/>'
+            "</w:numPr></w:pPr><w:r><w:t>direct numbered item</w:t></w:r></w:p>",
+            # a numbered heading: kind heading, the numPr reported
+            '<w:p><w:pPr><w:pStyle w:val="Heading2"/>'
+            '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr>'
+            f"<w:r><w:t>{STRUCTURE_H2}</w:t></w:r></w:p>",
+            # the block-text walk: br, tab, hidden run
+            "<w:p><w:r><w:t>line one</w:t></w:r><w:r><w:br/></w:r><w:r><w:tab/></w:r>"
+            '<w:r><w:t>after tab</w:t></w:r>'
+            '<w:r><w:rPr><w:vanish/></w:rPr><w:t>secretly hidden</w:t></w:r></w:p>',
+            # external + internal hyperlinks
+            '<w:p><w:hyperlink r:id="rId7"><w:r><w:t>the external link</w:t></w:r>'
+            "</w:hyperlink></w:p>",
+            f'<w:p><w:hyperlink w:anchor="{STRUCTURE_ANCHOR}">'
+            "<w:r><w:t>the internal link</w:t></w:r></w:hyperlink></w:p>",
+            # pictures: declared extent + alt; 0-extent; shape-only
+            # (filtered); decorative
+            f'<w:p><w:r>{_docx_structure_drawing("rId9", alt=STRUCTURE_IMAGE_ALT)}</w:r></w:p>',
+            f'<w:p><w:r>{_docx_structure_drawing("rId9", cx=0, cy=0)}</w:r></w:p>',
+            f'<w:p><w:r>{_docx_structure_drawing(None, shape=True)}</w:r></w:p>',
+            f'<w:p><w:r>{_docx_structure_drawing("rId9", alt="deco", decorative=True)}</w:r></w:p>',
+            # the table: gridSpan, a vMerge Restart/Continue pair, a caption
+            '<w:tbl><w:tblPr><w:tblCaption w:val="Units table"/></w:tblPr>'
+            '<w:tblGrid><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/>'
+            '<w:gridCol w:w="1800"/></w:tblGrid>'
+            '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr>'
+            f"<w:p><w:r><w:t>{RICH_TABLE_HEADER[0]}</w:t></w:r></w:p></w:tc>"
+            f"<w:tc><w:p><w:r><w:t>{RICH_TABLE_HEADER[1]}</w:t></w:r></w:p></w:tc></w:tr>"
+            '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>'
+            "<w:p><w:r><w:t>merged col</w:t></w:r></w:p></w:tc>"
+            f"<w:tc><w:p><w:r><w:t>{RICH_TABLE_ROW[0]}</w:t></w:r></w:p></w:tc>"
+            f"<w:tc><w:p><w:r><w:t>{RICH_TABLE_ROW[1]}</w:t></w:r></w:p></w:tc></w:tr>"
+            '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>'
+            f"<w:tc><w:p><w:r><w:t>{RICH_TABLE_ROW2[0]}</w:t></w:r></w:p></w:tc>"
+            f"<w:tc><w:p><w:r><w:t>{RICH_TABLE_ROW2[1]}</w:t></w:r></w:p>"
+            "</w:tc></w:tr></w:tbl>",
+            # section one ends (the sectPr paragraph terminates it)
+            '<w:p><w:pPr><w:sectPr>'
+            '<w:headerReference w:type="default" r:id="rId6"/>'
+            '<w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr>'
+            "<w:r><w:t>end of section one</w:t></w:r></w:p>",
+            # section two ends; the bookmark the internal link names
+            '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr>'
+            f'<w:bookmarkStart w:id="1" w:name="{STRUCTURE_ANCHOR}"/>'
+            '<w:bookmarkEnd w:id="1"/>'
+            "<w:r><w:t>end of section two</w:t></w:r></w:p>",
+            # the footnote citation
+            "<w:p><w:r><w:t>the cited claim</w:t></w:r>"
+            '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>',
+            "</w:body></w:document>",
+        ]
+    )
+    styles = _XML_DECL + f"""<w:styles xmlns:w="{w}">
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>
+<w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/>
+<w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="FancyH3"><w:name w:val="heading 3"/></w:style>
+<w:style w:type="paragraph" w:styleId="ListPx"><w:name w:val="List Paragraph"/>
+<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/></w:style>
+</w:styles>"""
+    numbering = _XML_DECL + f"""<w:numbering xmlns:w="{w}">
+<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+<w:numFmt w:val="bullet"/><w:start w:val="1"/></w:lvl></w:abstractNum>
+<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0">
+<w:numFmt w:val="decimal"/><w:start w:val="4"/></w:lvl></w:abstractNum>
+<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>"""
+    rels = _XML_DECL + f"""<Relationships xmlns="{_REL_NS}">
+<Relationship Id="rId7" Type="{r}/hyperlink" Target="{STRUCTURE_LINK_URL}"
+ TargetMode="External"/>
+<Relationship Id="rId9" Type="{r}/image" Target="media/image9.png"/>
+<Relationship Id="rId6" Type="{r}/header" Target="header1.xml"/>
+<Relationship Id="rId3" Type="{r}/styles" Target="styles.xml"/>
+<Relationship Id="rId4" Type="{r}/numbering" Target="numbering.xml"/>
+<Relationship Id="rId5" Type="{r}/footnotes" Target="footnotes.xml"/>
+</Relationships>"""
+    footnotes = _XML_DECL + f"""<w:footnotes xmlns:w="{w}" xmlns:r="{r}">
+<w:footnote w:id="1"><w:p><w:r><w:t>the footnote text</w:t></w:r>
+<w:hyperlink r:id="rId2"><w:r><w:t>footnote link</w:t></w:r></w:hyperlink></w:p>
+</w:footnote></w:footnotes>"""
+    footnote_rels = _XML_DECL + f"""<Relationships xmlns="{_REL_NS}">
+<Relationship Id="rId2" Type="{r}/hyperlink" Target="{STRUCTURE_LINK_URL}"
+ TargetMode="External"/>
+</Relationships>"""
+    content_types = (
+        _XML_DECL
+        + f"""<Types xmlns="{_CT_NS}">"""
+        + _CT_RELS
+        + _CT_XML
+        + _CT_DOCX_MAIN
+        + '<Override PartName="/word/footnotes.xml" ContentType='
+        + '"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>'
+        + "</Types>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", content_types.encode("utf-8")),
+            ("_rels/.rels", _root_rels("word/document.xml").encode("utf-8")),
+            ("word/document.xml", document.encode("utf-8")),
+            ("word/styles.xml", styles.encode("utf-8")),
+            ("word/numbering.xml", numbering.encode("utf-8")),
+            ("word/_rels/document.xml.rels", rels.encode("utf-8")),
+            ("word/footnotes.xml", footnotes.encode("utf-8")),
+            ("word/_rels/footnotes.xml.rels", footnote_rels.encode("utf-8")),
+            ("word/media/image9.png", b"png-bytes"),
+            ("word/header1.xml", b"<w:hdr"),
+        ]
+    )
+
+
+def generate_xlsx_structure() -> bytes:
+    """The structure fixture's xlsx: three worksheets (visible, hidden,
+    veryHidden) + one chartsheet, typed cells (number, boolean, error,
+    t="d" date, styled-empty), a formula with and one without a cached
+    value, a lying declared dimension, a merged range, an external and an
+    internal sheet hyperlink, and a global + a sheet-scoped defined
+    name."""
+    main = _MAIN_NS
+    r = _DOC_NS
+    sheet = _XML_DECL + f"""<worksheet xmlns="{main}" xmlns:r="{r}">
+<dimension ref="A1:C4"/><sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>3.5</v></c>
+<c r="C1" t="b"><v>1</v></c><c r="D1" s="1"/></row>
+<row r="2"><c r="A2"><f>SUM(B1:B1)</f><v>3.5</v></c>
+<c r="B2" t="e"><v>#REF!</v></c><c r="C2" t="d"><v>2026-01-02</v></c></row>
+<row r="4"><c r="D4" t="s"><v>1</v></c></row>
+<row r="5"><c r="A5"><f>1+1</f></c></row>
+</sheetData><mergeCells count="1"><mergeCell ref="A3:B3"/></mergeCells>
+<hyperlinks><hyperlink ref="B1" r:id="rId9" tooltip="the guide"/>
+<hyperlink ref="C1" location="Hidden!A1"/></hyperlinks></worksheet>"""
+    empty_sheet = _XML_DECL + f'<worksheet xmlns="{main}"/>'
+    shared = _XML_DECL + f"""<sst xmlns="{main}" count="2" uniqueCount="2">
+<si><t>unit label</t></si><si><t>second label</t></si></sst>"""
+    workbook = _XML_DECL + f"""<workbook xmlns="{main}" xmlns:r="{r}"><sheets>
+<sheet name="Visible" sheetId="1" r:id="rId1"/>
+<sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/>
+<sheet name="VeryHidden" sheetId="3" state="veryHidden" r:id="rId3"/>
+<sheet name="ChartTab" sheetId="4" r:id="rId4"/>
+</sheets><definedNames>
+<definedName name="GLOB">Visible!$A$1</definedName>
+<definedName name="SCOPED" localSheetId="0">Visible!$B$1</definedName>
+</definedNames></workbook>"""
+    workbook_rels = _XML_DECL + f"""<Relationships xmlns="{_REL_NS}">
+<Relationship Id="rId1" Type="{r}/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="{r}/worksheet" Target="worksheets/sheet2.xml"/>
+<Relationship Id="rId3" Type="{r}/worksheet" Target="worksheets/sheet3.xml"/>
+<Relationship Id="rId4" Type="{r}/chartsheet" Target="chartsheets/chart1.xml"/>
+<Relationship Id="rId5" Type="{r}/sharedStrings" Target="sharedStrings.xml"/>
+</Relationships>"""
+    sheet_rels = _XML_DECL + f"""<Relationships xmlns="{_REL_NS}">
+<Relationship Id="rId9" Type="{r}/hyperlink" Target="{STRUCTURE_LINK_URL}"
+ TargetMode="External"/>
+</Relationships>"""
+    content_types = (
+        _XML_DECL
+        + f"""<Types xmlns="{_CT_NS}">"""
+        + _CT_RELS
+        + _CT_XML
+        + _CT_XLSX_MAIN
+        + "</Types>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", content_types.encode("utf-8")),
+            ("_rels/.rels", _root_rels("xl/workbook.xml").encode("utf-8")),
+            ("xl/workbook.xml", workbook.encode("utf-8")),
+            ("xl/_rels/workbook.xml.rels", workbook_rels.encode("utf-8")),
+            ("xl/worksheets/sheet1.xml", sheet.encode("utf-8")),
+            ("xl/worksheets/sheet2.xml", empty_sheet.encode("utf-8")),
+            ("xl/worksheets/sheet3.xml", empty_sheet.encode("utf-8")),
+            ("xl/sharedStrings.xml", shared.encode("utf-8")),
+            ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.encode("utf-8")),
+        ]
+    )
+
+
+HTML_STRUCTURE_DOCUMENT = (
+    "<!DOCTYPE html>\n"
+    "<html><head><title>Structure Page</title><style>body { color: junk; }</style>"
+    '<script>console.log("structure junk");</script></head>\n'
+    "<body>\n"
+    f'<h1 id="top">{STRUCTURE_H1}</h1>\n'
+    f'<h2 id="sub">{STRUCTURE_H2}</h2>\n'
+    f'<p>See the <a href="{STRUCTURE_LINK_URL}" title="the guide">field handbook</a>.</p>\n'
+    f'<img src="{STRUCTURE_IMAGE_URL}" alt="{STRUCTURE_IMAGE_ALT}">\n'
+    '<img src="https://example.com/deco.png">\n'
+    "<table><tr><td>plain</td><td>no</td></tr>"
+    "<tr><td>header</td><td>cells</td></tr></table>\n"
+    "<table><tr><th>H</th></tr>"
+    "<tr><td><table><tr><td>inner cell</td></tr></table></td></tr></table>\n"
+    "</body></html>\n"
+)
+
+
+def generate_html_structure() -> bytes:
+    """The structure fixture's html: anchor-heavy headings (id
+    attributes), a titled link, images with and without alt (no
+    dimensions — the collector drops img attributes), a `<th>`-less
+    table, and a nested table (the collector flattens the inner one into
+    the cell's text)."""
+    return HTML_STRUCTURE_DOCUMENT.encode("utf-8")
+
+
+HTML_FRAGMENT_DOCUMENT = "<div><p>just a fragment</p><ul><li>fragment item</li></ul></div>"
+
+
+def generate_html_fragment() -> bytes:
+    """A fragment (no doctype, no `<html>`): deliberately NOT
+    content-resolvable (the pinned `looks_like_html` policy) — served
+    only through `format="html"` or an .html-family extension."""
+    return HTML_FRAGMENT_DOCUMENT.encode("utf-8")
+
+
+def generate_xlsx_damaged() -> bytes:
+    """A workbook whose second sheet's part is binary garbage: the intact
+    sheet is served and the loss is on record (``unreadable_sheets``) —
+    never a whole-file refusal, never a silent skip."""
+    main = _MAIN_NS
+    r = _DOC_NS
+    workbook = _XML_DECL + (
+        f'<workbook xmlns="{main}" xmlns:r="{r}"><sheets>'
+        '<sheet name="Intact" sheetId="1" r:id="rId1"/>'
+        '<sheet name="Damaged" sheetId="2" r:id="rId2"/></sheets></workbook>'
+    )
+    workbook_rels = _XML_DECL + (
+        f'<Relationships xmlns="{_REL_NS}">'
+        f'<Relationship Id="rId1" Type="{r}/worksheet" Target="worksheets/sheet1.xml"/>'
+        f'<Relationship Id="rId2" Type="{r}/worksheet" Target="worksheets/sheet2.xml"/>'
+        "</Relationships>"
+    )
+    sheet = _XML_DECL + (
+        f'<worksheet xmlns="{main}"><sheetData>'
+        '<row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>'
+    )
+    shared = _XML_DECL + (
+        f'<sst xmlns="{main}" count="1" uniqueCount="1">'
+        "<si><t>intact label</t></si></sst>"
+    )
+    content_types = _XML_DECL + (
+        f'<Types xmlns="{_CT_NS}">' + _CT_RELS + _CT_XML + _CT_XLSX_MAIN + "</Types>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", content_types.encode("utf-8")),
+            ("_rels/.rels", _root_rels("xl/workbook.xml").encode("utf-8")),
+            ("xl/workbook.xml", workbook.encode("utf-8")),
+            ("xl/_rels/workbook.xml.rels", workbook_rels.encode("utf-8")),
+            ("xl/worksheets/sheet1.xml", sheet.encode("utf-8")),
+            ("xl/worksheets/sheet2.xml", b"<worksheet"),  # EOF mid-tag: the fast reader errors
+            ("xl/sharedStrings.xml", shared.encode("utf-8")),
+        ]
+    )
+
+
+def generate_xlsx_cells(count: int) -> bytes:
+    """One worksheet with `count` numeric cells in column A: the entry
+    cap's boundary fixture (199_999 / 200_000 / 200_001)."""
+    main = _MAIN_NS
+    r = _DOC_NS
+    rows = "".join(
+        f'<row r="{row}"><c r="A{row}"><v>{row}</v></c></row>'
+        for row in range(1, count + 1)
+    )
+    sheet = _XML_DECL + f'<worksheet xmlns="{main}"><sheetData>{rows}</sheetData></worksheet>'
+    workbook = _XML_DECL + (
+        f'<workbook xmlns="{main}" xmlns:r="{r}"><sheets>'
+        '<sheet name="Big" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    workbook_rels = _XML_DECL + (
+        f'<Relationships xmlns="{_REL_NS}">'
+        f'<Relationship Id="rId1" Type="{r}/worksheet" Target="worksheets/sheet1.xml"/>'
+        "</Relationships>"
+    )
+    content_types = _XML_DECL + (
+        f'<Types xmlns="{_CT_NS}">' + _CT_RELS + _CT_XML + _CT_XLSX_MAIN + "</Types>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", content_types.encode("utf-8")),
+            ("_rels/.rels", _root_rels("xl/workbook.xml").encode("utf-8")),
+            ("xl/workbook.xml", workbook.encode("utf-8")),
+            ("xl/_rels/workbook.xml.rels", workbook_rels.encode("utf-8")),
+            ("xl/worksheets/sheet1.xml", sheet.encode("utf-8")),
+        ]
+    )
+
+
 # --- pdf structural variants (hand-built object graphs, the same
 # --- byte-deterministic writer pattern as generate_pdf) ----------------------
 
