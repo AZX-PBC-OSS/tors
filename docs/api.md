@@ -8371,17 +8371,25 @@ number (a style present).
 The covering rule is the engine's minus its ordinal fallback: the last range
 in the stable-sorted tree with `start_page ≤ i` covers page `i`; two ranges
 sharing a start page resolve to the last in traversal order (root `/Nums`
-before `/Kids`, kids in array order). Labels render on u64 arithmetic (a
-legal `/St 4294967294` renders through `4294967296` without panic or wrap;
-an over-u32 `/St` carries the engine's own parse-time truncation, e.g.
-`/St 5000000000` reads back as `705032704`). Rotation and crop are irrelevant
+before `/Kids`, kids in array order). Labels render on u64 arithmetic under
+the bounded-label law: a label the render builds past 4 KiB bounds OUT to
+`None` for that page, never a truncated numeral — the subtractive Roman
+render is one char per thousand of the value, so a legal `/St 4294967294`
+renders 4,294,967 chars per page (858,994,700 total chars and 1.67 GiB RSS
+at 200 pages, measured before the bound), a value display-prohibitive by
+construction; decimal and alpha renders are O(log n) and never reach the
+bound. The arithmetic itself never panics or wraps; an over-u32 `/St`
+carries the engine's own parse-time truncation, e.g. `/St 5000000000` reads
+back as `705032704`. Rotation and crop are irrelevant
 (tree data). A corrupt tree (a non-dict `/PageLabels`, tree node, `/Kids`
 member, or label entry) is presented as "no labels" — every page `None`, the
 content-read-failure law, the same list a tree-less document answers; that is
 a deliberate masking, stated here the way `tables_refused: false` is.
 
-The styles: decimal (`D`), uppercase/lowercase Roman (`R`/`r`, unbounded —
-4000 is `MMMM`), uppercase/lowercase alpha (`A`/`a`, bijective base-26 — Z
+The styles: decimal (`D`), uppercase/lowercase Roman (`R`/`r`, the
+subtractive table under the 4 KiB label bound — 4000 is `MMMM`; a value
+whose render passes the bound answers `None`, never a truncated numeral),
+uppercase/lowercase alpha (`A`/`a`, bijective base-26 — Z
 wraps to AA), and the styleless label-only form. `/St` offsets where the
 range's numbering starts (positive; `/St 0`/`-3` read as the default 1);
 `/P` prefixes as UTF-16BE (with BOM) or PDFDocEncoding text strings.
@@ -8613,7 +8621,10 @@ def page_geometry(
 ```
 
 The declared-box geometry probe: one entry per unit of the resolved format —
-PDF pages, docx sections, pptx slides, xlsx worksheets, legacy
+PDF pages, docx sections, pptx slides, xlsx worksheets (the raw layer's
+kind filter: a chartsheet or dialog tab is NOT a unit — the same filter
+the structure surface's sheet list applies, so the surfaces agree on the
+same workbook), legacy
 doc/xls/ppt sections — `None` where that unit declares no box, `[]` only for
 zero units. Each `Some` entry is a `PageGeometry` (below): the render extent
 in points with the axes swapped for a 90/270 PDF rotation (the turn already
@@ -8763,7 +8774,9 @@ against rulings in another — a ruled table vanishes there, a 180-symmetric one
 comes back with every cell's text 180°-swapped), this surface reports no tables
 rather than wrong ones; `true` at rotation 0 → **the edge cap** (a page with
 more table primitives than the markdown lane's own 1500-edge bail-out;
-detection skipped). FALSE for no-tables pages, for content-stream failures
+detection skipped) or **the unreadable path walk** (fail-closed: a failed
+`extract_paths` refuses the page rather than deciding "no rulings" from an
+input it couldn't read). FALSE for no-tables pages, for content-stream failures
 (unknowable — `tables: []` stays indistinguishable from a no-tables page, like
 `page_layout`'s empty lists), and on office rows (there `tables: []` is the
 per-format capability statement and the entry's `format` field is the marker).
@@ -8857,11 +8870,18 @@ engine's `Unsupported` verbatim (feature-gated).
 "raw" | "error"`); every arm getter is `None` unless `kind` names it — "no bytes" is
 never two different things. A decode failure is a **visible typed entry**
 (`error_kind: "decode" | "unsupported" | "size_cap"`), siblings intact. Caps: 256
-MiB per image (the chain-aware pre-decode estimate: the container's own size for a
-DCT chain, the packed bits for CCITT, the unpacked one-byte-per-component arithmetic
-otherwise), 512 MiB per call cumulative, the over-cap image a typed `size_cap` entry
-(`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated;
-`max_image_bytes=` overrides the per-image ceiling (raising it past the engine's
+MiB per image, 512 MiB per call cumulative — the caps bind on **actual bytes**: the
+chain-aware pre-decode estimate (the container's own size for a DCT chain, the packed
+bits for CCITT, the unpacked one-byte-per-component arithmetic otherwise) is the
+advisory pre-labour check, and the same caps re-run on each decode's ACTUAL output
+immediately after it, before the bytes enter the payload (one chain class
+under-estimates by construction: a Flate→DCT chain is applied innermost-first, so the
+container is the INFLATED stream — measured 3,898 stored bytes → 4,000,000 container
+bytes). The over-cap image is a typed `size_cap` entry
+(`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated; the call budget is a
+budget checked at decode time, so an under-estimated chain can push the call past it by
+at most one image's inflation (that entry refuses, scope `call`; entries already served
+stand); `max_image_bytes=` overrides the per-image ceiling (raising it past the engine's
 env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` cannot make the ENGINE decode more).
 
 The honesty flags, stated where the engine leaves them: an image XObject with a
@@ -8957,8 +8977,10 @@ page = tors.documents.page_text_chars(data=generate_pdf_layout_baseline())[0]
 The `page_images` classes, exposed directly (the `PageGeometry` deviation note
 applies); `==` is structural. `PageImagesData`: `page_index`, `format` (the
 provenance marker), `geometry` (the `page_geometry` entry — the images are STILL
-enumerated when it is `None`, their `bbox` `None`), `images` (paint order).
-`PageImageEntry`: `bbox` (`None` when no frame), `width_px`/`height_px` (the
+enumerated when it is `None`, their `bbox` `None`; a DEGENERATE
+zero/non-finite-extent box is the same None-frame answer — the bytes are
+frame-independent, only the box is gated), `images` (paint order).
+`PageImageEntry`: `bbox` (`None` when no usable frame), `width_px`/`height_px` (the
 DICTIONARY's), `rotation_degrees`, `paint_order`, `color_space` (spelled:
 `"DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "Indexed" | "CalGray" | "CalRGB" |
 "Lab" | "ICCBased(n)" | "Separation" | "DeviceN" | "Pattern"`),
@@ -9143,8 +9165,11 @@ capability; html's forced backends are conversion's own
 with the legacy-xls-or-encrypted-xlsx union message. There is NO
 `password=` parameter: no served format accepts one. An explicit
 `max_bytes=` binds pre-read; `None` keeps the 32 MiB default ceiling on
-every served row; the 200,000-entry payload cap truncates with
-`entries_truncated` (metadata stays complete), never refusing.
+every served row; the 200,000-entry payload cap is one running budget
+over every materialized entry OBJECT (docx blocks and their table cells,
+xlsx cells, html nodes and their grid cells — a cell is an entry object)
+that truncates with `entries_truncated` (metadata stays complete; the
+kept prefix keeps the reading-order invariants), never refusing.
 `format=` is trusted and never re-sniffed — the fix-it is
 [`sniff`](#torsdocumentssniff).
 
@@ -9195,7 +9220,9 @@ section), `section_breaks: list[int]` (verbatim; section i covers body
 elements `[prev_break, section_breaks[i])`), `footnotes`/`endnotes`/
 `comments: int` (body counts; v1 keeps note BODIES out),
 `unreadable_parts: list[str]` (the raw layer's cannot-parse records,
-verbatim — the report-the-loss law), and `entries_truncated: bool`.
+verbatim — the report-the-loss law), and `entries_truncated: bool`
+(the running entry budget counts blocks AND their table cells — a cell
+is an entry object).
 
 ## `tors.documents.DocxBlock`
 
@@ -9306,8 +9333,11 @@ Attributes: `cell_ref: str`, `author: str | None`, `text: str`.
 The html payload; `==` is structural (both fields). Attributes:
 `nodes: list[HtmlNode]` (the flat array, reading order, parents before
 children — the auto-built Group tree IS the heading tree) and
-`entries_truncated: bool` (the kept prefix stays index-sound; children
-filtered to kept indices). No second tables list: the Table nodes carry
+`entries_truncated: bool` (the running entry budget counts nodes AND
+their grid cells — a cell is an entry object; the kept prefix stays
+index-sound; children
+filtered to kept indices; cells inside a stopped table drop with the
+table). No second tables list: the Table nodes carry
 the grids.
 
 ## `tors.documents.HtmlNode`
