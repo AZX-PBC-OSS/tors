@@ -759,6 +759,124 @@ fn has_separator_in(text: &str, start: usize, end: usize) -> bool {
     text[start..end].chars().any(is_phone_separator)
 }
 
+/// The width cut's group re-scan: a maximal un-plussed run wider than
+/// the NANP shapes may be several numbers BRIDGED by a space
+/// (`415-555-2671 415-555-2672`) — the single-run width test spends
+/// such a run whole and every number in it survives, the silent
+/// under-redaction this module exists never to make. Walk the run
+/// once, cutting the groups the domestic grammar accepts: the digit
+/// count reaches exactly 10 (or 11 with an ASCII leading `1`) at a
+/// digit whose following separator run — up to the NEXT digit, or the
+/// run's end — carries a SPACE, or reaches the run's end. A cut never
+/// fires mid-spelling. Both arms are the idempotence contract: the
+/// pass must redact exactly what a re-scan of its own output finds.
+/// After a cut, the text before the token and the suffix after it are
+/// the runs pass 2 walks (the token's `~` breaks the run) — so a
+/// group's completing digit followed by `) ` (a survived trailing
+/// separator, the single-run span's own tail) must cut in pass 1
+/// because pass 2's re-anchored suffix run is EXACTLY that shape and
+/// the single-run rule pushes it (the run's-end arm); and a group
+/// whose completing digit is followed by `- ` then more digits must
+/// cut in pass 1 because pass 2, seeing the LATER group's token break
+/// the run there, re-anchors the prefix and finds the same
+/// exactly-width suffix (the space arm). A group carries an internal
+/// separator (the bare cut, re-checked on the trimmed span), and the
+/// group starts clean (the same clean-boundary rule as the single-run
+/// match, so digest composition stays impossible; a run's head is
+/// already token-vetted and no `~` can occur inside a run).
+///
+/// The completing-digit rule is what keeps the near-miss neighbors
+/// out: a 4-digit credit-card group's count passes through 10 only
+/// inside a digit run (never at a separator), and a dash-chained id
+/// (`415-555-2671-555-123-4567`) completes only at digits whose
+/// following separator run holds no space before more digits (the
+/// count overshoots between the dashes and re-anchors past its
+/// residue) — both stay out entirely. A bare 10-digit group idem: no
+/// separator, no cut. Overshoot re-anchors at
+/// the last space seen since the group start (the residue digits ride
+/// with nothing), rewinding the walk — the re-walked segment holds no
+/// space (the anchor IS the last one), so the next overshoot cannot
+/// rewind again, and each separator run is walked at most twice (once
+/// per completion attempt), so the pass stays linear.
+fn domestic_group_spans(text: &str, run_start: usize, run: &PhoneRun) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let bytes = text.as_bytes();
+    // Group 1 starts where the single-run match would (leading spaces
+    // are word separation); a later group starts after the previous
+    // group's last digit, its own bridge spaces skipped.
+    let mut gs = run_start + run.leading_spaces;
+    let mut count = 0usize;
+    let mut first: Option<char> = None;
+    let mut last_space: Option<usize> = None;
+    let mut i = gs;
+    while i < run.run_end {
+        let c = text[i..].chars().next().unwrap();
+        if is_nd(c) {
+            i += c.len_utf8();
+            count += 1;
+            if first.is_none() {
+                first = Some(c);
+            }
+            let complete = count == 10 || (count == 11 && first == Some('1'));
+            // The separator run after the completing digit, up to the
+            // next digit or the run's end.
+            let mut e = i;
+            while e < run.run_end {
+                let sc = text[e..].chars().next().unwrap();
+                if is_nd(sc) {
+                    break;
+                }
+                e += sc.len_utf8();
+            }
+            let bridged = e < run.run_end && bytes[i..e].contains(&b' ');
+            if complete && (e == run.run_end || bridged) {
+                // Candidate group [gs, i): trim its leading spaces (the
+                // word-separation rule), then the two cuts on the
+                // trimmed span.
+                let mut s = gs;
+                while s < i && text[s..].starts_with(' ') {
+                    s += 1;
+                }
+                let clean_start =
+                    s == 0 || !matches!(bytes[s - 1], b'~' | b'a'..=b'f') || token_ends_at(text, s);
+                if has_separator_in(text, s, i) && clean_start {
+                    spans.push((s, i));
+                }
+                // Spent: the next group starts past the bridge spaces.
+                let mut j = i;
+                while j < run.run_end && bytes[j] == b' ' {
+                    j += 1;
+                }
+                gs = j;
+                i = j;
+                count = 0;
+                first = None;
+                last_space = None;
+                continue;
+            }
+            if count == 12 || (count == 11 && first != Some('1')) {
+                // Overshot the NANP shapes without a cut: re-anchor past
+                // the residue at the last bridge space (or here, when
+                // the segment holds none — the bare case).
+                let anchor = last_space.unwrap_or(i);
+                gs = anchor;
+                i = anchor;
+                count = 0;
+                first = None;
+                last_space = None;
+            }
+        } else if is_phone_separator(c) {
+            if c == ' ' {
+                last_space = Some(i + 1);
+            }
+            i += 1;
+        } else {
+            break; // not class material: the run ended (defensive)
+        }
+    }
+    spans
+}
+
 /// Whether `b` is a token-digest hex char: lowercase `[0-9a-f]`, exactly
 /// the alphabet `const_hex::encode` emits. Uppercase `A`-`F` never opens
 /// a token span (tokens are lowercase-only), so natural text holding one
@@ -837,7 +955,10 @@ fn token_ends_at(text: &str, pos: usize) -> bool {
 /// domestic match — with token spans (`~` + 12 digest hex, either
 /// rule's token) acting as breakers: a run starting inside a digest
 /// resumes after the token (never a composed digest-plus-number run),
-/// and the byte after a token is a clean boundary. Non-matching runs
+/// and the byte after a token is a clean boundary. A run the width cut
+/// refuses is re-scanned at group granularity (`domestic_group_spans`):
+/// numbers bridged by spaces each match; the bare/id/dash-chain
+/// neighbors stay out. Non-matching runs
 /// are spent whole — no partial match inside a longer run.
 /// `Cow::Borrowed` when nothing matches.
 fn phone_pass_impl<'a>(text: &'a str, salt: &str, rec: Option<&mut PassRec>) -> Cow<'a, str> {
@@ -902,6 +1023,31 @@ fn phone_pass_impl<'a>(text: &'a str, salt: &str, rec: Option<&mut PassRec>) -> 
             }
         };
         let Some((start, end)) = span else {
+            // The width cut spent this run whole: if it is several
+            // numbers bridged by spaces, re-scan at group granularity
+            // and emit each group's token — never a silent skip (the
+            // domestic branch's declared failure mode). Empty groups
+            // (the bare/id/dash-chain neighbors) spend the run as
+            // before.
+            if !plussed {
+                for (gs, ge) in domestic_group_spans(text, run_start, &run) {
+                    let token = format!("~{}", token_digest(salt, &text[gs..ge]));
+                    if let Some(r) = rec.as_deref_mut() {
+                        r.edits.push(PassEdit {
+                            start: gs,
+                            end: ge,
+                            token: token.clone(),
+                            verbatim_src: gs,
+                            verbatim_len: 0,
+                        });
+                        r.kinds.push(SpanKind::Phone);
+                    }
+                    let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
+                    buf.push_str(&text[emitted..gs]);
+                    buf.push_str(&token);
+                    emitted = ge;
+                }
+            }
             pos = run.run_end;
             continue;
         };
@@ -2125,6 +2271,71 @@ mod tests {
 
     fn digest(salt: &str, matched: &str) -> String {
         token_digest(salt, matched)
+    }
+
+    #[test]
+    fn space_bridged_domestic_pairs_scrub_per_group() {
+        // The width cut's group re-scan: a maximal run wider than the
+        // NANP shapes spent WHOLE leaked every number it bridged. Each
+        // bridged number tokens with its OWN GROUP's digest (the paren
+        // spelling's group span carries the parens).
+        let phone = PiiRules {
+            email: false,
+            phone: true,
+            keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
+        };
+        for (text, groups) in [
+            (
+                "415-555-2671 415-555-2672",
+                ("415-555-2671", "415-555-2672"),
+            ),
+            (
+                "(415) 555-2671 (415) 555-2672",
+                ("(415) 555-2671", "(415) 555-2672"),
+            ),
+            (
+                "call 415-555-2671 415-555-2672 now",
+                ("415-555-2671", "415-555-2672"),
+            ),
+        ] {
+            let out = scrub(text, phone, "");
+            for group in [groups.0, groups.1] {
+                let token = format!("~{}", digest("", group));
+                assert!(out.contains(&token), "{text:?} -> {out:?}");
+                assert!(!out.contains(group), "{text:?} -> {out:?}");
+            }
+        }
+        assert_eq!(
+            scrub("415-555-2671 415-555-2672", phone, ""),
+            format!(
+                "~{} ~{}",
+                digest("", "415-555-2671"),
+                digest("", "415-555-2672")
+            )
+        );
+    }
+
+    #[test]
+    fn the_group_recut_near_miss_neighbors_stay_out() {
+        // The re-scan's false-positive guards: a 4-digit credit-card
+        // group's count passes through ten only INSIDE a digit run, a
+        // dash-chained id overshoots between dashes (the cut is
+        // SPACE-only), and a bare 10-digit group has no separator.
+        let phone = PiiRules {
+            email: false,
+            phone: true,
+            keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
+        };
+        for text in ["4111 1111 1111 1111", "415-555-2671-555-123-4567"] {
+            assert_eq!(scrub(text, phone, ""), text);
+        }
+        // The bare id next to a real number stays out; the number scrubs.
+        assert_eq!(
+            scrub("9876543210 415-555-2671", phone, ""),
+            format!("9876543210 ~{}", digest("", "415-555-2671"))
+        );
     }
 
     #[test]

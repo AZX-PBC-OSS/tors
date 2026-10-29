@@ -223,7 +223,15 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
     token is a clean boundary even when the digest ends hex-dirty, so
     an adjacent number still scrubs exactly; and
     (3) no partial match inside a longer run — twelve-plus digits is an
-    id, not a phone. Leading spaces are skipped (word separation); a
+    id, not a phone — EXCEPT the width cut's group re-scan: a wider run
+    that bridges numbers with SPACES (`415-555-2671 415-555-2672`) is
+    re-scanned at group granularity, and each group the domestic grammar
+    accepts (exactly 10 or 11-with-`1` digits, an internal separator, a
+    clean start, the completing digit followed by a space or the run's
+    end) scrubs with its own digest — the old whole-run skip silently
+    leaked every bridged number. The cut fires on SPACES only, which is
+    what keeps the near-miss neighbors out (see the residual list).
+    Leading spaces are skipped (word separation); a
     leading structural separator (`-`, `.`, `(`, `)`) is ABSORBED into
     the match, not stripped (`x -415-555-2671` scrubs `-415-555-2671`
     whole); trailing separators survive past the last digit, same as
@@ -388,6 +396,18 @@ timestamps:
 - Bare digit runs never match even at ten/eleven digits (`4155552671`,
   `14155552671` are order numbers), and short `+`-led runs never match
   (`+1234567`, seven digits, is the ported non-match).
+- The domestic group re-scan cuts on SPACES only: dash- or dot-bridged
+  pairs leak whole (`415-555-2671-415-555-2672`, `415-555-2671.415-555-2672`
+  — the same shape the dash-chained id spells, ambiguous with it), as do
+  pairs bridged by any other separator (`)`-close then space). A pair
+  separated by a comma or newline was never a single run (neither char is
+  phone-class) and always scrubbed as two matches. Canonicalize (map
+  `-`/`.` between digit groups to spaces) before scrubbing if those
+  spellings are in threat.
+- 4-digit credit-card groupings stay out of the same re-scan
+  (`4111 1111 1111 1111`): the digit count passes through ten only
+  INSIDE a digit run, and a cut never fires mid-spelling — the count
+  must complete at a space or the run's end.
 - Extensions survive past the last digit: `415-555-2671 x1234` scrubs
   `415-555-2671` and leaves ` x1234` untouched, same as international
   (trailing separators survive; the extension is not part of the match).
