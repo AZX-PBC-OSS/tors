@@ -7857,7 +7857,9 @@ tors.__version__
 Document-format extraction: PDF, the office and text formats (doc/docx, xls/xlsx,
 ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv), and HTML, converted to GitHub-Flavored
 Markdown or plain text, one GIL-released native pass per call, the same discipline as
-every function above.
+every function above. Beyond conversion, the [`document_structure`](#torsdocumentsdocument_structure)
+probe serves the office/html families' parse trees — the structure surface for
+docx/xlsx/html; PDF's structure answer is `page_geometry`/`page_layout`/`page_tables`.
 
 This surface ships in a second wheel: `pip install tors[documents]`. The base `tors`
 wheel re-exports it as `tors.documents` (an `ImportError` with the install hint fires
@@ -8883,6 +8885,273 @@ accepted strings. `"empty"` is deliberately distinct from `"scanned"` (see
 neither extractable nor an image to recover, and `pages_needing_ocr`
 excludes it.
 
+## `tors.documents.document_structure`
+
+```python
+def document_structure(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> DocumentStructure: ...
+```
+
+The structure surface (issues #209/#210/#211): one report whose resolved
+`format` discriminates and whose `payload` is exactly one of
+[`DocxStructure`](#torsdocumentsdocxstructure) /
+[`XlsxStructure`](#torsdocumentsxlsxstructure) /
+[`HtmlStructure`](#torsdocumentshtmlstructure) — narrow with
+`isinstance(report.payload, ...)`. The full routing table, refusal
+families, and per-format disclosures are the [Document structure
+section](documents.md#document-structure) of
+[documents.md](documents.md); in brief:
+
+- **docx**: the body's blocks from the office_oxide RAW layer — the
+  heading ladder (`level` clamped 1..=6 plus the raw 0-based
+  `outline_level`; parity with `backend="oxide"` markdown holds on the
+  `outlineLvl` subset, the convention rung is a disclosed superset),
+  effective-property list state (style-carried `numPr` included), the
+  block-text walk (hidden runs, breaks/tabs, text-box prose), table grids
+  with gridSpan/vMerge spans and `tblCaption`, hyperlinks (href/anchor
+  split), real pictures (rid + extension + declared extents in points),
+  the section partition (`sections = section_breaks + 1`), note counts,
+  `unreadable_parts`.
+- **xlsx**: the worksheets (hidden and macro sheets served, each carrying
+  its own name and state; chart/dialog tabs named in `chartsheets`), the
+  used range COMPUTED from the parsed cells (styled-empty cells included;
+  the declared `<dimension>` rides beside it for provenance), values AS
+  THE FILE STATES THEM (`type`-discriminated `bool | float | str | None`,
+  shared strings dereferenced to full text, `t="d"` the only date shape),
+  formulas text+cache both labeled, merged ranges, sheet hyperlinks,
+  comments, defined names.
+- **html**: the conversion lane's own parse run once with the structure
+  collector on — the flat node array (the NINE reachable kinds, parents
+  precede children), heading `id` attributes, link annotations with byte
+  ranges and url/title, table grids with row/col/spans/header cells; the
+  conversion output is discarded. Declared image dimensions are NOT
+  served (the collector drops img attributes — the disclosed v1 gap).
+
+Entries carry container anchors, never boxes — no coordinates anywhere
+(the coordinate surfaces are `page_geometry`/`page_tables`/`page_layout`).
+Every refused format (pdf, doc/xls/ppt, pptx, rtf/odt/ods/odp/epub/csv)
+refuses on EVERY backend with a format-level `ValueError` fired before
+any read; the served office rows refuse `backend="anydoc"` as a
+capability; html's forced backends are conversion's own
+`UnsupportedBackend` pair; an OLE container under the Excel kind refuses
+with the legacy-xls-or-encrypted-xlsx union message. There is NO
+`password=` parameter: no served format accepts one. An explicit
+`max_bytes=` binds pre-read; `None` keeps the 32 MiB default ceiling on
+every served row; the 200,000-entry payload cap truncates with
+`entries_truncated` (metadata stays complete), never refusing.
+`format=` is trusted and never re-sniffed — the fix-it is
+[`sniff`](#torsdocumentssniff).
+
+```python
+import sys
+sys.path.insert(0, "tests")
+import tors.documents
+
+from documents import generate_xlsx_structure
+
+report = tors.documents.document_structure(data=generate_xlsx_structure())
+report.format
+# "xlsx"
+payload = report.payload
+isinstance(payload, tors.documents.XlsxStructure)
+# True
+[(sheet.name, sheet.state, sheet.used_range) for sheet in payload.sheets]
+# [("Visible", "visible", "A1:D5"), ("Hidden", "hidden", None), ("VeryHidden", "veryHidden", None)]
+payload.chartsheets
+# ["ChartTab"]
+cell = payload.sheets[0].cells[0]
+(cell.ref, cell.type, cell.value)
+# ("A1", "string", "unit label")
+```
+
+**Async**: `await tors.documents.aio.document_structure(...)` runs this
+under `asyncio.to_thread` so the event loop stays responsive across the
+call.
+
+## `tors.documents.DocumentStructure`
+
+The `document_structure` report: the resolved format's name plus exactly
+one per-format payload (the compile-time one-of is the core's enum). `==`
+is structural (both fields). Attributes: `format: str` (the resolved
+format's vocabulary name — the same spelling the refusals use, provenance
+only) and `payload: DocxStructure | XlsxStructure | HtmlStructure` (a
+fresh native object per access, structurally equal to its siblings;
+`isinstance` is the narrowing — a `format` string cannot narrow it
+statically).
+
+## `tors.documents.DocxStructure`
+
+The docx payload; `==` is structural (all eight fields). Attributes:
+`blocks: list[DocxBlock]` (the body's blocks, body order), `sections: int`
+(THE PARTITION LAW: `section_breaks`' length + 1 — not the declared
+`SectionProperties` count; a document with no body-level sectPr is ONE
+section), `section_breaks: list[int]` (verbatim; section i covers body
+elements `[prev_break, section_breaks[i])`), `footnotes`/`endnotes`/
+`comments: int` (body counts; v1 keeps note BODIES out),
+`unreadable_parts: list[str]` (the raw layer's cannot-parse records,
+verbatim — the report-the-loss law), and `entries_truncated: bool`.
+
+## `tors.documents.DocxBlock`
+
+One docx body block; `==` is structural (all fourteen fields). Attributes:
+`index: int` (position in `body.elements`), `section: int`, `kind: str`
+(`"heading" | "list_item" | "paragraph" | "table"` — heading wins over
+list: a numbered heading is a heading carrying numPr), `text: str` (the
+walked visible text — hidden runs resolved, breaks/tabs verbatim,
+text-box prose recursed; `""` for table blocks), `level: int | None`
+(headings: the markdown depth, clamped 1..=6), `outline_level: int | None`
+(headings: the ladder's raw 0-based level 0..8), `style_id: str | None`
+(the raw `w:pStyle` string), `num_id: int | None` / `ilvl: int | None` /
+`list_format: str | None` / `start_number: int | None` (the EFFECTIVE
+numbering state — style-carried numPr included; `start_number` is the
+level's own start, not a rendered ordinal), `table: DocxTable | None`
+(`kind == "table"` only), `links: list[DocxLink]`, `images: list[DocxImage]`.
+
+## `tors.documents.DocxTable`
+
+One docx table's grid; `==` is structural (all five fields). Attributes:
+`rows: int`, `cols: int` (`grid.len()`), `col_widths_twips: list[int]`
+(the `w:tblGrid`, verbatim), `cells: list[DocxCell]` (row-major; a
+vMerge-continue cell is emitted as its own cell, inside the Restart span
+it continues), `caption: str | None` (the `w:tblCaption`).
+
+## `tors.documents.DocxCell`
+
+One docx table cell; `==` is structural (all five fields). Attributes:
+`row: int`, `col: int` (0-based; the gridSpan-accumulated start column),
+`text: str`, `row_span: int` (the vMerge walk; 1 otherwise), `col_span:
+int` (`w:gridSpan`, clamped 1..=1000).
+
+## `tors.documents.DocxLink`
+
+One docx hyperlink; `==` is structural (all five fields). Attributes:
+`text: str` (the runs' text), `href: str | None` (the rels-resolved
+external URL), `anchor: str | None` (the internal bookmark name —
+exactly one of `href`/`anchor` is set), `fragment: str | None` (a
+fragment an external link ALSO declares), `tooltip: str | None`.
+
+## `tors.documents.DocxImage`
+
+One docx picture (a drawing with a relationship id; bytes never cross
+this surface); `==` is structural (all seven fields). Attributes:
+`relationship_id: str`, `file_ext: str | None` (from the package's image
+map), `description: str | None` (the alt text), `width_pt: float | None` /
+`height_pt: float | None` (the declared extent, EMU ÷ 12700.0; `None`
+when not positive — an undeclared extent is 0), `inline: bool`,
+`decorative: bool`.
+
+## `tors.documents.XlsxStructure`
+
+The xlsx payload; `==` is structural (all six fields). Attributes:
+`sheets: list[XlsxSheet]` (kind-filtered from the raw layer's own
+worksheet list — hidden and macro sheets served, never zip'd against
+`workbook.sheets`), `chartsheets: list[str]` (the chart/dialog tab
+names), `defined_names: list[XlsxDefinedName]`, `date1904: bool`,
+`unreadable_sheets: list[str]`, `entries_truncated: bool`.
+
+## `tors.documents.XlsxSheet`
+
+One xlsx worksheet; `==` is structural (all ten fields). Attributes:
+`name: str`, `state: str` (`"visible" | "hidden" | "veryHidden"`),
+`used_range: str | None` (COMPUTED from the parsed cells — min/max over
+every present cell, styled-but-empty included — never the declared
+dimension), `declared_dimension: str | None` (verbatim, provenance),
+`max_row: int | None` / `max_col: int | None` (the used range's 0-based
+numeric bounds; `None` for an empty sheet), `cells: list[XlsxCell]`
+(row-major, sparse), `merged_cells: list[str]` (ref strings, verbatim),
+`hyperlinks: list[XlsxHyperlink]`, `comments: list[XlsxComment]`.
+
+## `tors.documents.XlsxCell`
+
+One xlsx cell; `==` is structural (all seven fields). Attributes:
+`ref: str` ("B3"), `row: int` / `col: int` (0-based), `type: str`
+(`"number" | "string" | "boolean" | "error" | "date" | "empty"` —
+`date` is ONLY the `t="d"` ISO-8601 branch; a serial number with a date
+number-format stays `"number"`, the seam cannot decode the
+number-format stylesheet), `value: bool | float | str | None` (the
+file's own value, discriminated by `type`, never coerced; shared
+strings dereferenced to their FULL text — no markdown-lane
+32,768-char truncation, a disclosed divergence), `formula: str | None`
+(the `<f>` text, verbatim), `has_cached_value: bool` (a formula whose
+cached `<v>` is absent reports False; a `t="e"` cell with no `<v>`
+parses to the empty error string and reports True).
+
+## `tors.documents.XlsxDefinedName`
+
+One defined name; `==` is structural (all five fields). Attributes:
+`name: str`, `value: str` (verbatim), `local_sheet_id: int | None`
+(0-based into the WORKBOOK's own sheet list — chartsheets included —
+verbatim), `local_sheet_name: str | None` (resolved when in range),
+`hidden: bool`.
+
+## `tors.documents.XlsxHyperlink`
+
+One xlsx sheet hyperlink; `==` is structural (all four fields).
+Attributes: `cell_ref: str`, `href: str | None` / `anchor: str | None`
+(exactly one is set, the DocxLink split), `tooltip: str | None`.
+
+## `tors.documents.XlsxComment`
+
+One xlsx cell comment; `==` is structural (all three fields).
+Attributes: `cell_ref: str`, `author: str | None`, `text: str`.
+
+## `tors.documents.HtmlStructure`
+
+The html payload; `==` is structural (both fields). Attributes:
+`nodes: list[HtmlNode]` (the flat array, reading order, parents before
+children — the auto-built Group tree IS the heading tree) and
+`entries_truncated: bool` (the kept prefix stays index-sound; children
+filtered to kept indices). No second tables list: the Table nodes carry
+the grids.
+
+## `tors.documents.HtmlNode`
+
+One html node (the NINE reachable kinds); `==` is structural (all
+fourteen fields). Attributes: `id: str` (the crate's deterministic node
+id), `parent: int | None` (always earlier), `children: list[int]`,
+`attributes: dict[str, str] | None` (headings carry `{"id": ...}` when
+the source heading had one; image nodes carry `None` — the collector
+drops img attributes, the disclosed v1 gap), `kind: str` (`"heading" |
+"paragraph" | "list" | "list_item" | "table" | "image" | "code" |
+"quote" | "group"`; an unreachable variant is a typed refusal, never a
+silent `kind=None`), `text: str | None`
+(heading/paragraph/list_item/code), `level: int | None` (heading 1-6; a
+Group: the level that created it), `ordered: bool | None` (list),
+`language: str | None` (code), `label: str | None` (Group: the creating
+heading's text — the crate's `label` and `heading_text` are the same
+string), `src: str | None` / `alt: str | None` (image), `grid:
+HtmlGrid | None` (table), `annotations: list[HtmlAnnotation]`.
+
+## `tors.documents.HtmlGrid`
+
+One html table grid; `==` is structural (all three fields). Attributes:
+`rows: int`, `cols: int`, `cells: list[HtmlGridCell]` (origin cells,
+ordered by (row, col), sparse under spans; a table's first bare `<tr>`
+is the collector's own header inference).
+
+## `tors.documents.HtmlGridCell`
+
+One html grid cell; `==` is structural (all six fields). Attributes:
+`content: str`, `row: int`, `col: int` (0-based), `row_span: int`,
+`col_span: int`, `is_header: bool`.
+
+## `tors.documents.HtmlAnnotation`
+
+One inline annotation on an html node's text; `==` is structural (all
+five fields). Attributes: `kind: str` (`"link" | "bold" | "italic" |
+"underline" | "strikethrough" | "code" | "subscript" | "superscript" |
+"highlight"`), `start: int` / `end: int` (byte offsets into the node's
+text, half-open), `url: str | None` / `title: str | None` (links:
+verbatim href, the `title` attribute). A link's enclosing section is the
+nearest GROUP ancestor (walk `parent`); headings have no children — a
+heading CREATES a Group sibling — and a link on a heading lives on the
+Heading node itself.
+
 ## `tors.documents.PageGeometry`
 
 One `page_geometry` entry: a unit's declared render box, in points. The
@@ -9097,9 +9366,9 @@ never disagree.
 
 ## `tors.documents.aio`
 
-The awaitable spellings of the eleven path functions (`to_markdown`, `to_text`,
+The awaitable spellings of the twelve path functions (`to_markdown`, `to_text`,
 `pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_page_labels`, `pdf_security`,
-`pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`), each an
+`pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`, `document_structure`), each an
 unconditional `asyncio.to_thread` dispatch, signatures identical to the sync
 spellings, `path`/`data=` flowing through unchanged (pinned by the suite). The same doctrine as `tors.aio`: every one of these calls is a single
 native pass whose cost scales with the document (a small one is milliseconds, a large

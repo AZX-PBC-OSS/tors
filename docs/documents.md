@@ -96,6 +96,8 @@ page_layout(path=None, data=None, format=None, password=None, backend="auto",
             pages=None, max_bytes=None) -> list[PageLayout]
 page_tables(path=None, data=None, format=None, password=None, backend="auto",
             pages=None, max_bytes=None) -> list[PageTables]
+document_structure(path=None, data=None, format=None, backend="auto",
+                   max_bytes=None) -> DocumentStructure
 ```
 
 The full per-function contract (signatures, the `pages=` and
@@ -453,11 +455,119 @@ Three honesty laws ride on the boxes, and one flag:
   identity join. Use `page_tables` for the grid and cell text, `page_layout`
   for everything else, and accept the overlap; do not subtract cell bboxes.
 
+## Document structure
+
+`document_structure` is the third capability table's surface: one report
+whose resolved `format` discriminates and whose `payload` is exactly one of
+`DocxStructure` / `XlsxStructure` / `HtmlStructure` (narrow with
+`isinstance(report.payload, ...)`). It answers a different question from
+everything above — not "how do I render this document" and not "where is
+its content on a page", but **who can parse structure at all**: which
+formats hand over a parse tree (headings, list state, table grids, cell
+values, sheet bounds) as their own engines see it.
+
+| format | structure surface | engine | note |
+|---|---|---|---|
+| docx (incl. `docm`) | `DocxStructure` — blocks, sections, tables, links, images | office_oxide (raw layer, `as_docx`) | the ladder's convention rung is a markdown superset (below) |
+| xlsx (incl. `xlsm`, ZIP) | `XlsxStructure` — sheets, used ranges, typed cells, formulas, merges, defined names | office_oxide (raw layer, `as_xlsx`) | hidden and macro sheets served; chart/dialog tabs named in `chartsheets` |
+| html / htm / xhtml | `HtmlStructure` — the node array (the nine kinds), link annotations, table grids | html-to-markdown-rs (the conversion lane's own parse + structure collector) | the conversion output is discarded; the surface returns structure only |
+| pdf | refused | — | PDF's structure answer is already two surfaces: `page_layout` + `page_tables` |
+| doc / xls / ppt | refused | — | office_oxide's converter-internal IR is not a raw layer (the converter's structure is a rendering choice) |
+| pptx (incl. `ppsx`) | refused (v1) | raw layer reachable | "reachable, not built yet" — the message never claims impossibility |
+| rtf / odt / ods / odp / epub / csv | refused | — | no parse tree anywhere; the format converts fine ("no structure surface", never "unreadable") |
+
+The refusal families, in order: every refused format refuses on EVERY
+backend with a format-level `ValueError` ("document_structure cannot serve
+…") fired before the backend check, resolved from `format=`/the 64 KiB
+prefix alone — a `path=` + `format="pdf"` call on a 40 MiB file answers the
+refusal, never a ceiling error, because no byte is read. The served office
+rows refuse `backend="anydoc"` as a capability (its office lane is
+whole-document markdown; the raw layers are office_oxide's). html's forced
+backends are conversion's own `UnsupportedBackend` pair, byte-identical. An
+OLE container under the Excel kind refuses with the union message — it is a
+legacy xls workbook OR an encrypted xlsx package, both CFB, and the seam
+cannot disambiguate without a full legacy parse, so it never diagnoses one.
+There is NO `password=` parameter: no served format accepts one.
+
+The surface-wide laws:
+
+- **Entries carry container anchors, never boxes.** No coordinates
+  anywhere: a docx section index, a cell reference ("B3"), a node id —
+  those are the anchors. A caller wanting office or PDF coordinates is on
+  `page_geometry`/`page_tables`/`page_layout`.
+- **Loss is reported, never skipped.** `DocxStructure.unreadable_parts`
+  and `XlsxStructure.unreadable_sheets` carry the raw layers' own
+  cannot-parse records verbatim; the intact parts are served.
+- **One entry cap, truncate-with-marker.** `MAX_STRUCTURE_ENTRIES`
+  (200,000) bounds the payload's entry lists (docx blocks, xlsx cells,
+  html nodes) in document order, with `entries_truncated: true` on the
+  affected payload and all sheet/range/merge/name metadata complete. It
+  bounds PAYLOAD MARSHALLING, not the parse — the engine has already
+  materialized everything by the time the cap applies — and it never
+  refuses.
+- **`format=` is trusted, never re-sniffed** (the conversion lane's own
+  precedence): `format="html"` on docx bytes is the html lane's own
+  binary-input refusal; `format="docx"` on pdf bytes is the office leg's
+  typed parse error; the fix-it is `sniff()`.
+- **An explicit `max_bytes=` binds pre-read; `None` keeps the 32 MiB
+  default ceiling on every served row.** The conversion lane's ~23×
+  measured HTML amplification is a LOWER bound for the structure lane
+  (which also holds the node array); the office legs' amplification is
+  bounded by the audit + ceiling pair every oxide lane carries.
+
+Per-format disclosures a consumer should read before relying on the fields:
+
+- **docx headings.** The ladder is direct `w:outlineLvl` → the
+  stylesheet's `basedOn` chain → the `Heading1..9` style-ID convention →
+  the style-NAME convention. Parity with `backend="oxide"` markdown holds
+  where heading-ness comes from `w:outlineLvl` and the depth is ≤ 6
+  (pinned both ways: one agreeing case, one divergent case); the
+  convention rung is a documented SUPERSET (a paragraph only the
+  convention rung names a heading renders as plain text on
+  `backend="oxide"`), and depths 7–9 exist only in `outline_level` while
+  `level` clamps to 6. Headers/footers and text-box prose are not body
+  blocks (the markdown lane renders both) — the parity claim excludes
+  them. List membership reads the EFFECTIVE properties (style-carried
+  `numPr` — the "List Bullet"/"List Number" styles — included); inside
+  table cells the table-style LAYER is unreachable (crate-private), so
+  cell-level list state misses table-style numPr. A numbered heading
+  reports `kind="heading"` AND its `num_id`/`ilvl` (the numPr is
+  information; `kind` alone discriminates). Table `vMerge` continue cells
+  are emitted as their own cells (inside the Restart span they continue);
+  a table block's own `text` is `""` (the cells carry it).
+- **xlsx values.** The value is the file's own, discriminated by `type`,
+  never coerced: `number`/`string`/`boolean`/`error`/`empty` plus `date` —
+  and `date` is ONLY the `t="d"` ISO-8601 branch: an ordinary Excel date
+  (a serial number with a date number-format) reports `number`, because
+  decoding it needs the stylesheet the raw layer only exposes behind
+  `&mut self`. Shared strings are dereferenced to their FULL text (no
+  markdown-lane 32,768-char truncation — a disclosed divergence from
+  `to_markdown`'s DoS guard). Formulas report text and cached value both,
+  labeled (`formula` + `has_cached_value`). The used range is COMPUTED
+  from the parsed cells (styled-empty cells included); the declared
+  `<dimension>` rides beside it for provenance, never as the source.
+- **html.** The node kinds are the NINE the live collector emits
+  (`heading`, `paragraph`, `list`, `list_item`, `table`, `image`, `code`,
+  `quote`, `group`); an unreachable variant is a typed refusal, never a
+  silent `kind=None`. Headings carry their `id` attributes; image nodes
+  carry `attributes: None` — **declared image dimensions are NOT served**
+  (the collector drops img attributes; the visitor-feature path is the
+  v1.x completion). A link's enclosing section is the nearest GROUP
+  ancestor (headings have no children — a heading CREATES a Group
+  sibling). Nested tables: the inner grid is ALSO collected as its own
+  Table node while the outer cell carries the flattened text. Malformed
+  HTML and fragments behave exactly as the conversion lane's (the
+  structure IS the conversion lane's parse, one parse, no second
+  opinion); a fragment without a name stays unresolvable (the pinned
+  `looks_like_html` policy), served only through `format="html"` or an
+  `.html`-family extension.
+
 ## Async and the GIL
 
-`tors.documents.aio` gives the eleven input-scaling functions (`to_markdown`,
+`tors.documents.aio` gives the twelve input-scaling functions (`to_markdown`,
 `to_text`, `pdf_extract`, `pdf_page_count`, `pdf_page_labels`, `pdf_security`,
-`pdf_classify`, `pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`)
+`pdf_classify`, `pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`,
+`document_structure`)
 their `asyncio.to_thread` twins: same signatures, same discipline as
 [`tors.aio`](async.md) (an unconditional thread hop, never a size-based
 branch). `sniff` stays sync-only: its cost is a container parse, but it
