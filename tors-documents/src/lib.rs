@@ -3574,7 +3574,11 @@ impl TextChar {
 /// affected payload and all sheet/range/merge/name
 /// metadata complete — a marshalling bound, never a refusal.
 ///
-/// Errors: `OSError` for a missing/unreadable file; `ValueError` for
+/// Errors: `OSError` for a missing/unreadable file — but NEVER for a
+/// call the name already refused: an explicit `format=` naming a
+/// non-Excel kind decides the refusal from the name alone and touches
+/// no filesystem (a chmod-000/directory/missing path answers the format
+/// refusal, its OSError never fires); `ValueError` for
 /// bytes that resolve to no format (`sniff()` is the fix-it), an unknown
 /// `format=` name, a bad backend name, every refused format row (GIL-side,
 /// resolved from `format=`/the 64 KiB prefix alone, no body read — the 64
@@ -3585,8 +3589,10 @@ impl TextChar {
 /// document, an office container that will not parse or pass the
 /// decompression audit, and an over-ceiling input.
 ///
-/// GIL model: the argument marshalling plus the capability probe (a
-/// bounded 64 KiB prefix read) under the GIL; the whole
+/// GIL model: the argument marshalling plus the capability probe — a
+/// bounded 64 KiB prefix on the data= lane (NEVER the full buffer; an
+/// explicit non-Excel name consults no bytes at all) or a bounded
+/// prefix read on the path lane — under the GIL; the whole
 /// read+resolve+structure pass under one `py.detach`; then O(payload) of
 /// native-object construction post-detach (the payload pyclasses are
 /// thin getters over plain core structs — structural `==` throughout).
@@ -3615,7 +3621,11 @@ pub fn document_structure(
     // backend (the format-level family precedes the backend check; the
     // geometry surfaces' probe is anydoc-only because their refusals
     // are, and this surface's are not). The probe resolves from the
-    // format name, the content markers in the 64 KiB prefix, or the
+    // format name (an explicit name that resolves to a non-Excel kind
+    // consults NO bytes and touches NO filesystem — the path branch's
+    // open(2) has no business running when the name decides), the
+    // content markers in the 64 KiB prefix (data= hands the probe the
+    // BOUNDED prefix, never the full buffer), or the
     // name hint's extension — the same precedence the core's resolve
     // runs — and defers when even the prefix cannot resolve (the
     // core's authoritative resolve is the only truth).
