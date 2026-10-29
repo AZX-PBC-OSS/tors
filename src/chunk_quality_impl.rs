@@ -58,6 +58,7 @@ use std::collections::HashSet;
 
 use crate::grounding_impl::sentence_spans;
 use crate::near_dup_impl::shingle_hashes;
+use crate::truncate_impl::char_count;
 
 /// The shingle width for the cohesion proxy: the near-duplicate family's
 /// own documented default (`shingle_jaccard`/`shingle_dice`'s
@@ -94,7 +95,11 @@ fn dice(a: &HashSet<u64>, b: &HashSet<u64>) -> f64 {
 /// panics on any input: an empty text, an empty chunk list, and
 /// token-free text all return the pinned degenerate shape
 /// (integrity 1.0: no chunk boundary crosses any sentence, vacuously;
-/// cohesion 0.0: no (sentence, chunk) pair exists to average).
+/// cohesion 0.0: no (sentence, chunk) pair exists to average), and a
+/// span out of range is SKIPPED by the defensive guard, not indexed —
+/// the guard compares against the CODEPOINT count (`char_count`), so a
+/// byte-valid-but-over-the-chars span (("é")'s (0, 2)) is a skip, not a
+/// `byte_at` panic.
 pub fn chunk_quality(chunks: &[(usize, usize)], text: &str, tau: usize) -> ChunkQuality {
     // The gold blocks: the suite's own UAX #29 sentence spans. Built
     // once; the same segmentation every grounding surface publishes.
@@ -174,13 +179,21 @@ pub fn chunk_quality(chunks: &[(usize, usize)], text: &str, tau: usize) -> Chunk
         .map(|&(_, _, bs, be)| shingle_hashes(&text[bs..be], SHINGLE_WIDTH))
         .collect();
 
+    // The defensive guard's units: the spans are CODEPOINT offsets, so
+    // the bound is the codepoint count (`char_count`), never
+    // `text.len()`'s bytes — a byte-valid span (("é")'s (0, 2): 1
+    // codepoint, 2 bytes) passed the byte comparison and indexed
+    // `byte_at` past its chars + 1 entries, panicking inside a function
+    // documented never to (unreachable through the binding, whose
+    // wrapper validates against the codepoint count; this core is a pub
+    // module of an rlib, so the guard is the contract).
+    let text_chars = char_count(text);
     let mut total = 0.0f64;
     let mut count = 0usize;
     for &(cs, ce) in chunks {
-        if cs > ce || ce > text.len() {
-            // Unreachable through the binding (the wrapper validates
-            // every span), the core's defensive contract: skip rather
-            // than panic, a bad span simply contains nothing.
+        if cs > ce || ce > text_chars {
+            // The core's defensive contract: skip rather than panic, a
+            // bad span simply contains nothing.
             continue;
         }
         let lo = sentences.partition_point(|&(s, _, _, _)| s < cs);
@@ -309,5 +322,35 @@ mod tests {
         // cohesion 1.0 (the chunk's shingle set IS the sentence's).
         let one = chunk_quality(&[(0, 14)], "One two three.", 0);
         assert_eq!(one.cohesion, 1.0);
+    }
+
+    #[test]
+    fn a_byte_valid_but_past_the_chars_span_is_skipped_not_panicked() {
+        // "é" is 1 codepoint, 2 UTF-8 bytes. The span (0, 2) is valid
+        // in BYTES and passes a byte-typed range guard (2 > 2 is
+        // false), but `byte_at` has chars + 1 = 2 entries, so
+        // byte_at[2] panicked inside the function documented "never
+        // panics on any input" — the guard must compare against the
+        // CODEPOINT count and SKIP the span (the "skip rather than
+        // panic" contract): no (sentence, chunk) pair exists, so the
+        // pinned degenerate shape comes back, never a panic.
+        let q = chunk_quality(&[(0, 2)], "é", 0);
+        assert_eq!(
+            q,
+            ChunkQuality {
+                integrity: 1.0,
+                cohesion: 0.0
+            }
+        );
+        // Same guard, the start edge: a span opening past the char
+        // count is skipped too (and one byte-valid on both ends but
+        // reversed — cs > ce — stays skipped, the guard's first arm).
+        assert_eq!(
+            chunk_quality(&[(3, 4)], "é", 0),
+            ChunkQuality {
+                integrity: 1.0,
+                cohesion: 0.0
+            }
+        );
     }
 }
