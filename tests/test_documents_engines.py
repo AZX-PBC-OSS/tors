@@ -99,6 +99,7 @@ from documents import (
     generate_pdf_table_stack_disjoint,
     generate_pdf_table_symmetric,
     generate_pdf_table_text_only,
+    generate_pdf_table_text_only_rot180,
     generate_pdf_table_toc,
     generate_pdf_zero_pages,
     generate_pptx_empty,
@@ -3383,6 +3384,37 @@ class TestPageTables:
         assert not empty.tables_refused
         assert empty.tables == []
 
+    def test_the_180_text_only_class_serves_via_unmap_then_forward(self) -> None:
+        """The A12 served class's 180 arm: a pathless page whose every
+        span is engine-mapped (at 180 the engine maps ALL spans) — the
+        text-only 4×2 on /Rotate 180 (measured out.txt: detected, one
+        table, every cell's bbox the span's own) serves through
+        unmap→forward, the identity here (no crop: the frames coincide),
+        so the boxes are the engine's mapped numbers verbatim."""
+        (entry,) = page_tables(data=generate_pdf_table_text_only_rot180())
+        assert not entry.tables_refused
+        assert entry.geometry.rotation == 180
+        assert len(entry.tables) == 1
+        table = entry.tables[0]
+        assert (table.col_count, table.has_header) == (2, False)
+        _box_near(table.bbox, (281.316, 80.0, 230.684, 162.0))
+        # the measured grid (out.txt, mapped verbatim): the rows are the
+        # MAPPED frame's y-bands — 560/East on top (the raw bottom row,
+        # mapped), the Region/Value column heads last; every cell's bbox
+        # is the span's own (the span-union branch's cell == span law).
+        expected = [
+            [("560", (291.984, 230.0, 20.016, 12.0)), ("East", (487.988, 230.0, 24.012, 12.0))],
+            [("340", (291.984, 180.0, 20.016, 12.0)), ("South", (480.644, 180.0, 31.356, 12.0))],
+            [("120", (291.984, 130.0, 20.016, 12.0)), ("North", (482.66, 130.0, 29.34, 12.0))],
+            [("Value", (281.316, 80.0, 30.684, 12.0)), ("Region", (473.984, 80.0, 38.016, 12.0))],
+        ]
+        assert len(table.rows) == 4
+        for row, want_row in zip(table.rows, expected, strict=True):
+            assert len(row.cells) == 2
+            for cell, (want_text, want_box) in zip(row.cells, want_row, strict=True):
+                assert cell.text == want_text
+                _box_near(cell.bbox, want_box)
+
     def test_the_crop_laws(self) -> None:
         """The unclipped law and the text-side asymmetry (both measured
         out2): under the [110 550 550 800] crop the ruled grid survives
@@ -3504,6 +3536,7 @@ class TestPageTables:
             generate_pdf_table_cluster_shared_x(),
             generate_pdf_table_text_only(),
             generate_pdf_table_text_only(rotate=90),
+            generate_pdf_table_text_only_rot180(),
             generate_pdf_table_sideways_text_only(270),
             generate_pdf_table_crop_survivor(),
             generate_pdf_table_symmetric(),

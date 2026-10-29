@@ -4476,6 +4476,9 @@ mod tests {
             .collect()
     }
 
+    /// A cell's text and its measured box (the golden pair's type).
+    type CellGolden<'a> = (&'a str, (f32, f32, f32, f32));
+
     /// Whether the rendered page has ink within ±1 px of the render-space
     /// point (the ruling-position oracle's pixel probe; 72 dpi, 1pt = 1px,
     /// the raster's top-left origin flipped to render space first). The
@@ -4573,8 +4576,6 @@ mod tests {
             ("C", (100.0, 600.0, 200.0, 100.0)),
             ("D", (300.0, 600.0, 200.0, 100.0)),
         ];
-        /// A cell's text and its measured box (the golden pair's type).
-        type CellGolden<'a> = (&'a str, (f32, f32, f32, f32));
         let got: Vec<CellGolden> = table
             .rows
             .iter()
@@ -4602,8 +4603,8 @@ mod tests {
                     );
                 } else {
                     assert!(
-                        px < 0.0 || px > 612.0 || py < 0.0 || py > 792.0,
-                        "cell {text}: {name} edge inside the render but unrendered"
+                        !ink_near(&image, px, py),
+                        "cell {text}: {name} edge off the page yet rendered"
                     );
                 }
             };
@@ -4814,6 +4815,56 @@ mod tests {
         );
     }
 
+    /// The A12 served class's 180 arm: a PATHLESS page whose every span
+    /// is engine-mapped (at 180 the engine maps ALL spans) — the text-only
+    /// 4×2 on /Rotate 180 (measured out.txt: detected, one table, every
+    /// cell's bbox the span's own) serves through unmap→forward, the
+    /// identity here (no crop: the frames coincide), so the boxes are the
+    /// engine's mapped numbers verbatim. The other Frame::Mapped arm (the
+    /// 270 sideways test above) and this one are the class's whole wiring
+    /// coverage, end to end.
+    #[test]
+    fn tables_the_180_text_only_class_serves_via_unmap_then_forward() {
+        let page = one_table_page(tables_pdf(TEXT_ONLY_4X2, "/Rotate 180"));
+        assert!(!page.tables_refused, "the served 180 class, not a refusal");
+        assert_eq!(page.geometry.unwrap().rotation, 180);
+        assert_eq!(page.tables.len(), 1);
+        let table = &page.tables[0];
+        assert_eq!((table.col_count, table.has_header), (2, false));
+        assert_box_near(
+            table.bbox.unwrap(),
+            (281.316, 80.0, 230.684, 162.0),
+            0.01,
+            "T0 bbox",
+        );
+        // the measured grid (out.txt, mapped verbatim): the rows are the
+        // MAPPED frame's y-bands — 560/East on top (the raw bottom row,
+        // mapped), the Region/Value column heads last; every cell's bbox
+        // is the span's own (the span-union branch's cell == span law).
+        let expected = [
+            ("560", (291.984, 230.0, 20.016, 12.0)),
+            ("East", (487.988, 230.0, 24.012, 12.0)),
+            ("340", (291.984, 180.0, 20.016, 12.0)),
+            ("South", (480.644, 180.0, 31.356, 12.0)),
+            ("120", (291.984, 130.0, 20.016, 12.0)),
+            ("North", (482.66, 130.0, 29.34, 12.0)),
+            ("Value", (281.316, 80.0, 30.684, 12.0)),
+            ("Region", (473.984, 80.0, 38.016, 12.0)),
+        ];
+        assert_eq!(table.rows.len(), 4);
+        let got: Vec<CellGolden> = table
+            .rows
+            .iter()
+            .flat_map(|r| &r.cells)
+            .map(|c| (c.text.as_str(), c.bbox.unwrap()))
+            .collect();
+        assert_eq!(got.len(), 8);
+        for ((text, bbox), (want_text, want_bbox)) in got.iter().zip(expected.iter()) {
+            assert_eq!(text, want_text);
+            assert_box_near(*bbox, *want_bbox, 0.01, want_text);
+        }
+    }
+
     /// The A12 mixed-span refusal classes: a pathless page whose spans MIX
     /// engine-mapped (sideways) and raw (upright) runs — the detector
     /// would compare two text frames; refused (fail-closed: the unlisted
@@ -4961,7 +5012,6 @@ mod tests {
         assert_eq!(row_texts(&page, 0), vec!["B1", "B2"]); // page.tables[0].rows[0]
         assert_eq!(page.tables[0].bbox, Some((350.0, 300.0, 200.0, 200.0)));
         assert_eq!(page.tables[1].bbox, Some((100.0, 600.0, 200.0, 200.0)));
-        let _ = page.tables[0].rows[0].cells[0].bbox;
     }
 
     /// The A11 MERGE-path fixture: two disjoint-x ruled grids with a

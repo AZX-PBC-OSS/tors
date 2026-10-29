@@ -1778,6 +1778,16 @@ def generate_pdf_table_text_only(rotate: int | None = None) -> bytes:
     return generate_pdf_layout(content, rotate=rotate)
 
 
+def generate_pdf_table_text_only_rot180() -> bytes:
+    """The text-only 4×2 on /Rotate 180 (the same fixture bytes at
+    rotate=180 — measured out.txt): the A12 SERVED 180 class — a pathless
+    page whose every span is engine-mapped (`page_rotation_applied ==
+    180`), so the detector DOES find the grid — one table, every cell's
+    bbox the span's own (cell bbox == span bbox, measured), served
+    through unmap→forward."""
+    return generate_pdf_table_text_only(rotate=180)
+
+
 def generate_pdf_table_sideways_text_only(rotate: int) -> bytes:
     """The A12 served class: a pathless page whose every span is drawn
     with `Tm [0 1 -1 0 x y]` — engine-mapped on a 90/270 page
