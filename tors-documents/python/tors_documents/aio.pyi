@@ -25,6 +25,7 @@ import os
 
 from tors_documents import (
     Backend,
+    DocumentStructure,
     Format,
     PageGeometry,
     PageLayout,
@@ -119,3 +120,10 @@ async def page_tables(
     pages: int | list[int] | tuple[int, int] | None = ...,
     max_bytes: int | None = ...,
 ) -> list[PageTables]: ...
+async def document_structure(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    format: Format | str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
+) -> DocumentStructure: ...

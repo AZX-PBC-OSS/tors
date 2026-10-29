@@ -47,6 +47,7 @@ from documents import (
     ENGINES_CORPUS,
     ENGINES_DIR,
     ENGINES_FILENAMES,
+    HTML_FRAGMENT_DOCUMENT,
     PDF_LINK_LABEL,
     PDF_LINK_URL,
     RICH_H1,
@@ -62,8 +63,16 @@ from documents import (
     SLIDE1_BODY,
     SLIDE1_TITLE,
     SLIDE2_TITLE,
+    STRUCTURE_H1,
+    STRUCTURE_H2,
+    STRUCTURE_LINK_URL,
+    generate_docx_blocks,
     generate_docx_margins_only,
     generate_docx_pgsz,
+    generate_docx_structure,
+    generate_html_fragment,
+    generate_html_nodes,
+    generate_html_structure,
     generate_pdf_big,
     generate_pdf_crop,
     generate_pdf_crop_partial,
@@ -104,12 +113,19 @@ from documents import (
     generate_pdf_zero_pages,
     generate_pptx_empty,
     generate_pptx_sldsz,
+    generate_xlsx_cells,
     generate_xlsx_chart,
+    generate_xlsx_damaged,
+    generate_xlsx_macro,
+    generate_xlsx_structure,
 )
 
 try:  # the payload wheel (tors[documents])
     from tors_documents import (
         Cell,
+        DocumentStructure,
+        DocxStructure,
+        HtmlStructure,
         ImageBox,
         NeedsOcrError,
         PageGeometry,
@@ -122,6 +138,8 @@ try:  # the payload wheel (tors[documents])
         TextLine,
         TextSpan,
         Word,
+        XlsxStructure,
+        document_structure,
         page_geometry,
         page_layout,
         page_tables,
@@ -138,6 +156,9 @@ except ImportError:  # pragma: no cover - the in-base wiring alternative
     try:
         from tors import (  # type: ignore[attr-defined]  # noqa: F401
             Cell,
+            DocumentStructure,
+            DocxStructure,
+            HtmlStructure,
             ImageBox,
             NeedsOcrError,
             PageGeometry,
@@ -150,6 +171,8 @@ except ImportError:  # pragma: no cover - the in-base wiring alternative
             TextLine,
             TextSpan,
             Word,
+            XlsxStructure,
+            document_structure,
             page_geometry,
             page_layout,
             page_tables,
@@ -4728,3 +4751,682 @@ class TestImportLaziness:
         resolved, markdown = shim.to_markdown(_materialize(tmp_path, "pdf_two_page"))
         assert resolved is payload.Format.PDF
         assert "first page line" in markdown and "second page line" in markdown
+
+
+# --- the document-structure surface (issues #209/#210/#211) -------------------
+
+
+class TestDocumentStructure:
+    """The structure surface's contract: one report, one payload, three
+    per-format shapes from the RAW layers, the refusal families ordered
+    exactly as the review locked them. The fixtures are
+    tests/documents.py's structure generators (never the pinned engines
+    corpus: the raw readers need parts the conversion lane never looks
+    at)."""
+
+    # --- the docx payload -------------------------------------------------
+
+    def test_docx_payload_pins(self) -> None:
+        """The docx payload over the structure fixture: the heading ladder
+        (style outlineLvl, the NAME convention rung, the direct
+        outlineLvl 7 clamp), list membership on the EFFECTIVE properties
+        (style-carried numPr included), the numbered heading rule, the
+        block-text walk (br/tab/hidden run), links, images, the table
+        grid, the section partition, the note counts, and the
+        unreadable part reported."""
+        report = document_structure(data=generate_docx_structure())
+        assert report.format == "docx"
+        assert isinstance(report.payload, DocxStructure)
+        docx = report.payload
+        blocks = docx.blocks
+
+        # the heading ladder: pStyle -> stylesheet outlineLvl -> level 1
+        assert (blocks[0].kind, blocks[0].level, blocks[0].outline_level) == (
+            "heading",
+            1,
+            0,
+        )
+        # the NAME-convention rung: a style whose NAME is "heading 3" —
+        # the structure's convention rung reports the heading (a
+        # documented markdown SUPERSET: backend="oxide" renders plain
+        # text there — the divergent parity pin below)
+        assert (blocks[1].kind, blocks[1].level, blocks[1].outline_level) == (
+            "heading",
+            3,
+            2,
+        )
+        assert blocks[1].style_id == "FancyH3"
+        # the clamp case: direct outlineLvl 7 -> level clamps to 6, the
+        # raw 7 carried
+        assert (blocks[2].level, blocks[2].outline_level) == (6, 7)
+        assert blocks[2].style_id is None
+
+        # list membership on the EFFECTIVE properties: the style carries
+        # the numPr
+        assert blocks[3].kind == "list_item"
+        assert (blocks[3].num_id, blocks[3].ilvl) == (1, 0)
+        assert blocks[3].list_format == "bullet"
+        assert blocks[3].start_number == 1
+        # a direct numPr: the decimal format, start 4 (the abstract
+        # level's own start)
+        assert blocks[4].kind == "list_item"
+        assert (blocks[4].num_id, blocks[4].ilvl) == (2, 0)
+        assert blocks[4].list_format == "decimal"
+        assert blocks[4].start_number == 4
+        # the numbered heading: heading wins, the numPr is information
+        assert blocks[5].kind == "heading"
+        assert blocks[5].level == 2
+        assert blocks[5].num_id == 2
+
+        # the block-text walk: br -> newline, tab -> tab, the hidden run
+        # resolved through the style chain and dropped
+        assert blocks[6].text == "line one\n\tafter tab"
+        assert "secretly hidden" not in blocks[6].text
+
+        # links: external (rels-resolved) and internal (the anchor)
+        assert blocks[7].links[0].href == STRUCTURE_LINK_URL
+        assert blocks[7].links[0].anchor is None
+        assert blocks[8].links[0].anchor == "imaging-anchor"
+        assert blocks[8].links[0].href is None
+
+        # images: the declared extent in points (EMU / 12700), the ext
+        # from the package map, alt text; the 0-extent drawing reports
+        # None; the shape-only drawing is filtered; the decorative flag
+        # carried
+        assert [
+            (
+                image.relationship_id,
+                image.file_ext,
+                image.width_pt,
+                image.height_pt,
+                image.decorative,
+            )
+            for image in blocks[9].images
+        ] == [("rId9", "png", 150.0, 100.0, False)]
+        assert blocks[10].images[0].width_pt is None
+        assert blocks[10].images[0].height_pt is None
+        assert blocks[11].images == []  # the shape: not a picture
+        assert [image.decorative for image in blocks[12].images] == [True]
+
+        # the table: grid verbatim, caption = tblCaption, block text ""
+        table = blocks[13]
+        assert table.kind == "table" and table.text == ""
+        grid = table.table
+        assert (grid.rows, grid.cols, grid.caption) == (3, 3, "Units table")
+        assert grid.col_widths_twips == [1800, 1800, 1800]
+        cells = grid.cells
+        assert (cells[0].row, cells[0].col, cells[0].col_span) == (0, 0, 2)
+        assert (cells[1].row, cells[1].col) == (0, 2)
+        # the vMerge pair: the Restart carries the walked span; the
+        # Continue cell emitted as its own cell inside the span
+        assert (cells[2].row, cells[2].col, cells[2].row_span) == (1, 0, 2)
+        assert cells[2].text == "merged col"
+        assert (cells[5].row, cells[5].col, cells[5].row_span) == (2, 0, 1)
+        assert cells[5].text == ""
+        for index, block in enumerate(blocks):
+            assert block.index == index
+
+        # the partition: two in-paragraph sectPr -> three sections
+        assert docx.sections == 3
+        assert blocks[14].section == 0 and blocks[15].section == 1
+        assert blocks[16].section == 2
+        # the note counts + the unreadable part (the report-the-loss law)
+        assert (docx.footnotes, docx.endnotes, docx.comments) == (1, 0, 0)
+        assert len(docx.unreadable_parts) == 1
+        assert "header1.xml" in docx.unreadable_parts[0]
+        assert docx.entries_truncated is False
+
+    def test_docx_markdown_parity_is_the_outline_subset(self, tmp_path: Path) -> None:
+        """The parity law as the review locked it (F1): parity with
+        backend="oxide" markdown holds where heading-ness comes from
+        w:outlineLvl and the depth is <= 6; the convention rung is a
+        documented SUPERSET. One agreeing case (every outlineLvl heading's
+        # count == the structure's level) and one divergent case (the
+        name-convention heading renders plain text)."""
+        _, markdown = to_markdown(data=generate_docx_structure(), backend="oxide")
+        rendered = {line.lstrip("#").strip(): len(line) - len(line.lstrip("#"))
+                    for line in markdown.splitlines() if line.lstrip().startswith("#")}
+        report = document_structure(data=generate_docx_structure())
+        blocks = report.payload.blocks
+        # agreeing: outlineLvl headings render at the structure's level
+        for block in (blocks[0], blocks[2], blocks[5]):
+            assert rendered[block.text] == block.level, block.text
+        # divergent: the name-convention heading is a structure heading
+        # the oxide markdown renders as plain text (the supersetteness
+        # the disclosure pins)
+        assert blocks[1].text not in rendered
+        assert blocks[1].kind == "heading" and blocks[1].level == 3
+        # the clamp: the outline-7 heading renders ###### (six)
+        assert rendered[blocks[2].text] == 6
+
+    # --- the xlsx payload -------------------------------------------------
+
+    def test_xlsx_payload_pins(self) -> None:
+        """The xlsx payload over the structure fixture: sheets
+        kind-filtered from the raw layer's own list (the chartsheet a
+        name here, never a mislabeled sheet), the states spelled out,
+        the used range COMPUTED (styled-empty cells included; the lying
+        declared dimension rides beside it), the values as the file
+        states them, formulas both labeled, merges, hyperlinks, defined
+        names."""
+        report = document_structure(data=generate_xlsx_structure())
+        assert report.format == "xlsx"
+        assert isinstance(report.payload, XlsxStructure)
+        xlsx = report.payload
+        assert [sheet.name for sheet in xlsx.sheets] == [
+            "Visible",
+            "Hidden",
+            "VeryHidden",
+        ]
+        assert [sheet.state for sheet in xlsx.sheets] == [
+            "visible",
+            "hidden",
+            "veryHidden",
+        ]
+        assert xlsx.chartsheets == ["ChartTab"]
+        assert xlsx.date1904 is False
+        assert xlsx.unreadable_sheets == []
+
+        names = xlsx.defined_names
+        assert (names[0].name, names[0].value, names[0].local_sheet_id) == (
+            "GLOB",
+            "Visible!$A$1",
+            None,
+        )
+        assert names[1].local_sheet_id == 0
+        assert names[1].local_sheet_name == "Visible"
+
+        sheet = xlsx.sheets[0]
+        # the used range is computed from the parsed cells — styled-empty
+        # cells included — never the declared dimension (which lies:
+        # content sits at D4/D1 past its A1:C4)
+        assert sheet.used_range == "A1:D5"
+        assert sheet.declared_dimension == "A1:C4"
+        assert (sheet.max_row, sheet.max_col) == (4, 3)
+        by_ref = {cell.ref: cell for cell in sheet.cells}
+        assert len(sheet.cells) == 9
+        assert (by_ref["A1"].type, by_ref["A1"].value) == ("string", "unit label")
+        assert (by_ref["B1"].type, by_ref["B1"].value) == ("number", 3.5)
+        assert (by_ref["C1"].type, by_ref["C1"].value) == ("boolean", True)
+        assert (by_ref["B2"].type, by_ref["B2"].value) == ("error", "#REF!")
+        # t="d" is the ONLY date shape
+        assert (by_ref["C2"].type, by_ref["C2"].value) == ("date", "2026-01-02")
+        # a styled-but-empty cell is present
+        assert (by_ref["D1"].type, by_ref["D1"].value) == ("empty", None)
+        # formulas: text and cached value, both labeled
+        assert by_ref["A2"].formula == "SUM(B1:B1)"
+        assert by_ref["A2"].has_cached_value is True
+        assert by_ref["A2"].value == 3.5
+        # a formula with no cached value (the F29(l) pin)
+        assert by_ref["A5"].formula == "1+1"
+        assert by_ref["A5"].has_cached_value is False
+        assert by_ref["A5"].value is None
+
+        assert sheet.merged_cells == ["A3:B3"]
+        assert [
+            (link.cell_ref, link.href, link.anchor, link.tooltip)
+            for link in sheet.hyperlinks
+        ] == [
+            ("B1", STRUCTURE_LINK_URL, None, "the guide"),
+            ("C1", None, "Hidden!A1", None),
+        ]
+        # the empty sheets: no cells, no bounds (F20's int | None law)
+        assert xlsx.sheets[1].cells == []
+        assert xlsx.sheets[1].used_range is None
+        assert (xlsx.sheets[1].max_row, xlsx.sheets[1].max_col) == (None, None)
+
+    def test_xlsx_macro_sheet_is_served_and_the_chart_fixture_pins_the_kind_filter(
+        self,
+    ) -> None:
+        """The kind filter's two faces: a real macro sheet (generate_xlsx_macro:
+        a sheets.xml entry whose relationship type is the Microsoft
+        xlMacrosheet one, its part a root-xne:macrosheet CT_Worksheet)
+        is served with its cells (the worksheet cell model), and the
+        chart fixture's workbook (generate_xlsx_chart) answers its chart
+        text in the raw layer's own slot — with the chartsheet
+        classification still exact when a chartsheet REL is present (the
+        main fixture's ChartTab)."""
+        xlsx = document_structure(data=generate_xlsx_macro()).payload
+        assert [sheet.name for sheet in xlsx.sheets] == ["Data", "Macro1"]
+        assert xlsx.chartsheets == []
+        macro = xlsx.sheets[1]
+        assert macro.state == "veryHidden"
+        by_ref = {cell.ref: cell for cell in macro.cells}
+        assert (by_ref["A1"].type, by_ref["A1"].value) == ("string", "Auto_Open")
+        assert (by_ref["A2"].type, by_ref["A2"].value) == ("boolean", True)
+        assert by_ref["A2"].formula == "ISNUMBER(1)"
+        charted = document_structure(data=generate_xlsx_chart()).payload
+        assert charted.chartsheets == []
+        assert [sheet.name for sheet in charted.sheets] == ["Samples"]
+        # the chartsheet-REL face: the main fixture's ChartTab is named,
+        # never mislabeled a sheet
+        assert (
+            document_structure(data=generate_xlsx_structure()).payload.chartsheets
+            == ["ChartTab"]
+        )
+
+    def test_xlsx_chart_fixture_serves_the_worksheet(self) -> None:
+        """generate_xlsx_chart (the corpus's worksheet-vs-IR fixture): the
+        structure still answers from the raw worksheet layer — one
+        served sheet, no chartsheet names (its chart part is a plain
+        chart REL, not a chartsheet tab), and the sheet's cells
+        intact."""
+        xlsx = document_structure(data=generate_xlsx_chart()).payload
+        assert [sheet.name for sheet in xlsx.sheets] == ["Samples"]
+        assert xlsx.chartsheets == []
+        assert len(xlsx.sheets[0].cells) == 5  # the corpus's 3x2 shared-string grid
+
+    def test_the_entry_cap_truncates_with_a_marker(self) -> None:
+        """The cap boundary, measured through the real reader:
+        199_999 cells fit, exactly 200_000 fit, 200_001 truncates to
+        200_000 with the marker and the metadata complete — a marshalling
+        bound, never a refusal (F6/R10). The docx blocks' cell pins the
+        same cap on that payload (one w:p is one block)."""
+        for count, expected, truncated in (
+            (199_999, 199_999, False),
+            (200_000, 200_000, False),
+            (200_001, 200_000, True),
+        ):
+            report = document_structure(data=generate_xlsx_cells(count))
+            xlsx = report.payload
+            assert len(xlsx.sheets) == 1, count
+            assert len(xlsx.sheets[0].cells) == expected, count
+            assert xlsx.entries_truncated is truncated, count
+            # the metadata stays complete past the cap: the FULL computed
+            # range, the sheet name, the bounds
+            assert xlsx.sheets[0].used_range == f"A1:A{count}", count
+            assert xlsx.sheets[0].name == "Big"
+        # the docx blocks' cell: 200_001 w:p blocks truncate to the kept
+        # prefix, indexes still dense, the partition complete (no sectPr:
+        # one section over the WHOLE body)
+        report = document_structure(data=generate_docx_blocks(200_001))
+        docx = report.payload
+        assert len(docx.blocks) == 200_000
+        assert docx.entries_truncated is True
+        assert docx.blocks[-1].index == 199_999
+        assert docx.sections == 1
+
+    # --- the html payload -------------------------------------------------
+
+    def test_html_payload_pins(self) -> None:
+        """The html payload over the structure fixture: the node kinds,
+        the heading id attributes (the anchor work's handle), the link
+        annotation's byte range + url + title, images with src/alt (no
+        dimensions — the disclosed v1 gap), the table grids with
+        header/span cells, the Group tree (parents precede children), and
+        NO node carrying the script/style junk."""
+        report = document_structure(data=generate_html_structure())
+        assert report.format == "html"
+        assert isinstance(report.payload, HtmlStructure)
+        html = report.payload
+        nodes = html.nodes
+        # the reachable kinds this fixture reaches; the junk variants
+        # (definition/raw/metadata) cannot be emitted at all
+        kinds = {node.kind for node in nodes}
+        assert {"heading", "paragraph", "image", "table", "group"} <= kinds
+        # parents precede children
+        for index, node in enumerate(nodes):
+            if node.parent is not None:
+                assert node.parent < index
+        # the headings carry their id attributes
+        headings = [node for node in nodes if node.kind == "heading"]
+        assert [node.attributes.get("id") for node in headings] == ["top", "sub"]
+        # the groups the headings create: the creating heading's level
+        # rides in `level` and its text is the label (a group carries no
+        # text of its own)
+        groups = [node for node in nodes if node.kind == "group"]
+        by_label = {node.label: node for node in groups}
+        assert by_label[STRUCTURE_H1].level == 1
+        assert by_label[STRUCTURE_H2].level == 2
+        assert all(node.text is None for node in groups)
+        # the link annotation: byte range into the node's text
+        paragraph = next(node for node in nodes if node.kind == "paragraph")
+        (link,) = [a for a in paragraph.annotations if a.kind == "link"]
+        assert link.url == STRUCTURE_LINK_URL
+        assert link.title == "the guide"
+        assert paragraph.text[link.start : link.end] == "field handbook"
+        # images: src/alt carried; dimensions do not exist (attributes is
+        # None on image nodes — the collector drops img attributes)
+        images = [node for node in nodes if node.kind == "image"]
+        assert [image.src for image in images] == [
+            "https://example.com/units-chart.png",
+            "https://example.com/deco.png",
+        ]
+        assert [image.alt for image in images] == ["units chart", None]
+        assert all(image.attributes is None for image in images)
+        # tables: the th-less table's first bare row is the collector's
+        # own header inference; the nested table's inner grid is ALSO
+        # collected (its own Table node) while the outer cell carries the
+        # flattened text (the observed 3.19.0 behavior, disclosed)
+        tables = [node for node in nodes if node.kind == "table"]
+        assert len(tables) == 3
+        first = tables[0].grid
+        assert (first.rows, first.cols) == (2, 2)
+        assert first.cells[0].is_header is True  # the first bare row
+        assert first.cells[0].content == "plain"
+        assert first.cells[2].is_header is False
+        # document order closes the INNER table first (its node precedes
+        # the outer table's): the 1x1 inner grid, then the outer 2x1
+        nested_inner, nested_outer = tables[1], tables[2]
+        assert (nested_inner.grid.rows, nested_inner.grid.cols) == (1, 1)
+        assert nested_inner.grid.cells[0].content == "inner cell"
+        assert (nested_outer.grid.rows, nested_outer.grid.cols) == (2, 1)
+        assert any(
+            cell.content == "inner cell" for cell in nested_outer.grid.cells
+        )
+        # no node's text carries the head junk (the F13 replacement for
+        # the tautological MetadataBlock assertion)
+        for node in nodes:
+            for junk in ("structure junk", "color: junk", "Structure Page"):
+                assert junk not in (node.text or ""), node.id
+
+    def test_html_fragments_and_binary_refusals(self) -> None:
+        """Fragments resolve through format="html" (the pinned
+        looks_like_html policy keeps them unresolvable without a name);
+        the malformed document matches the conversion lane's own
+        recovery; BINARY bytes named html are the lane's own binary-input
+        refusal (the structure IS the conversion lane's parse — F26's
+        premise about recovered-garbage structures did not survive
+        contact with the lane's binary gate)."""
+        with pytest.raises(ValueError, match="unrecognized content"):
+            document_structure(data=HTML_FRAGMENT_DOCUMENT.encode())
+        report = document_structure(data=generate_html_fragment(), format="html")
+        assert report.format == "html"
+        assert any(
+            node.text == "just a fragment" for node in report.payload.nodes
+        )
+        # malformed: served with the lane's own recovery
+        report = document_structure(data=b"<html><body><h1>messy<p>text</body>")
+        assert any(
+            node.kind == "heading" and "messy" in node.text
+            for node in report.payload.nodes
+        )
+        # binary: the lane's own typed refusal
+        with pytest.raises(ValueError, match="binary data"):
+            document_structure(data=b"PK\x03\x04junkjunkjunk", format="html")
+
+    def test_html_truncation_keeps_the_indices_sound(self) -> None:
+        """The cap on html nodes, measured on the real fixture:
+        200_001 `<p>` nodes truncate to the 200_000-node kept prefix
+        with the marker set, and the prefix stays index-sound — parents
+        precede children, children filtered to kept indices, no parent
+        past the array (parents are always earlier, so the prefix is
+        closed under `parent`). The boundary numbers themselves are
+        pinned on the xlsx cap (the same constant, one test each
+        side)."""
+        report = document_structure(data=generate_html_nodes(200_001))
+        html = report.payload
+        assert html.entries_truncated is True
+        assert len(html.nodes) == 200_000
+        indices = {node_index for node_index, _ in enumerate(html.nodes)}
+        for node in html.nodes:
+            assert node.parent is None or node.parent in indices
+            assert all(child in indices for child in node.children)
+        # the untruncated face: the structure fixture fits, all markers down
+        report = document_structure(data=generate_html_structure())
+        assert report.payload.entries_truncated is False
+        indices = {node_index for node_index, _ in enumerate(report.payload.nodes)}
+        for node in report.payload.nodes:
+            assert node.parent is None or node.parent in indices
+            assert all(child in indices for child in node.children)
+
+    # --- the refusals ------------------------------------------------------
+
+    def test_every_refused_format_refuses_gil_side_without_a_body_read(
+        self, tmp_path: Path
+    ) -> None:
+        """The R7 observable: path= + format="pdf" on a >32 MiB pdf
+        answers the capability refusal, NOT a ceiling refusal — the probe
+        resolves the refusal from the format name alone and no body is
+        read (the 64 KiB format probe runs only when the name alone
+        cannot decide; a 33 MiB read would refuse with the ceiling
+        message instead). Every other refused kind refuses GIL-side from
+        the name too; the messages carry the format and never claim
+        impossibility."""
+        fat_pdf = tmp_path / "fat.pdf"
+        with open(fat_pdf, "wb") as handle:
+            handle.write(b"%PDF-1.4\n")
+            handle.truncate(33 * 1024 * 1024)  # sparse: a 33 MiB file
+        with pytest.raises(ValueError) as raised:
+            document_structure(str(fat_pdf), format="pdf")
+        message = str(raised.value)
+        assert message == (
+            "document_structure cannot serve pdf: pdf has no structure surface here — "
+            "page_layout and page_tables serve PDF pages (spans, lines, images, per-cell "
+            "table boxes); document_structure serves the office/html families' containers"
+        )
+        expected = {
+            "doc": "converter-internal IR (no raw layer)",
+            "ppt": "converter-internal IR (no raw layer)",
+            "pptx": "pptx's raw layer is reachable but its structure surface is not built yet",
+            "rtf": "no structure surface exists for rtf",
+            "odt": "no structure surface exists for odt",
+            "ods": "no structure surface exists for ods",
+            "odp": "no structure surface exists for odp",
+            "epub": "no structure surface exists for epub",
+            "csv": "no structure surface exists for csv",
+        }
+        for format_name, needle in expected.items():
+            with pytest.raises(ValueError) as raised:
+                document_structure(data=b"junk", format=format_name)
+            message = str(raised.value)
+            assert message.startswith(f"document_structure cannot serve {format_name}"), message
+            assert needle in message, message
+            assert "unreadable" not in message, message
+        # the format converts fine: the ODF/epub/csv rows say so
+        with pytest.raises(ValueError, match="converts fine") as raised:
+            document_structure(data=b"junk", format="odt")
+        assert "cannot serve odt" in str(raised.value)
+        # the ppsx alias resolves onto the pptx kind: the same refusal
+        with pytest.raises(ValueError, match="cannot serve pptx") as raised:
+            document_structure(data=ENGINES_CORPUS["ppsx_rich"])
+        assert "not built yet" in str(raised.value)
+
+    def test_the_ole_container_refuses_with_the_union_message(self) -> None:
+        """The Excel kind's OLE container: a legacy xls workbook OR an
+        encrypted xlsx package (both CFB, indistinguishable without a
+        full legacy parse) — one union message naming both, the
+        container-aware "xls" spelling, on every backend."""
+        ole = (
+            b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 40
+        )
+        for backend in ("auto", "oxide", "anydoc"):
+            with pytest.raises(ValueError) as raised:
+                document_structure(data=ole, format="xlsx", backend=backend)
+            message = str(raised.value)
+            assert message.startswith("document_structure cannot serve xls"), message
+            assert "legacy xls workbook" in message, message
+            assert "encrypted xlsx package" in message, message
+
+    def test_the_encrypted_cfb_without_a_format_is_unknown_format(self) -> None:
+        """F9's qualifier: nothing resolves an encrypted CFB (anydoc's
+        detector answers None for EncryptedPackage), so a data= call with
+        no format is UnknownFormat — the password error needs the format
+        named. WITH format="docx": the engine's own typed
+        password-protected error."""
+        cfb = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 40
+        with pytest.raises(ValueError, match="unrecognized content"):
+            document_structure(data=cfb)
+        with pytest.raises(ValueError, match="password-protected") as raised:
+            document_structure(data=cfb, format="docx")
+        assert "encrypted" in str(raised.value)
+
+    def test_backend_rules_on_every_row(self, tmp_path: Path) -> None:
+        """The backend matrix: (pdf, anydoc) answers the pdf refusal (the
+        format-level family precedes the backend check — F8's precedence
+        pin); the served office rows refuse anydoc as a capability;
+        auto/oxide are identical on the served rows; html's forced
+        backends are conversion's own UnsupportedBackend pair,
+        byte-identical."""
+        docx_path = tmp_path / "s.docx"
+        docx_path.write_bytes(generate_docx_structure())
+        with pytest.raises(ValueError, match="cannot serve pdf"):
+            document_structure(data=ENGINES_CORPUS["pdf"], backend="anydoc")
+        with pytest.raises(
+            ValueError,
+            match='backend "anydoc" cannot serve document_structure for docx',
+        ):
+            document_structure(path=str(docx_path), backend="anydoc")
+        with pytest.raises(ValueError, match="cannot serve document_structure for xlsx"):
+            document_structure(data=generate_xlsx_structure(), backend="anydoc")
+        # auto/oxide identical on the served office rows
+        assert document_structure(data=generate_docx_structure(), backend="oxide") == (
+            document_structure(data=generate_docx_structure(), backend="auto")
+        )
+        # html's forced backends: conversion's own UnsupportedBackend row,
+        # byte-identical
+        with pytest.raises(ValueError) as raised:
+            document_structure(data=generate_html_structure(), backend="oxide")
+        message = str(raised.value)
+        assert message == (
+            'backend "oxide" cannot read format "html": use backend=\'auto\''
+        ), message
+        with pytest.raises(ValueError) as raised:
+            document_structure(data=generate_html_structure(), backend="anydoc")
+        message = str(raised.value)
+        assert message == (
+            'backend "anydoc" cannot read format "html": use backend=\'auto\''
+        ), message
+
+    def test_format_is_trusted_and_never_re_sniffed(self) -> None:
+        """F26's pins: format="html" on pdf-ish binary is the lane's own
+        binary refusal (pinned above); format="docx" on pdf bytes is the
+        office leg's typed parse error; the fix-it is sniff(). And the
+        report's format field is the container-aware spelling (the Excel
+        kind's one case: a ZIP package answers xlsx)."""
+        with pytest.raises(ValueError, match="office_oxide"):
+            document_structure(data=ENGINES_CORPUS["pdf"], format="docx")
+        report = document_structure(data=generate_xlsx_structure(), format="xlsm")
+        assert report.format == "xlsx"  # the resolved kind's own spelling
+
+    def test_data_and_path_answer_identically(self, tmp_path: Path) -> None:
+        """The data=/path= byte parity per served row (F29(c))."""
+        pairs = [
+            ("s.docx", generate_docx_structure()),
+            ("s.xlsx", generate_xlsx_structure()),
+            ("s.html", generate_html_structure()),
+        ]
+        for name, data in pairs:
+            path = tmp_path / name
+            path.write_bytes(data)
+            assert document_structure(str(path)) == document_structure(data=data)
+
+    def test_docm_and_xlsm_are_served(self) -> None:
+        """F29(h): the macro-enabled alias containers resolve onto their
+        served base kinds (the same OOXML packages), ppsx onto the
+        refused pptx (pinned in the refusal test)."""
+        docm = document_structure(data=ENGINES_CORPUS["docm_rich"])
+        assert docm.format == "docx"
+        assert isinstance(docm.payload, DocxStructure)
+        assert docm.payload.sections == 1
+        xlsm = document_structure(data=ENGINES_CORPUS["xlsm"])
+        assert xlsm.format == "xlsx"
+        assert isinstance(xlsm.payload, XlsxStructure)
+        assert xlsm.payload.sheets[0].name == "Samples"
+
+    # --- the spine cells ---------------------------------------------------
+
+    def test_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+        self, tmp_path: Path
+    ) -> None:
+        """The GIL-release claim on the structure surface (the office
+        leg): the whole read+resolve+structure pass runs under py.detach
+        and the payload construction lands after the GIL is reacquired,
+        so a to_thread wrap keeps the 10ms heartbeat alive through a
+        workbook big enough to make the pass measurable."""
+        from test_gil_release import _assert_loop_stays_responsive
+
+        path = tmp_path / "structure_cells.xlsx"
+        path.write_bytes(generate_xlsx_cells(200_000))
+
+        def op() -> None:
+            report = document_structure(str(path))
+            assert report.payload.entries_truncated is False
+
+        asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
+
+    def test_the_aio_spelling_wraps_the_typed_surface(self, tmp_path: Path) -> None:
+        """The aio parity: the awaitable spelling carries the same typed
+        answer and the same refusals through the thread hop — both aio
+        modules (payload + shim), the input-scaling membership included
+        (document_structure joined _WRAPPED as the twelfth)."""
+        import tors_documents.aio as payload_aio
+
+        import tors.documents.aio as shim_aio
+
+        path = tmp_path / "s.html"
+        path.write_bytes(generate_html_structure())
+        for aio_module in (payload_aio, shim_aio):
+            assert "document_structure" in aio_module.__all__
+            report = asyncio.run(aio_module.document_structure(str(path)))
+            assert report.format == "html"
+            assert isinstance(report.payload, HtmlStructure)
+            with pytest.raises(ValueError, match="cannot serve pdf"):
+                asyncio.run(aio_module.document_structure(str(path), format="pdf"))
+
+
+class TestDocumentStructureSpinePins:
+    """The remaining PART 3 pins: the F7 no-read trap's exact cell
+    (path= + format="html" — the shape the geometry spine would answer
+    with ZERO bytes and an empty structure), the unreadable_sheets row,
+    and the in-cell heading's disclosed shape."""
+
+    def test_path_with_format_html_serves_the_real_structure(self, tmp_path: Path) -> None:
+        """F7's trap cell, pinned: `path=` + `format="html"` reads the
+        file and serves the real structure — reusing the geometry spine's
+        no-read door would answer this exact call with zero bytes (html
+        is a no-geometry format) and an empty structure instead. And the
+        refused row beside it: `path=` + `format="odt"` refuses before
+        the read (the R7 observable's positive-resolve half)."""
+        path = tmp_path / "page.html"
+        path.write_bytes(generate_html_structure())
+        report = document_structure(str(path), format="html")
+        assert report.format == "html"
+        assert isinstance(report.payload, HtmlStructure)
+        nodes = report.payload.nodes
+        assert len(nodes) > 5, "the no-read trap answered with an empty structure"
+        assert any(node.kind == "heading" for node in nodes)
+        refused = tmp_path / "doc.odt"
+        refused.write_bytes(b"not odt content")
+        with pytest.raises(ValueError, match="cannot serve odt"):
+            document_structure(str(refused), format="odt")
+
+    def test_xlsx_unreadable_sheets_report_the_loss(self) -> None:
+        """The report-the-loss law's xlsx half: a sheet whose part does
+        not parse leaves the intact sheets served and the loss on record
+        (the raw layer's own unreadable_sheets precedent) — never a
+        whole-file refusal, never a silent skip."""
+        report = document_structure(data=generate_xlsx_damaged())
+        xlsx = report.payload
+        assert [sheet.name for sheet in xlsx.sheets] == ["Intact"]
+        assert xlsx.unreadable_sheets == ["Damaged"]
+        assert xlsx.sheets[0].cells[0].value == "intact label"
+
+    def test_a_heading_inside_a_table_cell_is_table_content(self) -> None:
+        """The disclosed shape (F29(j)): a heading inside a table cell
+        produces NO Heading node (the collector's in_table_cell gate) —
+        its text is the table cell's content, exactly where the
+        conversion lane renders it. Structure and conversion agree; the
+        disclosure is that a heading's position inside a table is not
+        separately represented."""
+        html = (
+            b"<html><body><table><tr><td><h1>Inside heading</h1>cell text</td>"
+            b"<td>b</td></tr></table><h2>Outside heading</h2></body></html>"
+        )
+        report = document_structure(data=html)
+        nodes = report.payload.nodes
+        assert not any(
+            node.kind == "heading" and node.text == "Inside heading"
+            for node in nodes
+        )
+        tables = [node for node in nodes if node.kind == "table"]
+        assert any(
+            "Inside heading" in cell.content
+            for grid in (t.grid for t in tables if t.grid)
+            for cell in grid.cells
+        )
+        # the outside heading is a heading node, as everywhere
+        assert any(
+            node.kind == "heading" and node.text == "Outside heading"
+            for node in nodes
+        )

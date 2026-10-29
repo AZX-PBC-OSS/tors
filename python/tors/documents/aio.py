@@ -22,6 +22,9 @@ for the full statement.
 from __future__ import annotations
 
 from tors_documents.aio import (
+    document_structure as document_structure,
+)
+from tors_documents.aio import (
     page_geometry as page_geometry,
 )
 from tors_documents.aio import (
@@ -56,6 +59,7 @@ from tors_documents.aio import (
 )
 
 __all__ = [
+    "document_structure",
     "page_geometry",
     "page_layout",
     "page_tables",

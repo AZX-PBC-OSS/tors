@@ -2421,6 +2421,1794 @@ pub fn page_tables(
     }
 }
 
+/// The most entries one structure payload materializes: 200,000, applied
+/// in document order to ALL THREE entry lists (xlsx cells, docx blocks,
+/// html nodes — the same O(N)-Python-objects class). The honest statement
+/// of what this bounds: PAYLOAD CONSTRUCTION, not the parse — office_oxide
+/// has already materialized every Cell and every docx block by the time
+/// the seam sees them, so nothing here can un-spend the parse, and the
+/// html collector has already built the node array. A marshalling bound
+/// with a marker (`entries_truncated`), never a refusal: sheet/range/
+/// merge/name metadata stays complete past the cap, and per-object Python
+/// overhead (>> string bytes) is what a big workbook costs past this
+/// point. Truncate-with-marker, never refuse — and never
+/// `page_tables`' `tables_refused` shape, which is an engine-cost
+/// bail-out with per-page semantics, not a truncation precedent.
+pub const MAX_STRUCTURE_ENTRIES: usize = 200_000;
+
+/// Which engine lane a structure surface runs on. Derived, never stored:
+/// the third routing table's one served answer per row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StructureLane {
+    Docx,
+    Xlsx,
+    Html,
+}
+
+/// The structure surface's format-level refusal template (F8's first
+/// family): "document_structure cannot serve {format}: {why}" — fired for
+/// every kind refused on ALL backends, before the backend check, so a
+/// `(pdf, anydoc)` call answers the pdf refusal, never an anydoc-template
+/// message whose "use backend='auto' or 'oxide'" tail would be a lie here
+/// (every backend refuses these rows). A capability refusal carried by
+/// [`DocumentError::Convert`] (the geometry refusals' own vehicle), never
+/// a new error kind.
+fn structure_refusal(format: &str, why: &str) -> DocumentError {
+    DocumentError::Convert(format!("document_structure cannot serve {format}: {why}"))
+}
+
+/// The pdf row's doctrine text: PDF's structure answer is already two
+/// surfaces (page_layout's spans/lines/images, page_tables' per-cell
+/// boxes), and this one serves the office/html families' containers.
+const PDF_STRUCTURE_WHY: &str = "pdf has no structure surface here — page_layout and \
+     page_tables serve PDF pages (spans, lines, images, per-cell table boxes); \
+     document_structure serves the office/html families' containers";
+
+/// The legacy trio's row: office_oxide parses doc/xls/ppt into its
+/// converter-internal IR only (no `as_doc()`/`as_xls()`/`as_ppt()` raw
+/// layer), and the IR's structure is the converter's rendering choice —
+/// the thing the issues explicitly reject.
+const LEGACY_STRUCTURE_WHY: &str = "office_oxide reads {format} only through its \
+     converter-internal IR (no raw layer) — the converter's structure is a rendering \
+     choice, not the document's";
+
+/// The pptx row: the raw layer IS reachable (`as_pptx()`), so the message
+/// must never claim impossibility — the surface is simply not built yet
+/// (the review's ruling on open question 1: refuse in v1 with an honest
+/// message, ship in v1.5; the single `payload` getter makes a fourth
+/// variant additive later).
+const PPTX_STRUCTURE_WHY: &str = "pptx's raw layer is reachable but its structure \
+     surface is not built yet (slides/shapes/notes)";
+
+/// The ODF/rtf/epub/csv row: these formats convert fine (anydoc's
+/// whole-document markdown), but nothing exposes a parse tree: no raw
+/// layer anywhere, and "the format converts fine" is stated so the
+/// refusal is never misread as "unreadable" (the review's ruling 7).
+fn no_structure_surface_why(format: &str) -> String {
+    format!(
+        "no structure surface exists for {format}: the conversion lane's anydoc engine is \
+         whole-document markdown with no parse-tree exposure; office_oxide (the raw-layer \
+         engine) reads the six MS formats only. The format converts fine (to_markdown/to_text); \
+         it has no parse tree to serve"
+    )
+}
+
+/// The Excel kind's OLE-container refusal (F9/R11): an OLE compound file
+/// under the Excel kind is EITHER a legacy xls workbook OR an encrypted
+/// xlsx package — both are CFB, and anydoc's detector answers `None` for
+/// `EncryptedPackage`, so the seam cannot tell them apart without a full
+/// legacy parse (bespoke CFB stream-name sniffing for one message: not
+/// worth it). One union message naming both possibilities, container-aware
+/// (`resolved_name`'s "xls"), never the wrong single diagnosis a
+/// "legacy xls, no raw layer" message would give a password-protected
+/// workbook.
+fn structure_ole_refusal() -> DocumentError {
+    structure_refusal(
+        "xls",
+        "the OLE container is a legacy xls workbook or an encrypted xlsx package (both are \
+         CFB, and telling them apart needs a full legacy parse this surface does not run); \
+         the xlsx raw layer is unreachable through it",
+    )
+}
+
+/// The anydoc capability refusal on the SERVED office rows (F8's second
+/// family): the same shape [`anydoc_capability_refusal`] carries, with
+/// this surface's own lack named. Deliberately NOT [`DocumentError::UnsupportedBackend`]:
+/// anydoc READS docx/xlsx (it is the conversion lane's engine for them),
+/// so the format-level answer would be false; this refusal answers "can
+/// this backend serve THIS call" — it cannot, its office lane is
+/// whole-document markdown with no raw layer to walk. html's forced
+/// backends stay [`DocumentError::UnsupportedBackend`] (byte-identical to
+/// [`engine_for`]'s own html row): there the pair cannot convert at all.
+fn structure_anydoc_refusal(format: &str) -> DocumentError {
+    DocumentError::Convert(format!(
+        "backend \"anydoc\" cannot serve document_structure for {format}: no structure \
+         surface for that backend (its office lane is whole-document markdown; the raw \
+         layers are office_oxide's); use backend='auto' or 'oxide' here"
+    ))
+}
+
+/// The structure capability table: the THIRD routing table, documented
+/// next to (never as a comment on) [`geometry_engine`]. Conversion routing
+/// answers "who converts best"; geometry "who can declare geometry at
+/// all"; this one answers "who can serve structure at all" — who has a
+/// parse tree to report. The served rows are exactly the formats whose
+/// engine hands over a raw layer (or, for html, whose collector IS the
+/// parse path):
+///
+/// - docx, xlsx (ZIP): office_oxide's raw layers (`as_docx`/`as_xlsx`).
+/// - html: html-to-markdown-rs's structure collector (a runtime option on
+///   the conversion lane's own parse — no second parser, no second
+///   opinion).
+///
+/// Every other kind is a format-level refusal ([`structure_refusal`]),
+/// fired for EVERY backend (anydoc included, before the backend check —
+/// the `(pdf, anydoc)` precedence pin): pdf (its answer is geometry +
+/// tables, already two surfaces), the legacy trio (no raw layer; the IR
+/// is converter-internal), pptx (raw layer reachable, surface not built),
+/// and the anydoc-only families (no structure surface; the format
+/// converts fine). html's forced backends keep conversion's own
+/// [`DocumentError::UnsupportedBackend`] row byte-identical. The served
+/// office rows refuse `backend="anydoc"` with the capability refusal
+/// ([`structure_anydoc_refusal`]).
+///
+/// `bytes` is the (prefix of the) document, so the Excel kind's one
+/// container-aware case can decide: an OLE signature under the Excel kind
+/// is a legacy xls workbook OR an encrypted xlsx package — refused with
+/// the union message ([`structure_ole_refusal`]) for every backend,
+/// before the backend match (both possibilities refuse, so the container
+/// decision precedes it like the other format-level rows).
+///
+/// The table is total: every `Kind` is one arm — no format falls out of a
+/// default arm unasked.
+fn structure_engine(
+    kind: Kind,
+    backend: Backend,
+    bytes: &[u8],
+) -> Result<StructureLane, DocumentError> {
+    if kind == Kind::Excel && is_ole_container(bytes) {
+        return Err(structure_ole_refusal());
+    }
+    let format_name = resolved_name(kind, bytes);
+    match (kind, backend) {
+        (Kind::Pdf, _) => Err(structure_refusal(Kind::Pdf.name(), PDF_STRUCTURE_WHY)),
+        (Kind::Doc | Kind::Ppt, _) => {
+            let why = LEGACY_STRUCTURE_WHY.replace("{format}", format_name);
+            Err(structure_refusal(format_name, &why))
+        }
+        (Kind::Pptx, _) => Err(structure_refusal(format_name, PPTX_STRUCTURE_WHY)),
+        (Kind::Rtf | Kind::Odt | Kind::Ods | Kind::Odp | Kind::Epub | Kind::Csv, _) => {
+            let why = no_structure_surface_why(format_name);
+            Err(structure_refusal(format_name, &why))
+        }
+        // conversion's own html row, byte-identical: the pair cannot
+        // convert, so the structure lane — the same parse — cannot run.
+        (Kind::Html, Backend::Auto) => Ok(StructureLane::Html),
+        (Kind::Html, _) => Err(DocumentError::UnsupportedBackend {
+            format: "html",
+            backend: backend_name(backend),
+        }),
+        (Kind::Docx | Kind::Excel, Backend::Anydoc) => Err(structure_anydoc_refusal(format_name)),
+        (Kind::Docx, _) => Ok(StructureLane::Docx),
+        (Kind::Excel, _) => Ok(StructureLane::Xlsx),
+    }
+}
+
+/// The structure surface's pre-read capability probe: the
+/// [`structure_engine`] refusal the call will raise, resolved as far as
+/// the format resolves WITHOUT the authoritative (whole-document) read —
+/// an explicit `format=` decides alone, then the content markers in
+/// `bytes` (the `data=` lane's own bytes; the `path=` lane's bounded
+/// 64 KiB sniff prefix), then the name hint's extension. Same contract as
+/// [`probe_geometry_capability`], keyed on the structure table, and — the
+/// divergence the sibling surfaces don't have — fired for EVERY backend:
+/// the format-level refusal family precedes the backend check, so a
+/// `format="pdf"` refusal needs no bytes at all and fires under the GIL
+/// from the name alone.
+///
+/// - `Err(refusal)`: the probed format is on a refused row (naming the
+///   container: an OLE workbook says `xls`). The binding raises it under
+///   the GIL, before the detach and before the read: a
+///   positive content-resolve to a refused kind stops at the 64 KiB
+///   prefix and refuses, never reading the 32 MiB default first.
+/// - `Ok(None)`: the probe could not resolve the format. The core's
+///   authoritative `resolve` — on the real bytes, post-read — stays the
+///   only truth; whatever refusal fires there fires then.
+/// - `Ok(Some(kind))`: resolved, and the row serves this backend.
+pub fn probe_structure_capability(
+    bytes: &[u8],
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+) -> Result<Option<Kind>, DocumentError> {
+    match resolve(bytes, name_hint, format) {
+        Err(_) => Ok(None),
+        Ok(kind) => structure_engine(kind, backend, bytes).map(|_| Some(kind)),
+    }
+}
+
+/// One `document_structure` report: the resolved format's vocabulary name
+/// (the [`resolved_name`] spelling — the Excel kind's container-aware
+/// `xls`/`xlsx` case included, `PageLayout.format`'s provenance precedent)
+/// and exactly one per-format payload ([`StructurePayload`], the
+/// compile-time one-of).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructureReport {
+    /// The resolved format's vocabulary name. Provenance only (constant
+    /// per served payload type), but the same spelling the refusals use.
+    pub format: &'static str,
+    /// The payload: exactly one variant by construction.
+    pub payload: StructurePayload,
+}
+
+/// The one-of payload ([R9]): a core enum, compile-time total — three
+/// optional getters would make the invariant untypable and `format`
+/// un-narrowable for every static checker. The core owns plain
+/// `#[derive(Clone, Debug, PartialEq)]` structs (office_oxide's own types
+/// are `Debug, Clone` only — `CellValue` has no `PartialEq` — so
+/// structural `==` is only cheap on the seam's own types), and the
+/// binding layer wraps them in thin getter pyclasses the
+/// `PageGeometry` way. `isinstance(report.payload, DocxStructure)` is the
+/// Python narrowing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StructurePayload {
+    Docx(DocxStructure),
+    Xlsx(XlsxStructure),
+    Html(HtmlStructure),
+}
+
+/// The DOCX structure payload (issue #209): the body's blocks in document
+/// order, the section partition they hang from, and the note counts. The
+/// tree is derivable by consumers (sections by the
+/// [`DocxStructure::section_breaks`] counts; tables are nested payloads);
+/// the list is the anchor surface. Entries carry container anchors, never
+/// boxes — no coordinates anywhere.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DocxStructure {
+    /// The body's blocks, body order, one entry per
+    /// `BlockElement` (paragraph or table). Headers/footers and note
+    /// BODIES are not body blocks and are not here (the parity claim's
+    /// documented exclusions); their counts ride alongside.
+    pub blocks: Vec<DocxBlock>,
+    /// PINNED: `body.section_breaks.len() + 1` — the body partition law
+    /// `DocxBlock.section` derives from. NOT `doc.sections.len()`: a
+    /// document with no body-level sectPr declares zero
+    /// `SectionProperties` yet is one section. Declared sizes belong to
+    /// `page_geometry`, not here.
+    pub sections: usize,
+    /// `body.section_breaks` verbatim: section i covers body elements
+    /// `[prev_break, section_breaks[i])`; the final section runs to the
+    /// end. Anchor math for `DocxBlock.section`.
+    pub section_breaks: Vec<usize>,
+    /// Footnote/endnote/comment BODY counts (v1 keeps note bodies out;
+    /// the counts are the cheap part of the answer).
+    pub footnotes: usize,
+    /// Endnote body count.
+    pub endnotes: usize,
+    /// Comment body count.
+    pub comments: usize,
+    /// The raw layer's `unreadable_parts` verbatim (header/footer/note
+    /// parts that exist but could not be read or parsed): the
+    /// report-the-loss law, `XlsxStructure.unreadable_sheets`' twin (the
+    /// asymmetry the review flagged was a bug, not a choice).
+    pub unreadable_parts: Vec<String>,
+    /// True when `blocks` stopped at [`MAX_STRUCTURE_ENTRIES`] (the
+    /// marshalling bound; sheet/section metadata above stays complete —
+    /// never a refusal).
+    pub entries_truncated: bool,
+}
+
+/// One DOCX body block. `kind` discriminates; `level`/`outline_level`
+/// exist for headings, `num_*`/`list_*` for list state (a numbered
+/// heading carries BOTH — kind alone is the discriminator), `table` for
+/// tables.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DocxBlock {
+    /// Position in `body.elements` — the stable container anchor.
+    pub index: usize,
+    /// Which section covers this block: the count of
+    /// `section_breaks <= index` (section i owns elements
+    /// `[prev_break, section_breaks[i])`).
+    pub section: usize,
+    /// `"heading" | "list_item" | "paragraph" | "table"`. Heading wins
+    /// over list (Word's multilevel-list "Heading" gallery attaches numPr
+    /// to heading styles: a numbered heading is the normal shape of
+    /// headings), the converter's own rule.
+    pub kind: &'static str,
+    /// The block's visible text: runs joined with hidden-run resolution
+    /// through the style chain, `w:br` → newline, `w:tab` → tab,
+    /// text-box prose recursed, form-field display text surfaced,
+    /// note-ref marks skipped, hyperlink runs included inline — the
+    /// markdown lane's own block-text rules, re-derived. Pinned `""` for
+    /// table blocks (the cells carry the text; a table block's own text
+    /// would double it).
+    pub text: String,
+    /// Headings only: the markdown depth, `clamp(outline + 1, 1..=6)` —
+    /// a depth-7..9 outline renders `######` on every markdown lane, so
+    /// `level` clamps and `outline_level` carries the true depth.
+    /// `None` for everything else.
+    pub level: Option<u8>,
+    /// Headings only: the heading ladder's raw 0-based outline level
+    /// (0..8), the value `level` clamps away. The ladder: direct
+    /// `w:outlineLvl` → the stylesheet's `basedOn` chain
+    /// (`resolve_outline_level`) → the `Heading1..9` style-ID convention →
+    /// the `heading N` style-NAME convention — the converter's ladder,
+    /// re-derived in the seam (upstream keeps it crate-private).
+    /// `None` for everything else.
+    pub outline_level: Option<u8>,
+    /// The raw `w:pStyle` string ("Heading1", "Caption", …) — the
+    /// document's own name. `None` when the paragraph declares none.
+    pub style_id: Option<String>,
+    /// Numbering instance id, whenever the EFFECTIVE paragraph
+    /// properties carry `numPr` with `numId != 0` — including a numbered
+    /// heading's (that numPr is information, never suppressed) and
+    /// including style-carried numPr (Word's "List Bullet"/"List Number"
+    /// styles hold it in the style, and the markdown renders those
+    /// lists). `numId=0` is ECMA-376's "no numbering" and reports `None`.
+    pub num_id: Option<u32>,
+    /// The numbering level (0-based), alongside `num_id`.
+    pub ilvl: Option<u8>,
+    /// The resolved number format's own name ("decimal", "bullet",
+    /// "lower_letter", …) from `numbering.resolve_level` — the file's
+    /// own vocabulary, never a rendered marker.
+    pub list_format: Option<String>,
+    /// The level's effective start (`startOverride`-aware, from
+    /// `numbering.resolve_start`) — the level's own start, NOT a
+    /// rendered ordinal (the markdown lane renumbers sequentially).
+    pub start_number: Option<u32>,
+    /// `kind == "table"` only: the grid.
+    pub table: Option<DocxTable>,
+    /// The block's hyperlinks, in order (hyperlink runs included).
+    pub links: Vec<DocxLink>,
+    /// The block's real pictures (drawings with a relationship id), in
+    /// order. A DrawingML `shape` (no rid) is not a picture and is
+    /// filtered; text-box drawings are not collected (the text walk
+    /// recurses, the image list does not — v1 keeps the list anchored to
+    /// the block's own runs).
+    pub images: Vec<DocxImage>,
+}
+
+/// One DOCX table's grid. `cells` are present cells in row-major order;
+/// every grid position is either a cell's origin or covered by a span.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DocxTable {
+    /// The grid's row count (`rows.len()`).
+    pub rows: usize,
+    /// The grid's column count (`grid.len()`).
+    pub cols: usize,
+    /// The `w:tblGrid` column widths, twips, verbatim (the raw layer's
+    /// own numbers).
+    pub col_widths_twips: Vec<i32>,
+    /// The cells, row-major, origin cells AND `vMerge`-continue cells
+    /// (a continue cell is emitted as its own cell at its own position,
+    /// disclosed as inside the Restart span — the raw layer parses it as
+    /// a real `w:tc`, and hiding it would misalign the row-major order).
+    pub cells: Vec<DocxCell>,
+    /// The `w:tblCaption` accessibility caption — the raw layer's only
+    /// caption field (there is no "style convention's caption" in the
+    /// raw layer to fall back to).
+    pub caption: Option<String>,
+}
+
+/// One DOCX table cell. `row`/`col` are 0-based grid positions (col
+/// accumulated through the row's `gridSpan`s, the raw layer's own
+/// `grid_starts` walk re-derived); spans are 1 unless a merge covers.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DocxCell {
+    /// 0-based row.
+    pub row: usize,
+    /// 0-based starting column (gridSpan accumulation).
+    pub col: usize,
+    /// The cell's text (the same block walk as body blocks, trimmed).
+    pub text: String,
+    /// The row span: a `vMerge Restart` plus the count of same-column
+    /// `Continue` cells below it; 1 otherwise (a hostile/absent value
+    /// stays 1).
+    pub row_span: usize,
+    /// The column span (`w:gridSpan`, clamped to 1..=1000 — the raw
+    /// layer's own `MAX_GRID_SPAN` clamp, re-derived).
+    pub col_span: usize,
+}
+
+/// One DOCX hyperlink. `href`/`anchor` split the two target kinds
+/// (rels-resolved External URL vs `w:anchor` internal bookmark name); a
+/// target that carries BOTH a URL and a fragment keeps the fragment
+/// alongside (`externalURL#fragment` is one target's two halves, never
+/// an internal link).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DocxLink {
+    /// The hyperlink's runs' text.
+    pub text: String,
+    /// The external URL (already resolved through the rels). `None` for
+    /// an internal link.
+    pub href: Option<String>,
+    /// The internal bookmark name. `None` for an external link.
+    pub anchor: Option<String>,
+    /// The URI fragment when an external link also declares `w:anchor`.
+    pub fragment: Option<String>,
+    /// The screen-tip tooltip, when declared.
+    pub tooltip: Option<String>,
+}
+
+/// One DOCX picture (a drawing with a relationship id). Bytes never cross
+/// this surface; the rid joins to the package's image parts (the raw
+/// layer keys its image map by rid and does not retain the target path,
+/// so an image reports rid + extension, never `media/image5.png`).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DocxImage {
+    /// The relationship id (`a:blip/@r:embed`, or a linked picture's
+    /// `a:blip/@r:link`).
+    pub relationship_id: String,
+    /// The image part's file extension from the package's image map
+    /// ("png", "jpeg", …), `None` when the part is not in the map (a
+    /// linked image the package did not embed).
+    pub file_ext: Option<String>,
+    /// The alt text (`wp:docPr/@descr`).
+    pub description: Option<String>,
+    /// The declared width, points (EMU ÷ 12700.0, the pptx leg's own
+    /// rule). `None` when the declared extent is 0 or negative — an
+    /// undeclared extent is 0, and a non-positive one is no extent.
+    pub width_pt: Option<f32>,
+    /// The declared height, points (the same law).
+    pub height_pt: Option<f32>,
+    /// True for an inline drawing, false for a floating anchor.
+    pub inline: bool,
+    /// The `adec:decorative` flag: the picture carries no meaning
+    /// (alt-less placeholder), assistive technology skips it. Carried,
+    /// never dropped: it is the honest "why is there no alt text".
+    pub decorative: bool,
+}
+
+/// The XLSX structure payload (issue #210).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct XlsxStructure {
+    /// The worksheets, sheet order, hidden included — built from the raw
+    /// layer's `worksheets` filtered to worksheet/macro kinds, each
+    /// carrying its own name and state (never zip'd against
+    /// `workbook.sheets`: that list also names chartsheets and partless
+    /// sheets, and a positional zip mislabels on any workbook with one).
+    /// Macro sheets are served (their cells are the worksheet cell
+    /// model).
+    pub sheets: Vec<XlsxSheet>,
+    /// The workbook's chart/dialog sheet names — kind-tagged worksheet
+    /// entries with no cells in the raw layer's own list, named here so
+    /// the tab list stays complete.
+    pub chartsheets: Vec<String>,
+    /// The workbook-level defined names, verbatim plus the sheet name
+    /// a sheet-scoped `local_sheet_id` resolves to (it indexes
+    /// `workbook.sheets`, not `sheets`).
+    pub defined_names: Vec<XlsxDefinedName>,
+    /// The 1904 date system flag, verbatim.
+    pub date1904: bool,
+    /// Names of sheets whose part could not be parsed — the raw layer's
+    /// own (name, error) pairs' names. Content IS partial here; the law
+    /// is report-the-loss, the intact sheets served.
+    pub unreadable_sheets: Vec<String>,
+    /// True when cells stopped at [`MAX_STRUCTURE_ENTRIES`] (the
+    /// marshalling bound; sheet/range/merge/name metadata above stays
+    /// complete — never a refusal).
+    pub entries_truncated: bool,
+}
+
+/// One XLSX worksheet.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct XlsxSheet {
+    /// The sheet's display name.
+    pub name: String,
+    /// The visibility state spelled out: `"visible" | "hidden" |
+    /// "veryHidden"`.
+    pub state: &'static str,
+    /// PINNED DEFINITION: the used range computed from the PARSED cells
+    /// — min/max over every present cell (styled-but-empty cells count
+    /// as present: Excel's own used-range notion) — rendered
+    /// `"A1:D10"`. NOT the declared `<dimension>` (attacker-controlled,
+    /// frequently absent; a sparse sheet whose dimension lies keeps its
+    /// computed range and the declared string rides beside it).
+    /// `None` for a sheet with no cells at all.
+    pub used_range: Option<String>,
+    /// The declared `<dimension>` string, verbatim, for provenance —
+    /// never the used range's source.
+    pub declared_dimension: Option<String>,
+    /// The used range's max row index, 0-based. `None` for an empty
+    /// sheet (no cells → no bounds — `used_range` is `Option` and these
+    /// are too).
+    pub max_row: Option<usize>,
+    /// The used range's max column index, 0-based (the same law).
+    pub max_col: Option<usize>,
+    /// The sheet's present cells, row-major, sparse.
+    pub cells: Vec<XlsxCell>,
+    /// The merged ranges as ref strings ("B2:C3"), verbatim.
+    pub merged_cells: Vec<String>,
+    /// The sheet's hyperlinks, part order.
+    pub hyperlinks: Vec<XlsxHyperlink>,
+    /// The sheet's cell comments, document order.
+    pub comments: Vec<XlsxComment>,
+}
+
+/// One XLSX cell: the reference, the value as the file states it (no
+/// coercion), and the formula when present.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct XlsxCell {
+    /// The cell reference ("B3" — the raw `CellRef`'s own Display).
+    pub reference: String,
+    /// 0-based row.
+    pub row: usize,
+    /// 0-based column.
+    pub col: usize,
+    /// The value's own type, spelled out: `"number" | "string" |
+    /// "boolean" | "error" | "date" | "empty"`. `date` is ONLY the
+    /// `t="d"` ISO-8601 branch; the ordinary Excel date (a serial number
+    /// with a date number-format) is `number` — decoding it needs the
+    /// stylesheet, which the raw layer only exposes behind `&mut self`
+    /// (`ensure_styles`), so the seam reports the value as the file
+    /// stores it and the format stays uninterpreted.
+    pub kind: &'static str,
+    /// The value by `kind`: number → float, boolean → bool,
+    /// string/error → the string, date → the ISO-8601 string, empty →
+    /// `None`. Shared strings are DEREFERENCED (the full text, no
+    /// 32,768-char markdown-lane truncation — a disclosed divergence
+    /// from `to_markdown`'s DoS guard: the structure surface reports the
+    /// file's own value). A missing shared-string index reports `""`
+    /// (the renderer's own `unwrap_or("")`).
+    pub value: Option<XlsxScalar>,
+    /// The `<f>` formula text, verbatim, when present.
+    pub formula: Option<String>,
+    /// Formula cells: whether a cached value rode the file (`formula` is
+    /// Some AND the value is not Empty). A formula whose cached `<v>` is
+    /// absent reports False; a `t="e"` cell with no `<v>` parses to the
+    /// empty error string and reports True (the file stated an error).
+    pub has_cached_value: bool,
+}
+
+/// The Python-side value a cell's `value` getter returns: bool | float |
+/// str | None, discriminated by [`XlsxCell::kind`]. The core's own enum
+/// so the payload struct stays a plain `PartialEq` struct.
+#[derive(Clone, Debug, PartialEq)]
+pub enum XlsxScalar {
+    /// A boolean cell.
+    Bool(bool),
+    /// A numeric cell (dates-as-serials included — see `kind`).
+    Number(f64),
+    /// A string, error, date, or dereferenced shared string.
+    Text(String),
+}
+
+/// One sheet-scoped or workbook-level defined name.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct XlsxDefinedName {
+    /// The name.
+    pub name: String,
+    /// The formula/reference value, verbatim.
+    pub value: String,
+    /// The sheet the name is scoped to, 0-based into `workbook.sheets`
+    /// (the workbook's OWN sheet list — chartsheets included — never
+    /// this payload's `sheets`), verbatim; `None` for a workbook-level
+    /// name.
+    pub local_sheet_id: Option<u32>,
+    /// That sheet's display name resolved from `workbook.sheets`, when
+    /// `local_sheet_id` is in range.
+    pub local_sheet_name: Option<String>,
+    /// The name's hidden flag, verbatim.
+    pub hidden: bool,
+}
+
+/// One XLSX sheet hyperlink: `href`/`anchor` split exactly like
+/// [`DocxLink`] (a sheet-internal location is not a URL string).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct XlsxHyperlink {
+    /// The cell the link sits on ("A1").
+    pub cell_ref: String,
+    /// The external URL. `None` for an internal location.
+    pub href: Option<String>,
+    /// The internal location (sheet/cell). `None` for a URL.
+    pub anchor: Option<String>,
+    /// The tooltip, when declared.
+    pub tooltip: Option<String>,
+}
+
+/// One XLSX cell comment.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct XlsxComment {
+    /// The cell the comment is attached to.
+    pub cell_ref: String,
+    /// The comment's author, when the part names one.
+    pub author: Option<String>,
+    /// The comment's text.
+    pub text: String,
+}
+
+/// The HTML structure payload (issue #211): the collector's flat node
+/// array. No second tables list — the Table nodes carry the grids (the
+/// collector clones each grid into the node AND into
+/// `ConversionResult.tables`, whose `TableData` also carries the markdown
+/// rendering this surface discards; exposing both would double the table
+/// payload for zero information).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HtmlStructure {
+    /// The nodes, reading order, parents before children (a parent index
+    /// is always earlier: the collector pushes the container before its
+    /// child). The auto-built `Group` tree IS the heading tree; the flat
+    /// `Heading` nodes are the entries.
+    pub nodes: Vec<HtmlNode>,
+    /// True when nodes stopped at [`MAX_STRUCTURE_ENTRIES`]: the kept
+    /// prefix stays index-sound (parents are always earlier) and every
+    /// kept node's `children` is filtered to kept indices.
+    pub entries_truncated: bool,
+}
+
+/// One HTML node. `kind` is one of the NINE reachable kinds
+/// ("heading", "paragraph", "list", "list_item", "table", "image",
+/// "code", "quote", "group"); the crate enum's other variants
+/// (definition lists, raw blocks, metadata blocks) are produced only by
+/// a builder nothing in the convert path calls, and a future/unreachable
+/// variant mapping here is a typed `Convert` error, never a silent
+/// `kind=None`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HtmlNode {
+    /// The crate's deterministic node id.
+    pub id: String,
+    /// The parent node's index (`None` for roots). Always earlier than
+    /// this node.
+    pub parent: Option<u32>,
+    /// The children's indices, reading order.
+    pub children: Vec<u32>,
+    /// The crate's per-node attribute map — headings carry `{"id": …}`
+    /// when the source heading had one (the anchor work's handle);
+    /// image nodes carry `None` (the collector drops img attributes:
+    /// declared dimensions are NOT served — the spec's own disclosure,
+    /// with the visitor-feature path as the v1.x completion).
+    pub attributes: Option<std::collections::HashMap<String, String>>,
+    /// The node kind (the nine reachable ones, above).
+    pub kind: &'static str,
+    /// The node's text (heading/paragraph/list_item/code).
+    pub text: Option<String>,
+    /// Heading level 1-6 (a Group: the level that created it).
+    pub level: Option<u8>,
+    /// List: whether ordered.
+    pub ordered: Option<bool>,
+    /// Code: the language, when declared.
+    pub language: Option<String>,
+    /// Group: the section label — the creating heading's text (the
+    /// crate's `label` and `heading_text` are the same string; one
+    /// field is carried).
+    pub label: Option<String>,
+    /// Image: the src URL.
+    pub src: Option<String>,
+    /// Image: the alt text.
+    pub alt: Option<String>,
+    /// Table: the grid (rows/cols + sparse origin cells with
+    /// row/col/row_span/col_span/is_header). Nested tables: the inner
+    /// grid is ALSO collected (its own Table node, the inner table
+    /// closing first) while the outer cell carries the flattened text —
+    /// the observed collector behavior, disclosed.
+    pub grid: Option<HtmlGrid>,
+    /// Inline annotations, byte offsets into `text` — links carry
+    /// url+title. The link-context rule: a link's enclosing section is
+    /// the nearest GROUP ancestor (walk `parent`); headings have no
+    /// children (a heading CREATEs a Group sibling), and a link on a
+    /// heading lives on the Heading node itself.
+    pub annotations: Vec<HtmlAnnotation>,
+}
+
+/// One HTML table grid (the crate's `TableGrid`, verbatim shape).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HtmlGrid {
+    /// The grid's row count.
+    pub rows: u32,
+    /// The grid's column count.
+    pub cols: u32,
+    /// The origin cells, ordered by (row, col), sparse: positions
+    /// covered by a span have no entry.
+    pub cells: Vec<HtmlGridCell>,
+}
+
+/// One HTML grid cell (the crate's `GridCell`, verbatim shape).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HtmlGridCell {
+    /// The cell's text.
+    pub content: String,
+    /// 0-based row.
+    pub row: u32,
+    /// 0-based column.
+    pub col: u32,
+    /// The row span (1 unless a merge covers).
+    pub row_span: u32,
+    /// The column span (1 unless a merge covers).
+    pub col_span: u32,
+    /// Whether this is a header cell (`<th>`).
+    pub is_header: bool,
+}
+
+/// One inline annotation on an HTML node's text: a byte range plus its
+/// kind — url+title for links.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HtmlAnnotation {
+    /// The annotation kind ("link", "bold", "italic", "underline",
+    /// "strikethrough", "code", "subscript", "superscript",
+    /// "highlight").
+    pub kind: &'static str,
+    /// Start byte offset into the node's text (inclusive).
+    pub start: u32,
+    /// End byte offset (exclusive).
+    pub end: u32,
+    /// Link: the href, verbatim (no decoding, no resolution).
+    pub url: Option<String>,
+    /// Link: the `title` attribute, when declared.
+    pub title: Option<String>,
+}
+
+/// The multi-format `document_structure` probe (issues #209/#210/#211):
+/// ONE report whose resolved `format` discriminates and whose
+/// `payload` is exactly one of the three per-format structures — the
+/// docx heading/list/table/link surface from the office_oxide RAW layer,
+/// the xlsx sheets/cells/types surface from the same, and the html
+/// heading/link/image/table surface from the conversion lane's own
+/// structure collector (one parse, no second opinion).
+///
+/// The spine mirrors [`page_geometry`]'s exactly (resolve → capability
+/// table → password → max_bytes → engine doors), with the surface's own
+/// refusal order (the review's R7/R8, pinned):
+///
+/// 1. `resolve` — the explicit `format=` is trusted and NEVER re-sniffed
+///    (the conversion lane's own precedence): `format="html"` on docx
+///    bytes is the html lane's own binary-input refusal, `format="docx"`
+///    on pdf bytes the office leg's typed parse error; the fix-it is
+///    `sniff()`. The one container-dependent name is the Excel OLE case
+///    (`resolved_name`).
+/// 2. `structure_engine` — the format-level refusals (every refused kind
+///    on every backend: pdf, the legacy trio, pptx, the anydoc-only
+///    families, the Excel-OLE union), then html's forced-backend
+///    `UnsupportedBackend`, then the served office rows' anydoc
+///    capability refusal.
+/// 3. the password refusal — fired for EVERY kind: no served format
+///    accepts one, so even a pdf call reaches this refusal with an
+///    unexamined password (the surface takes no `password=` parameter;
+///    the core check keeps the Rust seam honest).
+/// 4. `max_bytes == 0` → `"max_bytes must be positive"`.
+/// 5. the engine doors — the office legs' audit + input ceiling (the
+///    same 32 MiB default, the same message shape, as
+///    [`page_geometry`]'s office leg) and the html leg's input ceiling
+///    (the conversion lane's ~23× figure is a LOWER bound for the
+///    structure lane, which also holds the node array; 32 MiB kept, so
+///    labeled).
+///
+/// Per-format payload laws live on the payload structs
+/// ([`DocxStructure`]/[`XlsxStructure`]/[`HtmlStructure`]) and their
+/// entries; the surface-wide laws: entries carry container anchors,
+/// never boxes (no coordinates anywhere); loss is reported
+/// (`unreadable_parts`/`unreadable_sheets`), never skipped silently; and
+/// the one entry cap ([`MAX_STRUCTURE_ENTRIES`]) truncates with a marker
+/// rather than refusing.
+pub fn document_structure(
+    bytes: Vec<u8>,
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    options: &ConvertOptions,
+) -> Result<StructureReport, DocumentError> {
+    let kind = resolve(&bytes, name_hint, format)?;
+    let lane = structure_engine(kind, backend, &bytes)?;
+    // The password refusal fires for EVERY kind (the F25 ruling): the
+    // geometry surfaces' `kind != Kind::Pdf` guard would let a pdf call
+    // reach the engines with an unexamined password, and no format this
+    // surface serves accepts one.
+    if options.password.is_some() {
+        return Err(DocumentError::Convert(
+            "document_structure takes no password: no served format accepts one".into(),
+        ));
+    }
+    if options.max_bytes.is_some_and(|limit| limit == 0) {
+        return Err(DocumentError::Convert("max_bytes must be positive".into()));
+    }
+    // The provenance name, resolved while the bytes are still borrowed
+    // (the parse below moves them): the Excel kind's container-aware
+    // xls/xlsx spelling included.
+    let format_name = resolved_name(kind, &bytes);
+    let payload = match lane {
+        StructureLane::Docx | StructureLane::Xlsx => {
+            // The office leg parses the container into resident memory
+            // (the same amplification class the conversion lane meters):
+            // the same input ceiling, explicit budget over the 32 MiB
+            // default, the same message shape as page_geometry's office
+            // leg.
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::OfficeOxide),
+                    render_size(limit),
+                )));
+            }
+            audit_oxide_container(&bytes)?;
+            let format = match kind {
+                Kind::Docx => office_oxide::DocumentFormat::Docx,
+                // The Excel kind's OLE container was refused in
+                // structure_engine; a ZIP package is xlsx.
+                Kind::Excel => office_oxide::DocumentFormat::Xlsx,
+                _ => {
+                    return Err(DocumentError::Convert(
+                        "office_oxide: unreachable kind".into(),
+                    ));
+                }
+            };
+            let doc = office_oxide::Document::from_reader(Cursor::new(bytes), format)
+                .map_err(|e| Convert(format!("office_oxide: {e}")))?;
+            match kind {
+                Kind::Docx => {
+                    let raw = doc.as_docx().ok_or_else(|| {
+                        Convert("office_oxide: the docx parse lost its raw layer".into())
+                    })?;
+                    StructurePayload::Docx(structure_docx(raw))
+                }
+                Kind::Excel => {
+                    let raw = doc.as_xlsx().ok_or_else(|| {
+                        Convert("office_oxide: the xlsx parse lost its raw layer".into())
+                    })?;
+                    StructurePayload::Xlsx(structure_xlsx(raw))
+                }
+                // structure_engine's table is total: nothing else routes here.
+                _ => {
+                    return Err(DocumentError::Convert(
+                        "office_oxide: unreachable kind".into(),
+                    ));
+                }
+            }
+        }
+        StructureLane::Html => {
+            // The html leg's input ceiling: the conversion lane's ~23x
+            // measured amplification is the figure for the lane WITHOUT
+            // the structure collector — this lane also holds the node
+            // array (node text duplicates body text, group labels
+            // duplicate heading text, annotations and ids), so 23x is a
+            // LOWER bound here. The data is already resident in the
+            // collector's tree, so the marginal factor is bounded; the
+            // 32 MiB default stands, labeled as the lower bound it is.
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::Html2Md),
+                    render_size(limit),
+                )));
+            }
+            StructurePayload::Html(structure_html(&bytes)?)
+        }
+    };
+    Ok(StructureReport {
+        format: format_name,
+        payload,
+    })
+}
+
+/// The HTML structure leg: the conversion lane's own parse, run once with
+/// the structure collector on (`include_document_structure: true` routes
+/// it to tier-2; the conversion output is IGNORED — the surface returns
+/// structure only). `result.document` being `None` is a refusal, never an
+/// empty structure; `result.content` is deliberately NOT required (the
+/// html_markdown lane's `.content.ok_or("no content")` is the wrong copy
+/// here: an all-style document can have structure and no markdown).
+fn structure_html(bytes: &[u8]) -> Result<HtmlStructure, DocumentError> {
+    let html = String::from_utf8_lossy(
+        bytes
+            .strip_prefix([0xEF, 0xBB, 0xBF].as_slice())
+            .unwrap_or(bytes),
+    );
+    let options = html_to_markdown_rs::ConversionOptions {
+        extract_metadata: false,
+        include_document_structure: true,
+        ..Default::default()
+    };
+    let result = html_to_markdown_rs::convert(&html, options)
+        .map_err(|e| Convert(format!("html-to-markdown-rs: {e}")))?;
+    let document = result.document.ok_or_else(|| {
+        Convert("html-to-markdown-rs: the structure collector returned no document".into())
+    })?;
+    let mut nodes = Vec::with_capacity(document.nodes.len());
+    for node in &document.nodes {
+        nodes.push(html_node(node)?);
+    }
+    // The entry cap: keep the reading-order prefix. Parents are always
+    // earlier (the collector pushes the container before its child), so
+    // every kept node's parent is kept; children are filtered to kept
+    // indices so no kept node points past the array.
+    let entries_truncated = nodes.len() > MAX_STRUCTURE_ENTRIES;
+    if entries_truncated {
+        nodes.truncate(MAX_STRUCTURE_ENTRIES);
+        let kept = MAX_STRUCTURE_ENTRIES as u32;
+        for node in &mut nodes {
+            node.children.retain(|&child| child < kept);
+        }
+    }
+    Ok(HtmlStructure {
+        nodes,
+        entries_truncated,
+    })
+}
+
+/// One collector node into the payload's own type. An unreachable node
+/// kind (the `tl`-based builder's variants: definition lists, raw
+/// blocks, metadata blocks — nothing in the convert path pushes them)
+/// is a typed `Convert` error, never a silent `kind=None`.
+fn html_node(node: &html_to_markdown_rs::DocumentNode) -> Result<HtmlNode, DocumentError> {
+    let (kind, text, level, ordered, language, label, src, alt, grid) = match &node.content {
+        html_to_markdown_rs::NodeContent::Heading { level, text } => (
+            "heading",
+            Some(text.clone()),
+            Some(*level),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        html_to_markdown_rs::NodeContent::Paragraph { text } => (
+            "paragraph",
+            Some(text.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        html_to_markdown_rs::NodeContent::List { ordered } => {
+            ("list", None, None, Some(*ordered), None, None, None, None, None)
+        }
+        html_to_markdown_rs::NodeContent::ListItem { text } => (
+            "list_item",
+            Some(text.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        html_to_markdown_rs::NodeContent::Table { grid } => (
+            "table",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(html_grid(grid)),
+        ),
+        html_to_markdown_rs::NodeContent::Image {
+            description,
+            src,
+            ..
+            // image_index is always None here: the inline-images feature
+            // is off (default-features = false), so no index is ever
+            // assigned — carried as absent, disclosed.
+        } => (
+            "image",
+            None,
+            None,
+            None,
+            None,
+            None,
+            src.clone(),
+            description.clone(),
+            None,
+        ),
+        html_to_markdown_rs::NodeContent::Code { text, language } => (
+            "code",
+            Some(text.clone()),
+            None,
+            None,
+            language.clone(),
+            None,
+            None,
+            None,
+            None,
+        ),
+        html_to_markdown_rs::NodeContent::Quote => {
+            ("quote", None, None, None, None, None, None, None, None)
+        }
+        html_to_markdown_rs::NodeContent::Group {
+            label,
+            heading_level,
+            ..
+            // heading_text duplicates `label` (the collector sets both
+            // to the creating heading's text): one field carried.
+        } => (
+            "group",
+            None,
+            *heading_level,
+            None,
+            None,
+            label.clone(),
+            None,
+            None,
+            None,
+        ),
+        // Nothing in the convert path pushes these four (the `tl`-based
+        // builder that does is dead); a variant that ever appears is a
+        // typed refusal naming it, never a silent kind=None.
+        other @ (html_to_markdown_rs::NodeContent::DefinitionList
+        | html_to_markdown_rs::NodeContent::DefinitionItem { .. }
+        | html_to_markdown_rs::NodeContent::RawBlock { .. }
+        | html_to_markdown_rs::NodeContent::MetadataBlock { .. }) => {
+            return Err(Convert(format!(
+                "html-to-markdown-rs: the structure collector reported the node kind {other:?}, which this surface does not model"
+            )));
+        }
+    };
+    let annotations = node
+        .annotations
+        .iter()
+        .map(|a| {
+            let (kind, url, title) = match &a.kind {
+                html_to_markdown_rs::AnnotationKind::Bold => ("bold", None, None),
+                html_to_markdown_rs::AnnotationKind::Italic => ("italic", None, None),
+                html_to_markdown_rs::AnnotationKind::Underline => ("underline", None, None),
+                html_to_markdown_rs::AnnotationKind::Strikethrough => ("strikethrough", None, None),
+                html_to_markdown_rs::AnnotationKind::Code => ("code", None, None),
+                html_to_markdown_rs::AnnotationKind::Subscript => ("subscript", None, None),
+                html_to_markdown_rs::AnnotationKind::Superscript => ("superscript", None, None),
+                html_to_markdown_rs::AnnotationKind::Highlight => ("highlight", None, None),
+                html_to_markdown_rs::AnnotationKind::Link { url, title } => {
+                    ("link", Some(url.clone()), title.clone())
+                }
+            };
+            HtmlAnnotation {
+                kind,
+                start: a.start,
+                end: a.end,
+                url,
+                title,
+            }
+        })
+        .collect();
+    Ok(HtmlNode {
+        id: node.id.clone(),
+        parent: node.parent,
+        children: node.children.clone(),
+        attributes: node.attributes.clone(),
+        kind,
+        text,
+        level,
+        ordered,
+        language,
+        label,
+        src,
+        alt,
+        grid,
+        annotations,
+    })
+}
+
+/// The crate's grid, verbatim shape.
+fn html_grid(grid: &html_to_markdown_rs::TableGrid) -> HtmlGrid {
+    HtmlGrid {
+        rows: grid.rows,
+        cols: grid.cols,
+        cells: grid
+            .cells
+            .iter()
+            .map(|cell| HtmlGridCell {
+                content: cell.content.clone(),
+                row: cell.row,
+                col: cell.col,
+                row_span: cell.row_span,
+                col_span: cell.col_span,
+                is_header: cell.is_header,
+            })
+            .collect(),
+    }
+}
+
+/// The DOCX structure builder: the raw layer's body walked once — the
+/// heading ladder re-derived (F1's two-rung markdown lane + the
+/// converter's convention rung), list membership on the EFFECTIVE
+/// properties, the block-text walk, and the table grids.
+fn structure_docx(raw: &office_oxide::docx::DocxDocument) -> DocxStructure {
+    let styles = raw.styles.as_ref();
+    let mut blocks = Vec::with_capacity(raw.body.elements.len());
+    for (index, element) in raw.body.elements.iter().enumerate() {
+        let section = raw
+            .body
+            .section_breaks
+            .iter()
+            .filter(|&&count| count <= index)
+            .count();
+        let block = match element {
+            office_oxide::docx::BlockElement::Paragraph(p) => {
+                let outline = docx_prose::outline_level(p, styles);
+                // List membership is on the EFFECTIVE properties (the
+                // markdown lane's own rule): Word's "List Bullet"/"List
+                // Number" styles carry `w:numPr` in the STYLE, and a
+                // direct-`w:pPr` read reports None for exactly the lists
+                // the markdown renders.
+                let effective = match styles {
+                    Some(sheet) => sheet.effective_paragraph_properties(p.properties.as_ref()),
+                    None => p.properties.clone().unwrap_or_default(),
+                };
+                let numbering = effective
+                    .numbering_ref
+                    .as_ref()
+                    .filter(|nr| nr.num_id != 0)
+                    .map(|nr| (nr.num_id, nr.ilvl));
+                let (num_id, ilvl, list_format, start_number) = match numbering {
+                    Some((num_id, ilvl)) => {
+                        let format = raw
+                            .numbering
+                            .as_ref()
+                            .and_then(|n| n.resolve_level(num_id, ilvl))
+                            .map(|level| number_format_name(&level.format));
+                        let start = raw
+                            .numbering
+                            .as_ref()
+                            .and_then(|n| n.resolve_start(num_id, ilvl));
+                        (Some(num_id), Some(ilvl), format, start)
+                    }
+                    None => (None, None, None, None),
+                };
+                let kind = if outline.is_some() {
+                    "heading"
+                } else if numbering.is_some() {
+                    "list_item"
+                } else {
+                    "paragraph"
+                };
+                DocxBlock {
+                    index,
+                    section,
+                    kind,
+                    text: docx_prose::paragraph_text(p, styles),
+                    level: outline.map(|o| (o as usize + 1).clamp(1, 6) as u8),
+                    outline_level: outline,
+                    style_id: p.properties.as_ref().and_then(|pp| pp.style_id.clone()),
+                    num_id,
+                    ilvl,
+                    list_format,
+                    start_number,
+                    table: None,
+                    links: docx_prose::paragraph_links(p),
+                    images: docx_prose::paragraph_images(p, &raw.images),
+                }
+            }
+            office_oxide::docx::BlockElement::Table(table) => DocxBlock {
+                index,
+                section,
+                kind: "table",
+                // PINNED: a table block's own text is "" — the cells
+                // carry the text (a table block's text would double it).
+                text: String::new(),
+                level: None,
+                outline_level: None,
+                style_id: None,
+                num_id: None,
+                ilvl: None,
+                list_format: None,
+                start_number: None,
+                table: Some(docx_prose::table_structure(table, styles)),
+                links: Vec::new(),
+                images: Vec::new(),
+            },
+        };
+        blocks.push(block);
+    }
+    let entries_truncated = blocks.len() > MAX_STRUCTURE_ENTRIES;
+    if entries_truncated {
+        blocks.truncate(MAX_STRUCTURE_ENTRIES);
+    }
+    DocxStructure {
+        blocks,
+        // The partition law `block.section` derives from: a document with
+        // no body-level sectPr is ONE section.
+        sections: raw.body.section_breaks.len() + 1,
+        section_breaks: raw.body.section_breaks.clone(),
+        footnotes: raw.footnotes.len(),
+        endnotes: raw.endnotes.len(),
+        comments: raw.comments.len(),
+        unreadable_parts: raw.unreadable_parts.clone(),
+        entries_truncated,
+    }
+}
+
+/// The numbering format's own name (the file's vocabulary, snake_case:
+/// "decimal", "bullet", "lower_letter", …; an unrecognized `w:numFmt`
+/// value rides verbatim).
+fn number_format_name(format: &office_oxide::docx::NumberFormat) -> String {
+    use office_oxide::docx::NumberFormat;
+    match format {
+        NumberFormat::Decimal => "decimal".to_string(),
+        NumberFormat::Bullet => "bullet".to_string(),
+        NumberFormat::LowerLetter => "lower_letter".to_string(),
+        NumberFormat::UpperLetter => "upper_letter".to_string(),
+        NumberFormat::LowerRoman => "lower_roman".to_string(),
+        NumberFormat::UpperRoman => "upper_roman".to_string(),
+        NumberFormat::None => "none".to_string(),
+        NumberFormat::Other(other) => other.clone(),
+    }
+}
+
+/// The XLSX structure builder: sheets from the raw layer's OWN worksheet
+/// list filtered by kind (chartsheets/dialogs are kind-tagged entries
+/// INSIDE `worksheets` in 0.1.15 — `Worksheet::without_cells` — so the
+/// filter is on `Worksheet.kind`, never a zip against `workbook.sheets`),
+/// the used range computed from the parsed cells, and the cells' values
+/// as the file states them.
+fn structure_xlsx(raw: &office_oxide::xlsx::XlsxDocument) -> XlsxStructure {
+    use office_oxide::ir::SheetKind;
+    let mut sheets = Vec::new();
+    let mut chartsheets = Vec::new();
+    let mut entries_truncated = false;
+    let mut budget = MAX_STRUCTURE_ENTRIES;
+    for ws in &raw.worksheets {
+        match ws.kind {
+            SheetKind::Chart | SheetKind::Dialog => chartsheets.push(ws.name.clone()),
+            SheetKind::Worksheet | SheetKind::Macro => {
+                sheets.push(structure_sheet(
+                    ws,
+                    raw,
+                    &mut budget,
+                    &mut entries_truncated,
+                ));
+            }
+        }
+    }
+    XlsxStructure {
+        sheets,
+        chartsheets,
+        defined_names: raw
+            .workbook
+            .defined_names
+            .iter()
+            .map(|name| XlsxDefinedName {
+                name: name.name.clone(),
+                value: name.value.clone(),
+                local_sheet_id: name.local_sheet_id,
+                local_sheet_name: name
+                    .local_sheet_id
+                    .and_then(|id| raw.workbook.sheets.get(id as usize))
+                    .map(|sheet| sheet.name.clone()),
+                hidden: name.hidden,
+            })
+            .collect(),
+        date1904: raw.workbook.date1904,
+        unreadable_sheets: raw
+            .unreadable_sheets
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect(),
+        entries_truncated,
+    }
+}
+
+/// One worksheet's payload. `budget` is the shared entry budget across
+/// every sheet (the cap is per-PAYLOAD, applied in document order);
+/// `truncated` flips once cells are dropped and never flips back.
+fn structure_sheet(
+    ws: &office_oxide::xlsx::Worksheet,
+    raw: &office_oxide::xlsx::XlsxDocument,
+    budget: &mut usize,
+    truncated: &mut bool,
+) -> XlsxSheet {
+    let state = match ws.state {
+        office_oxide::xlsx::SheetState::Visible => "visible",
+        office_oxide::xlsx::SheetState::Hidden => "hidden",
+        office_oxide::xlsx::SheetState::VeryHidden => "veryHidden",
+    };
+    // The used range: computed from the parsed cells — min/max over
+    // every present cell, styled-but-empty included (Excel's own
+    // used-range notion). The declared <dimension> rides beside it for
+    // provenance, never as the source.
+    let mut min_row = u32::MAX;
+    let mut min_col = u32::MAX;
+    let mut max_row = 0u32;
+    let mut max_col = 0u32;
+    let mut any = false;
+    for row in &ws.rows {
+        for cell in &row.cells {
+            any = true;
+            min_row = min_row.min(cell.reference.row);
+            min_col = min_col.min(cell.reference.col);
+            max_row = max_row.max(cell.reference.row);
+            max_col = max_col.max(cell.reference.col);
+        }
+    }
+    let used_range = any.then(|| {
+        format!(
+            "{mincol}{minr}:{maxcol}{maxr}",
+            mincol = office_oxide::xlsx::CellRef::col_name(min_col),
+            minr = min_row + 1,
+            maxcol = office_oxide::xlsx::CellRef::col_name(max_col),
+            maxr = max_row + 1,
+        )
+    });
+    let mut cells = Vec::new();
+    'outer: for row in &ws.rows {
+        for cell in &row.cells {
+            if *budget == 0 {
+                *truncated = true;
+                break 'outer;
+            }
+            *budget -= 1;
+            let value = match &cell.value {
+                office_oxide::xlsx::CellValue::Empty => None,
+                office_oxide::xlsx::CellValue::Number(n) => Some(XlsxScalar::Number(*n)),
+                office_oxide::xlsx::CellValue::String(s) => Some(XlsxScalar::Text(s.clone())),
+                // The shared-string dereference is the structure leg's
+                // own job (the cell keeps the index at rest): the FULL
+                // text, no 32,768-char markdown-lane truncation — a
+                // disclosed divergence from the renderer's DoS guard.
+                office_oxide::xlsx::CellValue::SharedString(idx) => Some(XlsxScalar::Text(
+                    raw.shared_strings.get(*idx).unwrap_or("").to_string(),
+                )),
+                office_oxide::xlsx::CellValue::Boolean(b) => Some(XlsxScalar::Bool(*b)),
+                office_oxide::xlsx::CellValue::Error(e) => Some(XlsxScalar::Text(e.clone())),
+                office_oxide::xlsx::CellValue::Date(date) => {
+                    Some(XlsxScalar::Text(date.to_iso_string()))
+                }
+            };
+            let kind = match &cell.value {
+                office_oxide::xlsx::CellValue::Empty => "empty",
+                office_oxide::xlsx::CellValue::Number(_) => "number",
+                office_oxide::xlsx::CellValue::String(_)
+                | office_oxide::xlsx::CellValue::SharedString(_) => "string",
+                office_oxide::xlsx::CellValue::Boolean(_) => "boolean",
+                office_oxide::xlsx::CellValue::Error(_) => "error",
+                // `date` is ONLY the t="d" ISO-8601 branch: a serial
+                // number with a date number-format stays "number" (the
+                // seam cannot decode the format; see `XlsxCell::kind`).
+                office_oxide::xlsx::CellValue::Date(_) => "date",
+            };
+            cells.push(XlsxCell {
+                reference: cell.reference.to_string(),
+                row: cell.reference.row as usize,
+                col: cell.reference.col as usize,
+                kind,
+                value,
+                formula: cell.formula.clone(),
+                // A formula whose cached <v> is absent parses to Empty;
+                // a t="e" cell with no <v> parses to Error("") — both
+                // are the file's own statement.
+                has_cached_value: cell.formula.is_some()
+                    && !matches!(cell.value, office_oxide::xlsx::CellValue::Empty),
+            });
+        }
+    }
+    XlsxSheet {
+        name: ws.name.clone(),
+        state,
+        used_range,
+        declared_dimension: ws.dimension.clone(),
+        max_row: any.then_some(max_row as usize),
+        max_col: any.then_some(max_col as usize),
+        cells,
+        merged_cells: ws.merged_cells.clone(),
+        hyperlinks: ws
+            .hyperlinks
+            .iter()
+            .map(|link| {
+                let (href, anchor) = match &link.target {
+                    office_oxide::xlsx::HyperlinkTarget::External(url) => (Some(url.clone()), None),
+                    office_oxide::xlsx::HyperlinkTarget::Internal(anchor) => {
+                        (None, Some(anchor.clone()))
+                    }
+                };
+                XlsxHyperlink {
+                    cell_ref: link.cell_ref.clone(),
+                    href,
+                    anchor,
+                    tooltip: link.tooltip.clone(),
+                }
+            })
+            .collect(),
+        comments: ws
+            .comments
+            .iter()
+            .map(|comment| XlsxComment {
+                cell_ref: comment.cell_ref.clone(),
+                author: comment.author.clone(),
+                text: comment.text.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// The seam's own re-derivation of the office_oxide block-text/heading
+/// helpers it needs for the structure payload (the crate keeps them
+/// private; the upstream ask is the bundle — `resolve_heading_level` +
+/// per-paragraph effective props + per-block text + the grid walks — not
+/// one hook). Each helper is pinned against the markdown lane's own
+/// behavior by fixture.
+mod docx_prose {
+    use office_oxide::docx::document::BlockElement;
+    use office_oxide::docx::hyperlink::HyperlinkTarget;
+    use office_oxide::docx::image::DrawingInfo;
+    use office_oxide::docx::paragraph::{Paragraph, ParagraphContent, Run, RunContent};
+    use office_oxide::docx::styles::StyleSheet;
+    use office_oxide::docx::table::{MergeType, Table};
+
+    /// The single gridSpan clamp, mirroring the raw layer's own
+    /// `MAX_GRID_SPAN` (crate-private): Word's table limit is 63
+    /// columns; 1000 leaves headroom and keeps a hostile `w:gridSpan`
+    /// from sizing anything unboundedly.
+    const MAX_GRID_SPAN: u32 = 1_000;
+
+    /// The heading ladder's 0-based outline level for one paragraph:
+    /// direct `w:outlineLvl` → the stylesheet's `basedOn` chain
+    /// (`resolve_outline_level`) → the `Heading1..9` style-ID convention
+    /// → the `heading 1..9` style-NAME convention. The first two rungs
+    /// are the markdown lane's own two-rung ladder (docx/text.rs); the
+    /// convention rung is the converter's (convert_docx.rs), a disclosed
+    /// SUPERSET: a paragraph only the convention rung names a heading is
+    /// reported here but renders as plain text on `backend="oxide"`.
+    pub fn outline_level(p: &Paragraph, styles: Option<&StyleSheet>) -> Option<u8> {
+        let props = p.properties.as_ref()?;
+        if let Some(level) = props.outline_level {
+            return Some(level);
+        }
+        let style_id = props.style_id.as_ref()?;
+        let sheet = styles?;
+        if let Some(level) = sheet.resolve_outline_level(style_id) {
+            return Some(level);
+        }
+        if let Some(level) = heading_level_from_style_name(style_id) {
+            return Some(level);
+        }
+        sheet
+            .styles
+            .get(style_id)
+            .and_then(|style| style.name.as_deref())
+            .and_then(heading_level_from_style_name)
+    }
+
+    /// The converter's naming-convention rung: `Heading1..9` (style id or
+    /// style name, trimmed, case-insensitive) → 0-based level.
+    fn heading_level_from_style_name(name: &str) -> Option<u8> {
+        let lower = name.trim().to_ascii_lowercase();
+        let digits: u8 = lower.strip_prefix("heading")?.trim().parse().ok()?;
+        ((1..=9).contains(&digits)).then(|| digits - 1)
+    }
+
+    /// One block's visible text: paragraphs join their runs (hidden runs
+    /// resolved through the style chain), tables walk their cells.
+    /// Whitespace-trimmed at the BLOCK edges (block boundaries carry the
+    /// separation; interior breaks and tabs ride verbatim).
+    pub fn block_text(elements: &[BlockElement], styles: Option<&StyleSheet>) -> String {
+        let mut out = String::new();
+        blocks_text(elements, styles, &mut out);
+        out.trim().to_string()
+    }
+
+    /// One paragraph's text.
+    pub fn paragraph_text(p: &Paragraph, styles: Option<&StyleSheet>) -> String {
+        let style_id = p.properties.as_ref().and_then(|pp| pp.style_id.as_deref());
+        let mut out = String::new();
+        for content in &p.content {
+            match content {
+                ParagraphContent::Run(run) => run_text(run, style_id, styles, &mut out),
+                ParagraphContent::Hyperlink(hyperlink) => {
+                    for run in &hyperlink.runs {
+                        run_text(run, style_id, styles, &mut out);
+                    }
+                }
+            }
+        }
+        out.trim().to_string()
+    }
+
+    fn blocks_text(elements: &[BlockElement], styles: Option<&StyleSheet>, out: &mut String) {
+        for element in elements {
+            match element {
+                BlockElement::Paragraph(p) => {
+                    let text = paragraph_text_inner(p, styles);
+                    if !text.is_empty() {
+                        if !out.is_empty() && !out.ends_with(['\n', ' ', '\t']) {
+                            out.push('\n');
+                        }
+                        out.push_str(&text);
+                    }
+                    out.push('\n');
+                }
+                // A cell can hold a table; the walk recurses (the same
+                // shape the markdown lane's own walker has).
+                BlockElement::Table(table) => {
+                    for row in &table.rows {
+                        for cell in &row.cells {
+                            blocks_text(&cell.content, styles, out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The paragraph walk WITHOUT the trim (the text-box recursion needs
+    /// the raw shape the markdown lane's own walker produces).
+    fn paragraph_text_inner(p: &Paragraph, styles: Option<&StyleSheet>) -> String {
+        let style_id = p.properties.as_ref().and_then(|pp| pp.style_id.as_deref());
+        let mut out = String::new();
+        for content in &p.content {
+            match content {
+                ParagraphContent::Run(run) => run_text(run, style_id, styles, &mut out),
+                ParagraphContent::Hyperlink(hyperlink) => {
+                    for run in &hyperlink.runs {
+                        run_text(run, style_id, styles, &mut out);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// One run's text, the markdown lane's own `plain_text_run` rules:
+    /// hidden runs (`w:vanish`, resolved through the style chain —
+    /// `effective_hidden` is public; the table-style layer it also folds
+    /// is `pub(crate)`, so a cell's table-style-hidden run is NOT caught:
+    /// disclosed), text, breaks, tabs, chart/diagram text, text-box
+    /// prose (recursed, separated), form-field display text, note-ref
+    /// marks skipped, unresolvable deferred parts dropped.
+    fn run_text(
+        run: &Run,
+        paragraph_style_id: Option<&str>,
+        styles: Option<&StyleSheet>,
+        out: &mut String,
+    ) {
+        if styles.is_some_and(|sheet| {
+            sheet.effective_hidden(paragraph_style_id, run.properties.as_ref())
+        }) {
+            return;
+        }
+        for content in &run.content {
+            match content {
+                RunContent::Text(text) => out.push_str(text),
+                // Every break kind separates: a line break is a newline,
+                // and page/column breaks separate text the same way on
+                // the plain-text lane.
+                RunContent::Break(_) => out.push('\n'),
+                RunContent::Tab => out.push('\t'),
+                // A drawing has no text of its own — except a native
+                // chart or SmartArt diagram, whose text was resolved
+                // from the referenced part at open time.
+                RunContent::Drawing(drawing) => {
+                    let lines: Vec<&str> = drawing
+                        .chart_text
+                        .iter()
+                        .chain(drawing.dgm_text.iter())
+                        .map(String::as_str)
+                        .collect();
+                    if !lines.is_empty() {
+                        if !out.is_empty() && !out.ends_with(['\n', ' ', '\t']) {
+                            out.push('\n');
+                        }
+                        out.push_str(&lines.join("\n"));
+                        out.push('\n');
+                    }
+                }
+                // Text-box prose is block content: separated from the
+                // surrounding run, recursed (a text box is not formatted
+                // by the table it sits in — the markdown lane's own
+                // rule).
+                RunContent::TextBox(blocks) => {
+                    let mut inner = String::new();
+                    blocks_text(blocks, styles, &mut inner);
+                    let inner = inner.trim();
+                    if !inner.is_empty() {
+                        if !out.is_empty() && !out.ends_with(['\n', ' ', '\t']) {
+                            out.push('\n');
+                        }
+                        out.push_str(inner);
+                        out.push('\n');
+                    }
+                }
+                // The citation point carries no text; the note body is
+                // not part of the block.
+                RunContent::FootnoteRef(..)
+                | RunContent::EndnoteRef(..)
+                | RunContent::CommentRef(_)
+                | RunContent::CommentRangeStart(_) => {}
+                // The field's display text is surfaced when the field
+                // carries no cached result runs of its own (the plain
+                // text lane's exact rule).
+                RunContent::FormField(field) => {
+                    if let Some(text) = &field.display_text {
+                        out.push_str(text);
+                    }
+                }
+                // Resolved into a TextBox during open when the reference
+                // could be followed; an unresolvable one is dropped.
+                RunContent::DeferredPart(_) => {}
+            }
+        }
+    }
+
+    /// One paragraph's hyperlinks, in order: target kind split into
+    /// href/anchor, the runs' text joined.
+    pub fn paragraph_links(p: &Paragraph) -> Vec<super::DocxLink> {
+        let mut out = Vec::new();
+        for content in &p.content {
+            let ParagraphContent::Hyperlink(hyperlink) = content else {
+                continue;
+            };
+            let mut text = String::new();
+            for run in &hyperlink.runs {
+                for content in &run.content {
+                    if let RunContent::Text(text_piece) = content {
+                        text.push_str(text_piece);
+                    }
+                }
+            }
+            let (href, anchor) = match &hyperlink.target {
+                HyperlinkTarget::External(url) => (Some(url.clone()), None),
+                HyperlinkTarget::Internal(anchor) => (None, Some(anchor.clone())),
+            };
+            out.push(super::DocxLink {
+                text: text.trim().to_string(),
+                href,
+                anchor,
+                fragment: hyperlink.fragment.clone(),
+                tooltip: hyperlink.tooltip.clone(),
+            });
+        }
+        out
+    }
+
+    /// One paragraph's real pictures, in order: drawings with a
+    /// relationship id (embedded `r:embed` or linked `r:link`) — a
+    /// DrawingML shape (empty rid) is not a picture and is filtered.
+    /// Extents are EMU ÷ 12700.0, `None` when the declared extent is
+    /// not positive (an undeclared extent is 0). Text-box drawings are
+    /// not collected here (the text walk recurses; the image list stays
+    /// anchored to the block's own runs).
+    pub fn paragraph_images(
+        p: &Paragraph,
+        images: &std::collections::HashMap<String, (Vec<u8>, Option<String>)>,
+    ) -> Vec<super::DocxImage> {
+        let mut out = Vec::new();
+        for content in &p.content {
+            let runs: &[Run] = match content {
+                ParagraphContent::Run(run) => std::slice::from_ref(run),
+                ParagraphContent::Hyperlink(hyperlink) => &hyperlink.runs,
+            };
+            for run in runs {
+                for content in &run.content {
+                    let RunContent::Drawing(drawing) = content else {
+                        continue;
+                    };
+                    push_image(drawing, images, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    fn push_image(
+        drawing: &DrawingInfo,
+        images: &std::collections::HashMap<String, (Vec<u8>, Option<String>)>,
+        out: &mut Vec<super::DocxImage>,
+    ) {
+        let rid = if drawing.relationship_id.is_empty() {
+            drawing.linked_image_rid.as_deref()
+        } else {
+            Some(drawing.relationship_id.as_str())
+        };
+        let Some(rid) = rid else {
+            return;
+        };
+        let width_pt = (drawing.width.0 > 0).then(|| drawing.width.0 as f32 / 12700.0);
+        let height_pt = (drawing.height.0 > 0).then(|| drawing.height.0 as f32 / 12700.0);
+        out.push(super::DocxImage {
+            relationship_id: rid.to_string(),
+            file_ext: images.get(rid).and_then(|(_, ext)| ext.clone()),
+            description: drawing.description.clone(),
+            width_pt,
+            height_pt,
+            inline: drawing.inline,
+            decorative: drawing.decorative,
+        });
+    }
+
+    /// One table's grid: rows/columns from the raw layer's own numbers,
+    /// cells in row-major order with gridSpan-accumulated columns and
+    /// vMerge-walked row spans.
+    pub fn table_structure(table: &Table, styles: Option<&StyleSheet>) -> super::DocxTable {
+        // Each row's cells' starting columns: the gridSpan accumulation
+        // (the raw layer's `grid_starts` walk, re-derived with the same
+        // clamp).
+        let starts: Vec<Vec<usize>> = table
+            .rows
+            .iter()
+            .map(|row| {
+                let mut col = 0usize;
+                row.cells
+                    .iter()
+                    .map(|cell| {
+                        let start = col;
+                        col = col.saturating_add(grid_span(cell) as usize);
+                        start
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut cells = Vec::new();
+        for (row_index, row) in table.rows.iter().enumerate() {
+            for (cell_index, cell) in row.cells.iter().enumerate() {
+                let col = starts[row_index][cell_index];
+                // A vMerge Restart spans the same-column Continue cells
+                // below it; a Continue cell is emitted as its own cell
+                // (disclosed as inside the Restart span), row span 1.
+                let row_span = match cell
+                    .properties
+                    .as_ref()
+                    .and_then(|props| props.vertical_merge)
+                {
+                    Some(MergeType::Restart) => {
+                        let mut span = 1usize;
+                        let mut below = row_index + 1;
+                        while below < table.rows.len() {
+                            let Some(index) = starts[below].iter().position(|&start| start == col)
+                            else {
+                                break;
+                            };
+                            let merged = &table.rows[below].cells[index];
+                            match merged
+                                .properties
+                                .as_ref()
+                                .and_then(|props| props.vertical_merge)
+                            {
+                                Some(MergeType::Continue) => {
+                                    span += 1;
+                                    below += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        span
+                    }
+                    _ => 1,
+                };
+                cells.push(super::DocxCell {
+                    row: row_index,
+                    col,
+                    text: block_text(&cell.content, styles),
+                    row_span,
+                    col_span: grid_span(cell) as usize,
+                });
+            }
+        }
+        super::DocxTable {
+            rows: table.rows.len(),
+            cols: table.grid.len(),
+            col_widths_twips: table.grid.iter().map(|width| width.0).collect(),
+            cells,
+            caption: table
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.caption.clone()),
+        }
+    }
+
+    /// The cell's `w:gridSpan`, clamped to `1..=MAX_GRID_SPAN` (the raw
+    /// layer's own clamp; the value is untrusted).
+    fn grid_span(cell: &office_oxide::docx::table::TableCell) -> u32 {
+        cell.properties
+            .as_ref()
+            .and_then(|props| props.grid_span)
+            .unwrap_or(1)
+            .clamp(1, MAX_GRID_SPAN)
+    }
+}
+
 /// The HTML conversion: html-to-markdown-rs under the options the lane
 /// measured with. `extract_metadata: false` suppresses the YAML frontmatter
 /// its default configuration emits for `<title>`/`<meta>`: the body is the
@@ -3827,7 +5615,7 @@ mod tests {
             "a.docx",
             &docx_with_body(
                 "<w:p><w:r><w:t>body</w:t></w:r></w:p>\
-                 <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
+                 <w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId6\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
             ),
         );
         assert_eq!(pgsz.len(), 1);
@@ -3880,7 +5668,7 @@ mod tests {
                 "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr>\
                  </w:pPr><w:r><w:t>first</w:t></w:r></w:p>\
                  <w:p><w:r><w:t>second</w:t></w:r></w:p>\
-                 <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
+                 <w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId6\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
             ),
         );
         assert_eq!(two_sections.len(), 2);
@@ -4300,7 +6088,7 @@ mod tests {
         // format marker naming the resolved kind
         let docx = docx_with_body(
             "<w:p><w:r><w:t>body</w:t></w:r></w:p>\
-             <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
+             <w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId6\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
         );
         let entries = layout("a.docx", &docx, None).unwrap();
         assert_eq!(entries.len(), 1);
@@ -4987,5 +6775,926 @@ mod tests {
             panic!("zip signatures that resolve to nothing must be refused");
         };
         assert!(what.contains("zip directory did not parse"), "{what}");
+    }
+
+    // --- the document-structure surface (issues #209/#210/#211) ----------
+
+    /// The structure surface's docx fixture: a body carrying every pin the
+    /// payload needs — a style-outline heading, a direct `outlineLvl="7"`
+    /// (the clamp case), a style-carried `numPr` list paragraph, a
+    /// numbered heading (numPr + heading: heading wins, the numPr rides),
+    /// a tab/br/hidden-run walk paragraph, an external hyperlink, a
+    /// 3×3 table with a gridSpan cell and a vMerge Restart/Continue pair,
+    /// an inline picture with a declared extent, two sections, and an
+    /// unreadable header part.
+    fn structure_docx_fixture() -> Vec<u8> {
+        structure_docx_fixture_with_header(b"<w:hdr")
+    }
+
+    fn structure_docx_fixture_with_header(header: &[u8]) -> Vec<u8> {
+        const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const WP: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+        const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        const PIC: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+        let document = format!(
+            "<?xml version=\"1.0\"?>\
+<w:document xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:body>\
+<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>Annual Report</w:t></w:r></w:p>\
+<w:p><w:pPr><w:outlineLvl w:val=\"7\"/></w:pPr><w:r><w:t>Deep</w:t></w:r></w:p>\
+<w:p><w:pPr><w:pStyle w:val=\"ListPx\"/></w:pPr><w:r><w:t>bulleted through the style</w:t></w:r></w:p>\
+<w:p><w:pPr><w:pStyle w:val=\"Heading2\"/><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>1. Numbered heading</w:t></w:r></w:p>\
+<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br/></w:r><w:r><w:tab/></w:r><w:r><w:t>after</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>hidden text</w:t></w:r></w:p>\
+<w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>field handbook</w:t></w:r></w:hyperlink></w:p>\
+<w:p><w:r><w:drawing><wp:inline xmlns:wp=\"{WP}\"><wp:extent cx=\"1905000\" cy=\"1270000\"/><wp:docPr descr=\"torque chart\"/><a:graphic xmlns:a=\"{A}\"><a:graphicData><pic:pic xmlns:pic=\"{PIC}\"><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>\
+<w:tbl><w:tblPr><w:tblCaption w:val=\"Units\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid>\
+<w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p><w:r><w:t>wide</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>third</w:t></w:r></w:p></w:tc></w:tr>\
+<w:tr><w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr><w:p><w:r><w:t>span</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>b1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>c1</w:t></w:r></w:p></w:tc></w:tr>\
+<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>b2</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>c2</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\
+<w:p><w:pPr><w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId6\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:pPr><w:r><w:t>section one ends</w:t></w:r></w:p>\
+<w:p><w:r><w:t>second section body</w:t></w:r></w:p>\
+</w:body></w:document>"
+        );
+        let styles = format!(
+            "<?xml version=\"1.0\"?>\
+<w:styles xmlns:w=\"{W}\">\
+<w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/><w:pPr><w:outlineLvl w:val=\"0\"/></w:pPr></w:style>\
+<w:style w:type=\"paragraph\" w:styleId=\"Heading2\"><w:name w:val=\"heading 2\"/><w:pPr><w:outlineLvl w:val=\"1\"/></w:pPr></w:style>\
+<w:style w:type=\"paragraph\" w:styleId=\"ListPx\"><w:name w:val=\"List Paragraph\"/><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr></w:style>\
+</w:styles>"
+        );
+        let numbering = format!(
+            "<?xml version=\"1.0\"?>\
+<w:numbering xmlns:w=\"{W}\">\
+<w:abstractNum w:abstractNumId=\"0\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"bullet\"/><w:start w:val=\"1\"/></w:lvl></w:abstractNum>\
+<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num></w:numbering>"
+        );
+        let rels = format!(
+            "<?xml version=\"1.0\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"{R}/hyperlink\" Target=\"https://handbook.example.com/torque\" TargetMode=\"External\"/>\
+<Relationship Id=\"rId5\" Type=\"{R}/image\" Target=\"media/image5.png\"/>\
+<Relationship Id=\"rId6\" Type=\"{R}/header\" Target=\"header1.xml\"/>\
+<Relationship Id=\"rId3\" Type=\"{R}/styles\" Target=\"styles.xml\"/>\
+<Relationship Id=\"rId4\" Type=\"{R}/numbering\" Target=\"numbering.xml\"/>\
+</Relationships>"
+        );
+        let content_types = "<?xml version=\"1.0\"?>\
+<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
+</Types>"
+            .to_string();
+        let root_rels = format!(
+            "<?xml version=\"1.0\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"{R}/officeDocument\" Target=\"word/document.xml\"/>\
+</Relationships>"
+        );
+        zip_of(&[
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("_rels/.rels", root_rels.as_bytes()),
+            ("word/document.xml", document.as_bytes()),
+            ("word/styles.xml", styles.as_bytes()),
+            ("word/numbering.xml", numbering.as_bytes()),
+            ("word/_rels/document.xml.rels", rels.as_bytes()),
+            // the image part the rid points at (the ext rides the target
+            // path's extension)
+            ("word/media/image5.png", b"png-bytes"),
+            ("word/header1.xml", header),
+        ])
+    }
+
+    /// The structure surface's xlsx fixture: three worksheets (visible,
+    /// hidden, veryHidden) + one chartsheet, typed cells (number,
+    /// string/shared, boolean, error, t="d" date, styled-empty), a
+    /// formula with and one without a cached value, a lying declared
+    /// dimension, a merged range, an external + an internal hyperlink,
+    /// and a global + a sheet-scoped defined name.
+    fn structure_xlsx_fixture() -> Vec<u8> {
+        const M: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let workbook = format!(
+            "<?xml version=\"1.0\"?>\
+<workbook xmlns=\"{M}\" xmlns:r=\"{R}\"><sheets>\
+<sheet name=\"Visible\" sheetId=\"1\" r:id=\"rId1\"/>\
+<sheet name=\"Hidden\" sheetId=\"2\" state=\"hidden\" r:id=\"rId2\"/>\
+<sheet name=\"VeryHidden\" sheetId=\"3\" state=\"veryHidden\" r:id=\"rId3\"/>\
+<sheet name=\"ChartTab\" sheetId=\"4\" r:id=\"rId4\"/>\
+</sheets><definedNames>\
+<definedName name=\"GLOB\">Visible!$A$1</definedName>\
+<definedName name=\"SCOPED\" localSheetId=\"0\">Visible!$B$1</definedName>\
+</definedNames></workbook>"
+        );
+        let workbook_rels = format!(
+            "<?xml version=\"1.0\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"{R}/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+<Relationship Id=\"rId2\" Type=\"{R}/worksheet\" Target=\"worksheets/sheet2.xml\"/>\
+<Relationship Id=\"rId3\" Type=\"{R}/worksheet\" Target=\"worksheets/sheet3.xml\"/>\
+<Relationship Id=\"rId4\" Type=\"{R}/chartsheet\" Target=\"chartsheets/chart1.xml\"/>\
+<Relationship Id=\"rId5\" Type=\"{R}/sharedStrings\" Target=\"sharedStrings.xml\"/>\
+</Relationships>"
+        );
+        let sheet = format!(
+            "<?xml version=\"1.0\"?>\
+<worksheet xmlns=\"{M}\" xmlns:r=\"{R}\"><dimension ref=\"A1:C4\"/><sheetData>\
+<row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\"><v>3.5</v></c><c r=\"C1\" t=\"b\"><v>1</v></c><c r=\"D1\" s=\"1\"/></row>\
+<row r=\"2\"><c r=\"A2\"><f>SUM(B1:B1)</f><v>3.5</v></c><c r=\"B2\" t=\"e\"><v>#REF!</v></c><c r=\"C2\" t=\"d\"><v>2026-01-02</v></c></row>\
+<row r=\"4\"><c r=\"D4\" t=\"s\"><v>1</v></c></row>\
+<row r=\"5\"><c r=\"A5\"><f>1+1</f></c></row>\
+</sheetData><mergeCells count=\"1\"><mergeCell ref=\"A3:B3\"/></mergeCells>\
+<hyperlinks><hyperlink ref=\"B1\" r:id=\"rId9\" tooltip=\"the guide\"/><hyperlink ref=\"C1\" location=\"Hidden!A1\"/></hyperlinks></worksheet>"
+        );
+        let hidden = "<?xml version=\"1.0\"?>\
+<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>"
+            .to_string();
+        let shared = "<?xml version=\"1.0\"?>\
+<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>unit label</t></si><si><t>second label</t></si></sst>"
+            .to_string();
+        let sheet_rels = format!(
+            "<?xml version=\"1.0\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId9\" Type=\"{R}/hyperlink\" Target=\"https://handbook.example.com/torque\" TargetMode=\"External\"/>\
+</Relationships>"
+        );
+        let content_types = "<?xml version=\"1.0\"?>\
+<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
+</Types>"
+            .to_string();
+        let root_rels = format!(
+            "<?xml version=\"1.0\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"{R}/officeDocument\" Target=\"xl/workbook.xml\"/>\
+</Relationships>"
+        );
+        zip_of(&[
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("_rels/.rels", root_rels.as_bytes()),
+            ("xl/workbook.xml", workbook.as_bytes()),
+            ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+            ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+            ("xl/worksheets/sheet2.xml", hidden.as_bytes()),
+            ("xl/worksheets/sheet3.xml", hidden.as_bytes()),
+            ("xl/sharedStrings.xml", shared.as_bytes()),
+            ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ])
+    }
+
+    fn structure_of(name: &str, bytes: &[u8]) -> StructureReport {
+        document_structure(
+            bytes.to_vec(),
+            Some(name),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_structure_capability_table_is_total() {
+        // Every kind × every backend: the third table's totality, asserted
+        // as the function's own shape. Served rows: docx/xlsx (office legs)
+        // and html (auto only); everything else refuses on every backend.
+        for backend in [Backend::Auto, Backend::Oxide, Backend::Anydoc] {
+            match structure_engine(Kind::Docx, backend, b"PK") {
+                Ok(StructureLane::Docx) => assert!(backend != Backend::Anydoc),
+                Err(DocumentError::Convert(what)) => {
+                    assert_eq!(backend, Backend::Anydoc, "docx");
+                    assert!(
+                        what.contains("cannot serve document_structure for docx"),
+                        "{what}"
+                    );
+                    assert!(what.contains("use backend='auto' or 'oxide'"), "{what}");
+                }
+                other => panic!("docx x {backend:?}: {other:?}"),
+            }
+            match structure_engine(Kind::Excel, backend, b"PK") {
+                Ok(StructureLane::Xlsx) => assert!(backend != Backend::Anydoc),
+                Err(DocumentError::Convert(what)) => {
+                    assert_eq!(backend, Backend::Anydoc, "xlsx");
+                    assert!(
+                        what.contains("cannot serve document_structure for xlsx"),
+                        "{what}"
+                    );
+                }
+                other => panic!("xlsx(ZIP) x {backend:?}: {other:?}"),
+            }
+            // The Excel kind's OLE container: the union refusal on EVERY
+            // backend (legacy xls or encrypted xlsx — the seam cannot
+            // disambiguate without a full legacy parse).
+            match structure_engine(Kind::Excel, backend, &ole_with_stream("Workbook")) {
+                Err(DocumentError::Convert(what)) => {
+                    assert!(what.contains("cannot serve xls"), "{what}");
+                    assert!(what.contains("legacy xls workbook"), "{what}");
+                    assert!(what.contains("encrypted xlsx package"), "{what}");
+                }
+                other => panic!("xlsx(OLE) x {backend:?}: {other:?}"),
+            }
+            match structure_engine(Kind::Html, backend, b"") {
+                Ok(StructureLane::Html) => assert_eq!(backend, Backend::Auto),
+                Err(DocumentError::UnsupportedBackend {
+                    format,
+                    backend: refused,
+                }) => {
+                    assert_eq!((format, refused), ("html", backend_name(backend)));
+                }
+                other => panic!("html x {backend:?}: {other:?}"),
+            }
+            for kind in [Kind::Doc, Kind::Ppt] {
+                match structure_engine(kind, backend, b"") {
+                    Err(DocumentError::Convert(what)) => {
+                        assert!(
+                            what.contains("converter-internal IR (no raw layer)"),
+                            "{what}"
+                        );
+                    }
+                    other => panic!("{kind:?} x {backend:?}: {other:?}"),
+                }
+            }
+            match structure_engine(Kind::Pptx, backend, b"") {
+                Err(DocumentError::Convert(what)) => {
+                    assert!(what.contains("raw layer is reachable"), "{what}");
+                    assert!(what.contains("not built yet"), "{what}");
+                }
+                other => panic!("pptx x {backend:?}: {other:?}"),
+            }
+            for kind in [
+                Kind::Rtf,
+                Kind::Odt,
+                Kind::Ods,
+                Kind::Odp,
+                Kind::Epub,
+                Kind::Csv,
+            ] {
+                match structure_engine(kind, backend, b"") {
+                    Err(DocumentError::Convert(what)) => {
+                        assert!(
+                            what.contains(&format!(
+                                "no structure surface exists for {}",
+                                kind.name()
+                            )),
+                            "{what}"
+                        );
+                        // never "unreadable": the format converts fine
+                        assert!(what.contains("converts fine"), "{what}");
+                    }
+                    other => panic!("{kind:?} x {backend:?}: {other:?}"),
+                }
+            }
+            match structure_engine(Kind::Pdf, backend, b"") {
+                Err(DocumentError::Convert(what)) => {
+                    assert_eq!(
+                        what,
+                        "document_structure cannot serve pdf: pdf has no structure surface \
+                         here — page_layout and page_tables serve PDF pages (spans, lines, \
+                         images, per-cell table boxes); document_structure serves the \
+                         office/html families' containers"
+                    );
+                }
+                other => panic!("pdf x {backend:?}: {other:?}"),
+            }
+        }
+        // html's forced backends are conversion's own row byte-identical
+        // (the pair cannot convert; the structure lane is the same parse).
+        for backend in [Backend::Oxide, Backend::Anydoc] {
+            let mine = structure_engine(Kind::Html, backend, b"").unwrap_err();
+            let conversions = engine_for(Kind::Html, backend).unwrap_err();
+            assert_eq!(mine.to_string(), conversions.to_string());
+        }
+    }
+
+    #[test]
+    fn the_structure_refusal_order_is_pinned() {
+        // resolve → capability → password (EVERY kind) → max_bytes=0 →
+        // engine doors. A pdf call reaches the pdf refusal with an
+        // unexamined password (the F25 trap: the geometry surfaces'
+        // kind!=Pdf guard would let it through); max_bytes=0 never
+        // pre-empts the capability refusal.
+        let options = ConvertOptions {
+            password: Some("pw"),
+            ..Default::default()
+        };
+        let err = document_structure(b"junk".to_vec(), None, Some("pdf"), Backend::Auto, &options)
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot serve pdf"), "{err}");
+        // html: served row, so the password refusal fires (the same for
+        // every kind)
+        let err = document_structure(
+            POLLUTED_HTML.as_bytes().to_vec(),
+            None,
+            Some("html"),
+            Backend::Auto,
+            &options,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "document_structure takes no password: no served format accepts one"
+        );
+        // max_bytes=0 after the capability refusal...
+        let options = ConvertOptions {
+            max_bytes: Some(0),
+            ..Default::default()
+        };
+        let err = document_structure(b"junk".to_vec(), None, Some("pdf"), Backend::Auto, &options)
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot serve pdf"), "{err}");
+        // ...and after the password refusal (F25 fires for every kind)
+        let options = ConvertOptions {
+            password: Some("pw"),
+            ..Default::default()
+        };
+        let err = document_structure(
+            POLLUTED_HTML.as_bytes().to_vec(),
+            None,
+            Some("html"),
+            Backend::Auto,
+            &options,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("takes no password"), "{err}");
+        // max_bytes=0 alone: the probes' exact string
+        let options = ConvertOptions {
+            max_bytes: Some(0),
+            ..Default::default()
+        };
+        let err = document_structure(
+            POLLUTED_HTML.as_bytes().to_vec(),
+            None,
+            Some("html"),
+            Backend::Auto,
+            &options,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "max_bytes must be positive");
+        // (pdf, anydoc): the format-level pdf refusal, never an
+        // anydoc-template message (F8's precedence pin)
+        let err = document_structure(
+            b"junk".to_vec(),
+            None,
+            Some("pdf"),
+            Backend::Anydoc,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot serve pdf"), "{err}");
+        assert!(!err.to_string().contains("backend \"anydoc\""), "{err}");
+        // an OLE workbook under the Excel kind refuses naming xls — from
+        // the probe's own 64 KiB prefix too (the container decision needs
+        // only the 8 magic bytes)
+        let ole = ole_with_stream("Workbook");
+        for backend in [Backend::Auto, Backend::Anydoc] {
+            let err = document_structure(
+                ole.clone(),
+                Some("book.xlsx"),
+                None,
+                backend,
+                &ConvertOptions::default(),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("cannot serve xls"), "{err}");
+        }
+        assert!(matches!(
+            probe_structure_capability(&ole[..8], Some("book.xlsx"), None, Backend::Auto),
+            Err(DocumentError::Convert(_))
+        ));
+    }
+
+    #[test]
+    fn the_structure_probe_refuses_from_the_name_alone() {
+        // format= is trusted and never re-sniffed: the pdf refusal fires
+        // under the GIL from the NAME alone, before any read (the R7
+        // observable's core half; the binding half is the Python no-read
+        // pin). The refused anydoc-only families answer from the name too.
+        for (format, needle) in [
+            ("pdf", "cannot serve pdf"),
+            ("odt", "no structure surface exists for odt"),
+            ("pptx", "not built yet"),
+            ("doc", "converter-internal IR"),
+        ] {
+            let err = probe_structure_capability(b"", None, Some(format), Backend::Auto)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(needle), "{format}: {err}");
+        }
+        // an unresolvable prefix defers (the core's authoritative resolve
+        // is the only truth)
+        assert_eq!(
+            probe_structure_capability(b"", None, None, Backend::Auto).unwrap(),
+            None
+        );
+        // a served row resolves
+        assert_eq!(
+            probe_structure_capability(
+                POLLUTED_HTML.as_bytes(),
+                Some("p.html"),
+                None,
+                Backend::Auto
+            )
+            .unwrap(),
+            Some(Kind::Html)
+        );
+    }
+
+    #[test]
+    fn the_structure_lanes_serve_their_formats() {
+        // html: the collector's nodes, the nine reachable kinds, no
+        // script/style junk node, the link annotation's byte range.
+        let report = structure_of("page.html", POLLUTED_HTML.as_bytes());
+        assert_eq!(report.format, "html");
+        let StructurePayload::Html(html) = report.payload else {
+            panic!("html payload expected");
+        };
+        assert!(!html.entries_truncated);
+        let kinds: std::collections::HashSet<&str> = html.nodes.iter().map(|n| n.kind).collect();
+        // the reachable kinds this fixture reaches (the closed set of
+        // nine is pinned by the payload's own vocabulary and the docs;
+        // the junk variants cannot be emitted at all)
+        for kind in [
+            "heading",
+            "paragraph",
+            "list",
+            "list_item",
+            "table",
+            "group",
+        ] {
+            assert!(kinds.contains(&kind), "missing {kind}: {kinds:?}");
+        }
+        // the Group tree: parents precede children, headings are Group
+        // children carrying the label (the heading tree IS the Group
+        // hierarchy)
+        for (index, node) in html.nodes.iter().enumerate() {
+            if let Some(parent) = node.parent {
+                assert!((parent as usize) < index, "parent {parent} after {index}");
+            }
+        }
+        let heading = html
+            .nodes
+            .iter()
+            .find(|n| n.kind == "heading" && n.text.as_deref() == Some("Real Heading"))
+            .expect("the h1");
+        assert_eq!(heading.level, Some(1));
+        let group_index = html
+            .nodes
+            .iter()
+            .position(|n| n.kind == "group" && n.label.as_deref() == Some("Real Heading"))
+            .expect("the h1's Group");
+        assert_eq!(heading.parent, Some(group_index as u32));
+        let paragraph = html
+            .nodes
+            .iter()
+            .find(|n| n.kind == "paragraph" && n.annotations.iter().any(|a| a.kind == "link"))
+            .expect("the link paragraph");
+        assert_eq!(paragraph.kind, "paragraph");
+        let link = paragraph
+            .annotations
+            .iter()
+            .find(|a| a.kind == "link")
+            .expect("the link annotation");
+        assert_eq!(
+            link.url.as_deref(),
+            Some("https://handbook.example.com/torque")
+        );
+        assert_eq!(
+            paragraph.text.as_deref().unwrap_or_default().as_bytes()
+                [link.start as usize..link.end as usize],
+            *b"field handbook"
+        );
+        // the table grid, verbatim cells
+        let table = html
+            .nodes
+            .iter()
+            .find(|n| n.kind == "table")
+            .expect("the table node");
+        let grid = table.grid.as_ref().unwrap();
+        assert_eq!((grid.rows, grid.cols), (2, 2));
+        assert_eq!(grid.cells[0].content, "Unit");
+        assert!(grid.cells[0].is_header);
+        assert_eq!(grid.cells[2].content, "T-101");
+        assert!(!grid.cells[2].is_header);
+        // NO node whose text carries the script/style junk (the F13
+        // replacement for the tautological MetadataBlock assertion —
+        // RawBlock/MetadataBlock nodes cannot be pushed at all; the junk
+        // must not leak either way)
+        for node in &html.nodes {
+            for junk in ["console.log", "tracking junk", "color: red", "Page Title"] {
+                assert!(
+                    !node.text.as_deref().unwrap_or("").contains(junk),
+                    "junk leaked into node {}",
+                    node.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_html_lane_is_lenient_and_fragment_resolving() {
+        // Malformed html parses with the conversion lane's own recovery —
+        // the structure IS the conversion lane's parse (F28: one parse,
+        // one collector, by construction).
+        let malformed = b"<html><body><h1>unclosed heading<p>text</body>";
+        let report = structure_of("mess.html", malformed);
+        let StructurePayload::Html(html) = report.payload else {
+            panic!("html payload expected");
+        };
+        assert!(
+            html.nodes.iter().any(|n| n.kind == "heading"
+                && n.text.as_deref().unwrap_or("").contains("unclosed heading"))
+        );
+        // A fragment without a name is NOT content-resolvable (the pinned
+        // looks_like_html policy); with format="html" it is served — and
+        // binary bytes named html are html5ever-recovered text (F26's
+        // honest consequence).
+        let fragment = b"<div><p>just a fragment</p></div>";
+        let err = document_structure(
+            fragment.to_vec(),
+            None,
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, DocumentError::UnknownFormat(_)), "{err}");
+        let report = document_structure(
+            fragment.to_vec(),
+            None,
+            Some("html"),
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        let StructurePayload::Html(html) = report.payload else {
+            panic!("html payload expected");
+        };
+        assert!(
+            html.nodes
+                .iter()
+                .any(|n| n.text.as_deref() == Some("just a fragment"))
+        );
+        // Binary bytes named html: the lane's own binary-input refusal
+        // (the structure IS the conversion lane's parse, and the
+        // conversion lane detects binary data and refuses — the honest
+        // consequence of trusted format=, never a fabricated structure
+        // of garbage; the review's F26 premise about html5ever-recovered
+        // garbage did not survive contact with the lane's binary gate).
+        let err = document_structure(
+            write_docx_bytes(),
+            None,
+            Some("html"),
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("html-to-markdown-rs: Invalid input: binary data"),
+            "{err}"
+        );
+        // Non-markup text named html is the lane's own leniency: bare
+        // text parses as text (a no-node structure for tagless text is
+        // the collector's own answer — the document is refused there, the
+        // one shape where `document: None` is honest)
+        let report = document_structure(
+            b"<p>just a paragraph, no document marker</p>".to_vec(),
+            None,
+            Some("html"),
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(report.format, "html");
+        assert!(matches!(report.payload, StructurePayload::Html(_)));
+        // format="docx" on pdf bytes: the office leg's own typed parse
+        // error (trusted format=, never a re-sniff)
+        let err = document_structure(
+            two_page_pdf("a", "b"),
+            None,
+            Some("docx"),
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("office_oxide"), "{err}");
+    }
+
+    #[test]
+    fn the_docx_structure_payload_is_pinned() {
+        let report = structure_of("report.docx", &structure_docx_fixture());
+        assert_eq!(report.format, "docx");
+        let StructurePayload::Docx(docx) = report.payload else {
+            panic!("docx payload expected");
+        };
+        assert_eq!(docx.sections, 2);
+        assert_eq!(docx.section_breaks, [9]);
+        assert_eq!(docx.footnotes, 0);
+        assert_eq!(docx.comments, 0);
+        // the unreadable header part is reported, never skipped silently
+        assert_eq!(docx.unreadable_parts.len(), 1);
+        assert!(docx.unreadable_parts[0].contains("header1.xml"));
+        assert!(!docx.entries_truncated);
+        let blocks = &docx.blocks;
+        assert_eq!(blocks.len(), 10);
+        assert_eq!(blocks[0].section, 0);
+        assert_eq!(blocks[9].section, 1);
+
+        // the heading ladder: style outlineLvl → level 1; direct
+        // outlineLvl 7 → level clamps to 6 with the raw 7 carried
+        assert_eq!(
+            (blocks[0].kind, blocks[0].level, blocks[0].outline_level),
+            ("heading", Some(1), Some(0))
+        );
+        assert_eq!(blocks[0].style_id.as_deref(), Some("Heading1"));
+        assert_eq!(
+            (blocks[1].kind, blocks[1].level, blocks[1].outline_level),
+            ("heading", Some(6), Some(7))
+        );
+        assert_eq!(blocks[1].style_id, None);
+
+        // list membership on the EFFECTIVE properties: the style carries
+        // the numPr ("List Paragraph" style)
+        assert_eq!(blocks[2].kind, "list_item");
+        assert_eq!(blocks[2].num_id, Some(1));
+        assert_eq!(blocks[2].ilvl, Some(0));
+        assert_eq!(blocks[2].list_format.as_deref(), Some("bullet"));
+        assert_eq!(blocks[2].start_number, Some(1));
+        assert_eq!(blocks[2].text, "bulleted through the style");
+
+        // a numbered heading: heading wins, the numPr is information
+        assert_eq!(blocks[3].kind, "heading");
+        assert_eq!(blocks[3].level, Some(2));
+        assert_eq!(blocks[3].num_id, Some(1));
+        assert_eq!(blocks[3].list_format.as_deref(), Some("bullet"));
+
+        // the block-text walk: br → newline, tab → tab, the hidden run
+        // resolved through the style chain and dropped
+        assert_eq!(blocks[4].kind, "paragraph");
+        assert_eq!(blocks[4].text, "before\n\tafter");
+        assert!(!blocks[4].text.contains("hidden text"));
+
+        // the external hyperlink: runs' text, rels-resolved href
+        assert_eq!(blocks[5].links.len(), 1);
+        assert_eq!(blocks[5].links[0].text, "field handbook");
+        assert_eq!(
+            blocks[5].links[0].href.as_deref(),
+            Some("https://handbook.example.com/torque")
+        );
+        assert_eq!(blocks[5].links[0].anchor, None);
+        assert_eq!(blocks[5].text, "field handbook");
+
+        // the picture: rid, ext from the package map, declared extent
+        // ÷ 12700 (1905000 EMU = 150 pt), alt text, inline
+        assert_eq!(blocks[6].images.len(), 1);
+        let image = &blocks[6].images[0];
+        assert_eq!(image.relationship_id, "rId5");
+        assert_eq!(image.file_ext.as_deref(), Some("png"));
+        assert_eq!(image.description.as_deref(), Some("torque chart"));
+        assert_eq!(image.width_pt, Some(150.0));
+        assert_eq!(image.height_pt, Some(100.0));
+        assert!(image.inline);
+        assert!(!image.decorative);
+
+        // the table: grid verbatim, caption = tblCaption, block text ""
+        let table = blocks[7].table.as_ref().unwrap();
+        assert_eq!(blocks[7].kind, "table");
+        assert_eq!(blocks[7].text, "");
+        assert_eq!((table.rows, table.cols), (3, 3));
+        assert_eq!(table.col_widths_twips, [2000, 2000, 2000]);
+        assert_eq!(table.caption.as_deref(), Some("Units"));
+        let cells = &table.cells;
+        assert_eq!(cells.len(), 8);
+        // the gridSpan cell: col 0, col_span 2; the third cell sits at
+        // col 2 (the accumulation, the raw layer's grid_starts walk)
+        assert_eq!((cells[0].row, cells[0].col, cells[0].col_span), (0, 0, 2));
+        assert_eq!(cells[0].text, "wide");
+        assert_eq!((cells[1].row, cells[1].col), (0, 2));
+        // the vMerge pair: the Restart carries the walked row span; the
+        // Continue cell is emitted as its own cell, inside the span
+        assert_eq!((cells[2].row, cells[2].col), (1, 0));
+        assert_eq!(cells[2].row_span, 2);
+        assert_eq!(cells[2].text, "span");
+        assert_eq!((cells[5].row, cells[5].col), (2, 0));
+        assert_eq!(cells[5].row_span, 1);
+        assert_eq!(cells[5].text, "");
+        assert_eq!((cells[6].row, cells[6].col), (2, 1));
+        assert_eq!(cells[6].text, "b2");
+        assert_eq!((cells[7].row, cells[7].col), (2, 2));
+        assert_eq!(cells[7].text, "c2");
+
+        // stable anchors
+        for (index, block) in blocks.iter().enumerate() {
+            assert_eq!(block.index, index);
+        }
+    }
+
+    #[test]
+    fn the_xlsx_structure_payload_is_pinned() {
+        let report = structure_of("book.xlsx", &structure_xlsx_fixture());
+        assert_eq!(report.format, "xlsx");
+        let StructurePayload::Xlsx(xlsx) = report.payload else {
+            panic!("xlsx payload expected");
+        };
+        assert!(!xlsx.date1904);
+        // sheets from the raw layer's own list, kind-filtered: the
+        // chartsheet is a name here, never a mislabeled sheet
+        assert_eq!(
+            xlsx.sheets
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Visible", "Hidden", "VeryHidden"]
+        );
+        assert_eq!(xlsx.chartsheets, ["ChartTab"]);
+        assert_eq!(
+            xlsx.sheets.iter().map(|s| s.state).collect::<Vec<_>>(),
+            ["visible", "hidden", "veryHidden"]
+        );
+        // defined names: verbatim value, the scoped one's sheet resolved
+        assert_eq!(xlsx.defined_names.len(), 2);
+        assert_eq!(xlsx.defined_names[0].name, "GLOB");
+        assert_eq!(xlsx.defined_names[0].value, "Visible!$A$1");
+        assert_eq!(xlsx.defined_names[0].local_sheet_id, None);
+        assert_eq!(xlsx.defined_names[0].local_sheet_name, None);
+        assert_eq!(xlsx.defined_names[1].local_sheet_id, Some(0));
+        assert_eq!(
+            xlsx.defined_names[1].local_sheet_name.as_deref(),
+            Some("Visible")
+        );
+
+        let sheet = &xlsx.sheets[0];
+        // the used range is COMPUTED from the parsed cells (styled-empty
+        // cells included), never the declared dimension: content sits at
+        // D4/D1 past the declared A1:C4
+        assert_eq!(sheet.used_range.as_deref(), Some("A1:D5"));
+        assert_eq!(sheet.declared_dimension.as_deref(), Some("A1:C4"));
+        assert_eq!((sheet.max_row, sheet.max_col), (Some(4), Some(3)));
+        let cells = &sheet.cells;
+        assert_eq!(cells.len(), 9);
+
+        let by_ref = |reference: &str| {
+            cells
+                .iter()
+                .find(|c| c.reference == reference)
+                .unwrap_or_else(|| panic!("{reference}"))
+        };
+        // shared string: dereferenced, full text
+        let a1 = by_ref("A1");
+        assert_eq!(a1.kind, "string");
+        assert_eq!(a1.value, Some(XlsxScalar::Text("unit label".into())));
+        assert_eq!(a1.row, 0);
+        assert_eq!(a1.col, 0);
+        // typed cells, as the file states them — no coercion
+        assert_eq!(by_ref("B1").kind, "number");
+        assert_eq!(by_ref("B1").value, Some(XlsxScalar::Number(3.5)));
+        assert_eq!(by_ref("C1").kind, "boolean");
+        assert_eq!(by_ref("C1").value, Some(XlsxScalar::Bool(true)));
+        assert_eq!(by_ref("B2").kind, "error");
+        assert_eq!(by_ref("B2").value, Some(XlsxScalar::Text("#REF!".into())));
+        // t="d" is the ONLY date shape
+        assert_eq!(by_ref("C2").kind, "date");
+        assert_eq!(
+            by_ref("C2").value,
+            Some(XlsxScalar::Text("2026-01-02".into()))
+        );
+        // a styled-but-empty cell is present (type empty, value None)
+        let d1 = by_ref("D1");
+        assert_eq!(d1.kind, "empty");
+        assert_eq!(d1.value, None);
+        // formulas: text and cached value, both labeled
+        let a2 = by_ref("A2");
+        assert_eq!(a2.formula.as_deref(), Some("SUM(B1:B1)"));
+        assert!(a2.has_cached_value);
+        assert_eq!(a2.value, Some(XlsxScalar::Number(3.5)));
+        // a formula with no cached value
+        let a5 = by_ref("A5");
+        assert_eq!(a5.formula.as_deref(), Some("1+1"));
+        assert!(!a5.has_cached_value);
+        assert_eq!(a5.value, None);
+
+        assert_eq!(sheet.merged_cells, ["A3:B3"]);
+        assert_eq!(sheet.hyperlinks.len(), 2);
+        assert_eq!(sheet.hyperlinks[0].cell_ref, "B1");
+        assert_eq!(
+            sheet.hyperlinks[0].href.as_deref(),
+            Some("https://handbook.example.com/torque")
+        );
+        assert_eq!(sheet.hyperlinks[0].anchor, None);
+        assert_eq!(sheet.hyperlinks[0].tooltip.as_deref(), Some("the guide"));
+        assert_eq!(sheet.hyperlinks[1].cell_ref, "C1");
+        assert_eq!(sheet.hyperlinks[1].href, None);
+        assert_eq!(sheet.hyperlinks[1].anchor.as_deref(), Some("Hidden!A1"));
+
+        // the hidden sheets are present with their states
+        assert_eq!(xlsx.sheets[1].used_range, None);
+        assert_eq!(
+            (xlsx.sheets[1].max_row, xlsx.sheets[1].max_col),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn the_entry_cap_truncates_with_a_marker() {
+        // The cap boundary, measured through the real reader: 199,999
+        // cells fit; exactly 200,000 fit; 200,001 truncates to 200,000
+        // with the marker, the sheets/ranges/metadata intact. A
+        // marshalling bound, never a refusal.
+        let cells = |count: usize| {
+            let rows: Vec<String> = (1..=count)
+                .map(|row| format!("<row r=\"{row}\"><c r=\"A{row}\"><v>{row}</v></c></row>"))
+                .collect();
+            let sheet = format!(
+                "<?xml version=\"1.0\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{}</sheetData></worksheet>",
+                rows.concat()
+            );
+            const M: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+            const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+            let workbook = format!(
+                "<?xml version=\"1.0\"?><workbook xmlns=\"{M}\" xmlns:r=\"{R}\"><sheets>\
+                 <sheet name=\"Big\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"
+            );
+            let workbook_rels = format!(
+                "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                 <Relationship Id=\"rId1\" Type=\"{R}/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+                 <Relationship Id=\"rId2\" Type=\"{R}/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>"
+            );
+            let content_types = "<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/></Types>".to_string();
+            let root_rels = format!(
+                "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                 <Relationship Id=\"rId1\" Type=\"{R}/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+            );
+            zip_of(&[
+                ("[Content_Types].xml", content_types.as_bytes()),
+                ("_rels/.rels", root_rels.as_bytes()),
+                ("xl/workbook.xml", workbook.as_bytes()),
+                ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+                ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+            ])
+        };
+        for (count, expected, truncated) in [
+            (199_999, 199_999, false),
+            (200_000, 200_000, false),
+            (200_001, 200_000, true),
+        ] {
+            let report = structure_of("big.xlsx", &cells(count));
+            let StructurePayload::Xlsx(xlsx) = report.payload else {
+                panic!("xlsx payload expected");
+            };
+            assert_eq!(xlsx.sheets.len(), 1, "{count}");
+            assert_eq!(xlsx.sheets[0].cells.len(), expected, "{count}");
+            assert_eq!(xlsx.entries_truncated, truncated, "{count}");
+            // the metadata stays complete past the cap: the used range is
+            // the FULL computed range even when cells were dropped
+            let sheet = &xlsx.sheets[0];
+            assert_eq!(
+                sheet.used_range.as_deref(),
+                Some(format!("A1:A{count}").as_str()),
+                "{count}"
+            );
+            assert_eq!(
+                (sheet.max_row, sheet.max_col),
+                (Some(count - 1), Some(0)),
+                "{count}"
+            );
+            assert_eq!(sheet.name, "Big");
+        }
+    }
+
+    #[test]
+    fn the_structure_ceiling_and_audit_bind_the_office_leg() {
+        // the office leg's input ceiling: the same message shape as
+        // page_geometry's office leg (the 32 MiB default under None)
+        let big = vec![b'x'; 33 * 1024 * 1024];
+        let err = document_structure(
+            big,
+            Some("big.docx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("input ceiling is 32.0 MiB"),
+            "{err}"
+        );
+        // a zip bomb dies in the audit before the engine parses anything
+        // (the office leg runs the same audit every office lane runs)
+        let bomb = zip_container(&[("word/document.xml", 8, b"x", Some(600 * 1024 * 1024))]);
+        let err = document_structure(
+            bomb,
+            Some("bomb.docx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("decompression limit exceeded"),
+            "{err}"
+        );
     }
 }
