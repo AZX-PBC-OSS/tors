@@ -24,12 +24,14 @@ env:
 jobs:
   pyodide:
     # The wasm leg of the 2026-09 feasibility spike: every pure-Rust core
-    # builds unchanged for wasm32-unknown-emscripten, and the resulting wheel
-    # imports and passes a functional smoke test in Pyodide 314.x under node
-    # (verified locally during the spike). This job re-proves the build on
-    # every push; the wheel is attached as an artifact only; publishing
-    # Pyodide wheels (PEP 783 PyEmscripten tags on PyPI, or the pyodide
-    # package registry) is deliberately out of scope.
+    # builds unchanged for wasm32-unknown-emscripten, and the resulting
+    # wheel was verified during the spike to import and pass a functional
+    # smoke test in Pyodide 314.x under node — verified LOCALLY then; that
+    # smoke test is NOT part of this job. This job builds the wheel and
+    # attaches it as an artifact, nothing more: re-proving the build on
+    # every push, with no import/exec test (publishing Pyodide wheels
+    # (PEP 783 PyEmscripten tags on PyPI, or the pyodide package registry)
+    # is deliberately out of scope, and so is the node-side smoke run).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

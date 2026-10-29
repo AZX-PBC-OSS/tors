@@ -16,8 +16,9 @@
 # GitHub App token (see that workflow's header). Until one is configured, run this via
 # `workflow_dispatch` against the new tag after a release PR merges.
 #
-# Job order is deliberately cheapest-first: wheels-linux (and sdist) run on ubuntu-22.04,
-# by far the cheapest and fastest GitHub-hosted runner. wheels-other (macOS, Windows,
+# Job order is deliberately cheapest-first: wheels-linux runs on ubuntu-24.04
+# (the sdist job is runner-agnostic, ubuntu-latest), by far the cheapest and
+# fastest GitHub-hosted runner. wheels-other (macOS, Windows,
 # both several times the per-minute cost of Linux, and macOS/Windows arm64 runners are
 # scarcer capacity) only starts once every Linux leg has passed, via `needs`. A correctness
 # bug that fails on Linux therefore never burns the expensive runners at all.
@@ -46,7 +47,7 @@ jobs:
             manylinux: musllinux_1_2
           - target: aarch64
             manylinux: musllinux_1_2
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -270,7 +271,7 @@ jobs:
             manylinux: musllinux_1_2
           - target: aarch64
             manylinux: musllinux_1_2
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
