@@ -168,7 +168,10 @@
 /// last, ties among the 0.0 scores by first appearance. `k` is trusted
 /// here as already-validated (`k >= 1`): the
 /// pyo3 layer's job, matching this crate's usual split of caller-facing
-/// validation from the trusted core.
+/// validation from the trusted core. `n_docs` carries a named precondition
+/// of its own (the assert below): every ranked id must be < `n_docs`; it
+/// may be LOOSER than the data (a sparse numbering with a huge table costs
+/// no allocation — the sweep clamps to the data's own max).
 pub fn rank_fuse(
     lists: &[Vec<u32>],
     k: u64,
@@ -186,6 +189,20 @@ pub fn rank_fuse(
         .copied()
         .max()
         .map_or(0, |m| m as usize + 1);
+    // Every dedup index must be < n_docs: the scores/first_seen slots
+    // below are indexed by the data's own ids, so a caller-supplied
+    // n_docs SMALLER than the data is a shape violation, named like
+    // `lsh_candidates`' bands/rows asserts — not a silent clamp (the
+    // pre-fix spelling only min-clamped the loose-LARGER side and
+    // panicked here with the raw index-out-of-bounds message). The
+    // pyo3 binding always satisfies this: its dedup indices are
+    // assigned on first sight, so the data's max index is
+    // ids.len() - 1.
+    assert!(
+        max_index <= n_docs,
+        "every ranked id must be < n_docs ({n_docs}): the data's largest id is {}",
+        max_index.saturating_sub(1)
+    );
     let n_docs = n_docs.min(max_index);
     let mut scores = vec![0.0f64; n_docs];
     let mut first_seen = vec![u32::MAX; n_docs];
@@ -335,6 +352,27 @@ mod tests {
     }
 
     // --- rank_fuse ------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "n_docs")]
+    fn n_docs_below_the_data_is_a_named_contract_violation() {
+        // A caller-supplied n_docs smaller than the data's own ids: the
+        // scores/first_seen slots are indexed by id, so this is a shape
+        // violation, named like lsh_candidates' bands/rows asserts — the
+        // pre-fix spelling defended only the loose-LARGER side and
+        // panicked here with the raw "index out of bounds" message.
+        let _ = rank_fuse(&[vec![5u32]], 60, 1, None);
+    }
+
+    #[test]
+    fn loose_larger_n_docs_stays_correct() {
+        // The other side the min-clamp defends: a loose-LARGER n_docs (a
+        // sparse numbering) neither panics nor emits the unvoted slots.
+        assert_eq!(
+            rank_fuse(&[vec![5u32]], 60, 10_000, None),
+            vec![(5, 1.0 / 61.0)]
+        );
+    }
 
     #[test]
     fn hand_computed_two_list_fusion() {

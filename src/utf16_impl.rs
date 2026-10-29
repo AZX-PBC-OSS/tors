@@ -37,8 +37,6 @@
 //! GIL-hold problem worth solving; a fused decode+normalize+hash twin has no
 //! demonstrated caller need yet, unlike `finalize_utf8`'s.
 
-use std::borrow::Cow;
-
 /// Which byte order to decode with. `Native` sniffs a leading BOM and falls
 /// back to the host's own order when none is present, matching Python's
 /// plain `"utf-16"` codec name; `Little`/`Big` never sniff or strip a BOM,
@@ -218,11 +216,15 @@ fn walk(body: &[u8], little_endian: bool, offset: usize, mut on_event: impl FnMu
 
 /// Strict decoding: the first error encountered (leftmost byte position)
 /// stops the walk and is returned, matching CPython's own single-pass
-/// strict-mode behavior.
+/// strict-mode behavior. The success string is always freshly built and
+/// returned owned — the input is UTF-16 bytes, so no `&str` can ever
+/// alias it; unlike the UTF-8 twin (`decode_impl::decode_strict`) there
+/// is no borrowed lane, which is why the signature is a plain `String`
+/// and not a `Cow`.
 pub fn decode_strict(
     raw: &[u8],
     byteorder: ByteOrder,
-) -> Result<(Cow<'_, str>, &'static str), (DecodeError, &'static str)> {
+) -> Result<(String, &'static str), (DecodeError, &'static str)> {
     let (little_endian, bom_len, encoding) = resolve(raw, byteorder);
     let body = &raw[bom_len..];
     let mut out = String::with_capacity(body.len() / 2);
@@ -239,7 +241,7 @@ pub fn decode_strict(
     });
     match error {
         Some(err) => Err((err, encoding)),
-        None => Ok((Cow::Owned(out), encoding)),
+        None => Ok((out, encoding)),
     }
 }
 
@@ -283,19 +285,19 @@ mod tests {
 
     fn strict(raw: &[u8]) -> Result<String, DecodeError> {
         decode_strict(raw, ByteOrder::Native)
-            .map(|(s, _)| s.into_owned())
+            .map(|(s, _)| s)
             .map_err(|(err, _)| err)
     }
 
     fn strict_le(raw: &[u8]) -> Result<String, DecodeError> {
         decode_strict(raw, ByteOrder::Little)
-            .map(|(s, _)| s.into_owned())
+            .map(|(s, _)| s)
             .map_err(|(err, _)| err)
     }
 
     fn strict_be(raw: &[u8]) -> Result<String, DecodeError> {
         decode_strict(raw, ByteOrder::Big)
-            .map(|(s, _)| s.into_owned())
+            .map(|(s, _)| s)
             .map_err(|(err, _)| err)
     }
 

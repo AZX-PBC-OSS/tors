@@ -1,6 +1,6 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySequence, PySet, PyString};
+use pyo3::types::{PyBool, PyDict, PyList, PySequence, PySet, PyString};
 
 use crate::py::_borrow::MAX_LIST_ITEMS;
 use crate::rank_fusion_impl;
@@ -37,10 +37,19 @@ pub(crate) fn check_k(k: i64) -> PyResult<usize> {
     Ok(k as usize)
 }
 
-/// One graded-relevance value's validation: finite and non-negative
-/// (the standard nDCG gain domain; a negative or non-finite gain would
-/// corrupt the ideal ranking the score normalizes against).
-fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
+/// One graded-relevance value's validation: a NUMBER (`bool` refused —
+/// the house bool-reject convention, `extract_signature`'s pattern:
+/// `True`/`False` are not gains, and the `extract::<f64>` coercion would
+/// launder them to 1.0/0.0), finite and non-negative (the standard nDCG
+/// gain domain; a negative or non-finite gain would corrupt the ideal
+/// ranking the score normalizes against).
+fn check_gain(id: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<f64> {
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "gains values must be numbers, not bool (for {id})"
+        )));
+    }
+    let gain: f64 = value.extract()?;
     if !gain.is_finite() || gain < 0.0 {
         return Err(PyValueError::new_err(format!(
             "gains values must be finite and >= 0, got {gain} for {id}"
@@ -51,9 +60,11 @@ fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
 
 /// `weights`' shared validation: a sequence of positive finite floats,
 /// one per ranked list. A non-sequence (and a bare `str`, the
-/// char-splitting footgun) is a `TypeError`; a non-numeric entry is the
-/// extraction failure's `TypeError` (the `gains` convention); a zero,
-/// negative, NaN, or infinite weight is a `ValueError` (strictly
+/// char-splitting footgun) is a `TypeError`; a non-numeric entry — a
+/// `bool` included (the house bool-reject convention, the `gains`
+/// convention: `True` is not a weight, and the `extract::<f64>` coercion
+/// would launder it to 1.0) — is the extraction failure's `TypeError`; a
+/// zero, negative, NaN, or infinite weight is a `ValueError` (strictly
 /// positive finite, the documented domain — Elasticsearch admits zero,
 /// tors does not: a zero-weight list is almost certainly a miscounted
 /// retriever list, the `k < 1` class); a length mismatch is a
@@ -82,6 +93,11 @@ pub(crate) fn check_weights(
     let mut out: Vec<f64> = Vec::new();
     for handle in seq.try_iter()? {
         let handle = handle?;
+        if handle.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err(
+                "weights values must be numbers, not bool",
+            ));
+        }
         let weight = handle.extract::<f64>()?;
         if !weight.is_finite() || weight <= 0.0 {
             return Err(PyValueError::new_err(format!(
@@ -325,7 +341,7 @@ pub fn ndcg_at_k(
         seen.add(item.as_any())?;
         let gain = match gains {
             Some(gains) => match gains.get_item(item.as_any())? {
-                Some(value) => check_gain(&item, value.extract::<f64>()?)?,
+                Some(value) => check_gain(&item, &value)?,
                 None => {
                     if relevant.contains(item.as_any())? {
                         1.0
@@ -347,7 +363,7 @@ pub fn ndcg_at_k(
     let mut ideal_pool: Vec<f64> = Vec::new();
     if let Some(gains) = gains {
         for (id, value) in gains.iter() {
-            ideal_pool.push(check_gain(&id, value.extract::<f64>()?)?);
+            ideal_pool.push(check_gain(&id, &value)?);
         }
         for id in relevant.try_iter()? {
             let id = id?;

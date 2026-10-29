@@ -1496,8 +1496,10 @@ uncatchable allocator abort). The ceiling applies before the identity contract's
 borrowed return, so a replace whose output would exceed it raises even when the
 net effect would be the identity — a >32 MiB "identity" replace is the
 amplification shape wearing a disguise. The masked spelling below is
-length-preserving and has no ceiling (a short key cannot amplify into a long
-output there).
+character-count-preserving and has no ceiling (its byte size is bounded, not
+preserved — at most 4 × the input's character count, one 4-byte character
+per character at worst — so a short key cannot amplify a bounded input into
+an unbounded output there).
 
 ```python
 tors.replace_many("the cat sat in the catalogue", {"cat": "dog", "catalogue": "library"})
@@ -6729,8 +6731,10 @@ value). Wrong TYPES raise `TypeError`
 or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
 extraction failure), a non-sequence `weights` (a bare `str` included), a
 non-numeric `weights` entry, an unhashable id, whose error is
-Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
-extracts as its `0`/`1` value, the int-extraction convention). For
+Python's own; a `bool` where an int belongs (`k=True`) extracts as its
+`0`/`1` value, the int-extraction convention, while a `bool` in `gains`
+or `weights` is a `TypeError` (a non-numeric value including `bool` is
+refused: `True`/`False` are not gains or weights). For
 nDCG, legal finite gains can be so large the DCG and
 IDCG sums overflow to `+inf`; the score then saturates instead of
 dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite

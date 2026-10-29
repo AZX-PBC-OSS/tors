@@ -448,15 +448,16 @@ class TestRankFuseWeightsRedteam:
         assert not math.isnan(fused[0][1]) and not math.isnan(fused[1][1])
         assert fused[1][1] == pytest.approx(1e-300 / 2.0, rel=1e-12)
 
-    def test_bool_weights_launder_to_their_int_values_then_hit_the_domain(self) -> None:
-        # The int-extraction convention (documented for k=/gains=): True
-        # is 1.0, False is 0.0 — and the 0.0 is then rejected by the
-        # strictly-positive domain, so a bool can never smuggle a
-        # zero-weight list past validation.
-        assert rank_fuse([["a"], ["b"]], weights=[True, True]) == rank_fuse(
-            [["a"], ["b"]], weights=[1.0, 1.0]
-        )
-        with pytest.raises(ValueError, match="weights values must be finite and > 0"):
+    def test_bool_weights_are_refused_not_laundered(self) -> None:
+        # The house bool-reject convention (the extract_signature
+        # pattern): True/False are not numbers here, so a bool weight
+        # raises TypeError instead of laundering to 1.0/0.0 — the old
+        # laundering (True is 1.0, False is 0.0 hitting the
+        # strictly-positive domain error) named the wrong refusal class
+        # for a type error and let a "yes/no" flag pass for a weight.
+        with pytest.raises(TypeError, match="weights values must be numbers, not bool"):
+            rank_fuse([["a"], ["b"]], weights=[True, True])
+        with pytest.raises(TypeError, match="weights values must be numbers, not bool"):
             rank_fuse([["a"], ["b"]], weights=[True, False])
 
     def test_int_weights_are_accepted_as_floats(self) -> None:
@@ -1686,17 +1687,16 @@ class TestFloatNoiseOracle:
         )
         assert ndcg_at_k(["a", "b"], {"a"}, gains={"a": 3, "b": 1}) == 1.0
 
-    def test_bool_gains_launder_to_one_and_zero(self) -> None:
-        # True/False are ints in Python and extract as 1.0/0.0 gains.
-        # The docs call a "non-numeric gains value" a TypeError; bool IS
-        # numeric by that reading, but the laundering itself is
-        # undocumented: pinned here so it cannot drift silently.
-        # FINDING (P2): undocumented behavior, flagged not fixed.
-        assert ndcg_at_k(["a", "b"], set(), gains={"a": True, "b": False}) == 1.0
-        # the relevant doc ranked second: the standard 1/log2(3) score
-        assert ndcg_at_k(["b", "a"], set(), gains={"a": True, "b": False}) == (
-            1.0 / math.log2(3)
-        )
+    def test_bool_gains_are_refused_not_laundered(self) -> None:
+        # The house bool-reject convention (the extract_signature
+        # pattern): True/False are not numbers here, so a bool gain
+        # raises TypeError instead of laundering to 1.0/0.0. The old
+        # laundering was flagged FINDING (P2) as undocumented behavior;
+        # fixed to the convention rather than documented.
+        with pytest.raises(TypeError, match="gains values must be numbers, not bool"):
+            ndcg_at_k(["a", "b"], set(), gains={"a": True, "b": False})
+        with pytest.raises(TypeError, match="gains values must be numbers, not bool"):
+            ndcg_at_k(["a", "b"], {"a"}, gains={"a": True})
 
     def test_ideal_tie_order_can_never_move_the_score(self) -> None:
         # Equal gains are bitwise-equal f64 values, so any tie order in

@@ -1493,7 +1493,10 @@ def reference_minhash_signature(
 # The two literature engines the minhash family gained, transcribed from the
 # same pinned contracts src/minhash_impl.rs documents. Both ride the same
 # draw primitive the SplitMix64 oracle above spells (a uniform in (0, 1) from
-# the top 53 bits, centered by +0.5 so both endpoints stay unreachable), and
+# the top 53 bits, centered by +0.5 so both endpoints stay unreachable -- the
+# one unrepresentable lattice point, the top-53-bits-all-ones tie, snapped to
+# the largest float below 1.0 exactly as the Rust uniform_open_from_draw
+# snaps it), and
 # both key their per-element streams through the crate's one XXH64 contract
 # (the length-prefixed little-endian frame, here over u64 words).
 
@@ -1508,9 +1511,16 @@ def _uniform_open(state: int) -> tuple[int, float]:
     """One uniform in (0, 1) from the SplitMix64 chain: the top 53 bits of
     the draw scaled by 2^-53 and centered by +0.5 half-ulp, so the value is
     strictly between the endpoints (the property the logarithmic draws
-    need)."""
+    need). The one draw whose centered value is not representable -- the
+    top-53-bits-all-ones tie, exact value 1 - 2**-54, which IEEE
+    ties-to-even rounds up to 1.0 (where the logarithmic draws are
+    infinite) -- snaps to the largest float below 1.0, the same snap
+    src/minhash_impl.rs's uniform_open_from_draw makes."""
     state, z = _splitmix64(state)
-    return state, ((z >> 11) + 0.5) * 2.0**-53
+    u = ((z >> 11) + 0.5) * 2.0**-53
+    if u >= 1.0:
+        u = 1.0 - 2.0**-53
+    return state, u
 
 
 def _exponential_open(state: int) -> tuple[int, float]:
