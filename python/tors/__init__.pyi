@@ -1622,7 +1622,9 @@ def chunk_overlap_cost(overlap: float) -> float: ...
 # boundary crosses anything, vacuously) and cohesion 0.0 (no
 # sentence-chunk pair exists, the conservative 0/0 pin). A span out of
 # text's range or with start > end raises ValueError; tau < 0 raises
-# ValueError.
+# ValueError. The chunks walk is capped at 2,000,000 spans (the
+# documents-scale bound, sized for the chunk family's own output; past
+# it ValueError).
 #
 # GIL note: the chunks walk and the tau validation under the GIL, the
 # whole segment/shingle/score pass under one py.detach; the residue is a

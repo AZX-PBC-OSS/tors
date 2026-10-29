@@ -130,12 +130,16 @@ pub(crate) fn borrow_dict_pairs<R>(
 /// `borrow_str_sequence` discipline, `src/py/charset.rs`
 /// MAX_BATCH_ITEMS — never trust a reported size, walk under a cap).
 /// One order of magnitude looser than the honest population any current
-/// caller's parameter carries (`scrub_pii`'s closed rule/family sets,
-/// `chunk_hierarchical`'s separator hierarchy), so a legitimate call is
-/// never near it: anything past 100_000 is not a miscounted batch, it
-/// is the bomb itself. The message is deliberately generic (no cap
-/// value): the bound is a DoS backstop, not a contract to advertise to
-/// sequence authors.
+/// caller's config parameter carries (`scrub_pii`'s closed rule/family
+/// sets, `chunk_hierarchical`'s separator hierarchy), so a legitimate
+/// call is never near it: anything past 100_000 is not a miscounted
+/// batch, it is the bomb itself. The one DATA-scale parameter —
+/// `chunk_quality`'s `chunks=`, the chunk family's own output fed back
+/// in — walks through [`bounded_str_list_capped`] at
+/// [`MAX_QUALITY_SPANS`] instead, the config-list cap applied to it
+/// having refused the family's own document-scale output. The message
+/// is deliberately generic (no cap value): the bound is a DoS backstop,
+/// not a contract to advertise to sequence authors.
 pub(crate) const MAX_LIST_ITEMS: usize = 100_000;
 
 /// The bounded manual list walk for `list`-taking bindings whose
@@ -181,6 +185,24 @@ pub(crate) fn bounded_str_list(
     function: &str,
     param: &str,
     items: &Bound<'_, PyAny>,
+    push: impl FnMut(&Bound<'_, PyAny>) -> PyResult<()>,
+) -> PyResult<()> {
+    bounded_str_list_capped(function, param, items, MAX_LIST_ITEMS, push)
+}
+
+/// [`bounded_str_list`] with the call site's own cap. The default walk's
+/// [`MAX_LIST_ITEMS`] is sized for caller-typed CONFIG lists (closed
+/// rule/separator sets); the one parameter whose honest population is
+/// DATA-scale — `chunk_quality`'s `chunks=`, the chunk family's own
+/// output fed back in, one span per chunk of a MiB-scale document —
+/// calls through here with [`MAX_QUALITY_SPANS`] instead. The cap check
+/// (and the message) are otherwise byte-identical, so the walk stays one
+/// shape and the DoS-class pins hold at every site.
+pub(crate) fn bounded_str_list_capped(
+    function: &str,
+    param: &str,
+    items: &Bound<'_, PyAny>,
+    max_items: usize,
     mut push: impl FnMut(&Bound<'_, PyAny>) -> PyResult<()>,
 ) -> PyResult<()> {
     if items.is_instance_of::<PyString>() {
@@ -194,7 +216,7 @@ pub(crate) fn bounded_str_list(
         let handle = handle?;
         push(&handle)?;
         count += 1;
-        if count > MAX_LIST_ITEMS {
+        if count > max_items {
             return Err(PyValueError::new_err(format!(
                 "{function}() {param} sequence yielded too many items: refusing an unbounded batch"
             )));
@@ -202,6 +224,30 @@ pub(crate) fn bounded_str_list(
     }
     Ok(())
 }
+
+/// The `chunks=` walk cap for `chunk_quality` alone: the documents-scale
+/// bound (2,000,000 spans — twenty times the config-list cap, enough for
+/// a ~90 MiB document at the chunk family's ~45-codepoint minimum chunk
+/// size), replacing [`MAX_LIST_ITEMS`] at this one call site.
+///
+/// WHY the cap is raised here and kept generic elsewhere: the #112 cap
+/// exists to stop a lying-`__len__` `Sequence` from being materialized
+/// by a `Vec`-typed parameter — a DoS class the manual walk already
+/// avoids by construction (it never reads `__len__`, it reserves nothing
+/// up front, memory tracks the real items one push at a time). For a
+/// config list, anything past 100_000 items IS the bomb (no legitimate
+/// call carries that many rules); for `chunks=` the honest population is
+/// the chunk family's own output at document scale — the perf docs
+/// target 12 MiB documents (~120k+ spans), and a 9.9 MB document at a
+/// 50-codepoint budget is 220,000 spans, which the config-list cap
+/// refused (the family's own scored surface rejecting the family's own
+/// output). The spans Vec is 16 B/entry, so 2,000,000 spans is a ~32 MB
+/// ceiling on the caller's already-materialized list — the cap stays a
+/// backstop (a runaway iterator still aborts, catchably), not a new
+/// way to OOM. Documented at the `chunk_quality` docstring and
+/// docs/api.md; the message stays generic, the same refusal shape every
+/// site pins.
+pub(crate) const MAX_QUALITY_SPANS: usize = 2_000_000;
 
 /// The closed `[0.0, 1.0]` interval check shared by `is_grounded`'s
 /// `threshold` and `get_close_matches`' `cutoff`. The two call sites'
