@@ -38,7 +38,7 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | crate | version | license | role |
 |---|---|---|---|
 | pyo3 | 0.29.2 | MIT OR Apache-2.0 | the CPython extension layer (abi3-py310) |
-| unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | NFC/NFD/NFKC/NFKD tables (Unicode 16.0.0) |
+| unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | NFC/NFD/NFKC/NFKD tables (Unicode 16.0.0); HELD at 0.1.25 `--precise` in all three locks (#215): 0.1.26 ships UCD 17.0.0's tables, which breaks tests/test_parity.py's residual budget until its `_TORS_UCD_MAJOR` moves with the bump (Cargo.toml's seal comment has the lift condition; dependabot ignores the crate on every cargo lane) |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | UAX #29 grapheme/word tables (Unicode 17.0.0) |
 | sha2 | 0.11.0 | MIT OR Apache-2.0 | finalize's and content_hash's SHA-256, and (with the rest of the RustCrypto family below) the one-shot hashing surface's sha256/sha512 engines and hmac's inner hash |
 | const-hex | 1.19.1 | MIT OR Apache-2.0 | digest hex encoding (`finalize`/`finalize_utf8`, `merkle_root`/`merkle_diff`); no longer in the random family — `random_hex` char-samples its output since the length-first refactor (see `random_impl.rs`) |
