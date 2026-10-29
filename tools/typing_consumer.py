@@ -11,6 +11,7 @@ checker cannot see a default's value)."""
 from __future__ import annotations
 
 import tors
+import tors.documents
 
 normalized: str = tors.normalize("line one  \n\n\n\nline two\r\n")
 assert normalized == "line one\n\nline two"
@@ -53,3 +54,13 @@ assert value == {"count": 12}
 assert actions[0]["action"] == "coerce"
 assert actions[0]["from"] == "12"
 assert actions[0]["to"] == 12
+
+# The documents stubs (python/tors/documents/*.pyi) ride the same gate:
+# the import above keeps pyright resolving them from the consumer side
+# (pyrightconfig.json's include names the stub files themselves), and the
+# calls exercise the shim's typed surface the way an integrator spells it.
+sniffed: tors.documents.Format | None = tors.documents.sniff(b"%PDF-1.4\n")
+assert sniffed == "pdf"
+
+backend: tors.documents.Backend = tors.documents.Backend.OXIDE
+assert backend == "oxide"
