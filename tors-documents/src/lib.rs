@@ -930,8 +930,11 @@ fn probe_capability_refusal(
 /// layer — a section declaring only margins is `None`, never a
 /// fabricated Letter); pptx → one per slide (the raw deck-wide slide
 /// size, EMU ÷ 12700.0 in float, `None` everywhere when undeclared);
-/// xlsx → one per worksheet, all `None` (a worksheet is an unbounded
-/// grid, not a page); legacy doc/xls/ppt → all `None` at the converter's
+/// xlsx → one per WORKSHEET, all `None` (a worksheet is an unbounded
+/// grid, not a page; a chartsheet or dialog tab is NOT a unit — the raw
+/// layer's kind filter, the structure surface's sheet list's own rule:
+/// the surfaces agree on the same workbook, pre-fix they counted apart);
+/// legacy doc/xls/ppt → all `None` at the converter's
 /// section count; html/csv/rtf/epub/odt/ods/odp → exactly one entry,
 /// `None` (unit = whole document, single-flow — never `[]`). `[]` is
 /// reachable exactly when the resolved unit count is zero (a zero-page
@@ -1262,7 +1265,8 @@ impl PageGeometry {
 /// The unit and length are a documented function of the resolved format —
 /// the GEOMETRY capability table applies to this surface IDENTICALLY:
 /// pdf → one entry per page (or the normalized pages= selection's), docx
-/// → one per section, pptx → one per slide, xlsx → one per worksheet,
+/// → one per section, pptx → one per slide, xlsx → one per WORKSHEET
+/// (a chartsheet is not a unit — the structure surface's own filter),
 /// legacy doc/xls/ppt → one per converter section — every office row
 /// carrying its declared geometry with EMPTY spans/lines/images (no
 /// office engine exposes text/image boxes: PDF-only for layout), and

@@ -2111,13 +2111,23 @@ fn office_geometry(bytes: Vec<u8>, kind: Kind) -> Result<Vec<Option<PageGeometry
         // XLSX (the ZIP container): all-None — a worksheet is an
         // unbounded grid, not a page, and the IR's default substitution
         // makes Some untrustworthy anyway. The count is the RAW worksheet
-        // layer's (all sheets, hidden included), not the IR's
-        // worksheet+Charts count.
+        // layer's WORKSHEETS (SheetKind::Worksheet | Macro — the
+        // structure surface's own filter: chartsheets and dialogs are
+        // kind-tagged entries INSIDE `worksheets` in 0.1.15 and are NOT
+        // geometry units; the geometry surfaces' "one per worksheet" law
+        // and the structure surface's sheet list must AGREE — pre-fix
+        // they counted apart, 4 vs 3 on a workbook with a chartsheet).
         Kind::Excel => {
+            use office_oxide::ir::SheetKind;
             let raw = doc
                 .as_xlsx()
                 .ok_or_else(|| Convert("office_oxide: the xlsx parse lost its raw layer".into()))?;
-            Ok(vec![None; raw.worksheets.len()])
+            let count = raw
+                .worksheets
+                .iter()
+                .filter(|ws| matches!(ws.kind, SheetKind::Worksheet | SheetKind::Macro))
+                .count();
+            Ok(vec![None; count])
         }
         // unreachable by construction: every office kind is covered above
         // (the guarded legacy arm took the OLE-container Excel case).

@@ -8603,7 +8603,10 @@ def page_geometry(
 ```
 
 The declared-box geometry probe: one entry per unit of the resolved format —
-PDF pages, docx sections, pptx slides, xlsx worksheets, legacy
+PDF pages, docx sections, pptx slides, xlsx worksheets (the raw layer's
+kind filter: a chartsheet or dialog tab is NOT a unit — the same filter
+the structure surface's sheet list applies, so the surfaces agree on the
+same workbook), legacy
 doc/xls/ppt sections — `None` where that unit declares no box, `[]` only for
 zero units. Each `Some` entry is a `PageGeometry` (below): the render extent
 in points with the axes swapped for a 90/270 PDF rotation (the turn already

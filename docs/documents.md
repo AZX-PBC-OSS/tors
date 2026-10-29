@@ -325,6 +325,12 @@ geometry at all", and the two deliberately disagree:
 | doc / xls / ppt | section | section count | office_oxide (IR count) | `ValueError` |
 | html / csv / tsv / rtf / epub / odt / ods / odp | document | exactly 1 (`[None]`) | no engine runs | the same `[None]` — nothing to refuse |
 
+The worksheet count is the raw layer's kind-filtered WORKSHEETS
+(`SheetKind::Worksheet | Macro`): a chartsheet or dialog tab is not a
+unit — the same filter the structure surface's sheet list applies, so
+`page_geometry`/`page_layout` and `document_structure` agree on the same
+workbook (a chartsheet-bearing workbook answers 3 and 3, pre-fix 4 and 3).
+
 Office sizes are honest per unit: docx sections read the RAW declared size
 (twips ÷ 20 — a margins-only section is `None`, never a fabricated Letter),
 pptx the raw deck-wide slide size (EMU ÷ 12700.0, `None` everywhere when

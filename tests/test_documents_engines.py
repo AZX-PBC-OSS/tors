@@ -2608,6 +2608,32 @@ class TestPageGeometry:
         _, markdown = to_markdown(data=generate_xlsx_chart(), backend="oxide")
         assert "Units per quarter" in markdown
 
+    def test_a_chartsheet_is_not_a_geometry_unit(self) -> None:
+        """The chartsheet unit law (the finding: office_geometry counted
+        raw.worksheets.len() — Chart|Dialog kinds included in 0.1.15 —
+        while structure_xlsx splits them out, so one workbook answered
+        page_geometry 4 vs document_structure 3). A chartsheet is not a
+        unit: the geometry surfaces (page_geometry, page_layout, and the
+        other office-lane siblings) count WORKSHEETS — the structure
+        surface's own filter — and the counts AGREE on the same
+        workbook."""
+        from documents import generate_xlsx_structure
+
+        geometry = page_geometry(data=generate_xlsx_structure())
+        layout = page_layout(data=generate_xlsx_structure())
+        structure = document_structure(data=generate_xlsx_structure())
+        # 3 worksheets + 1 chartsheet: the geometry unit count is 3
+        assert len(geometry) == 3
+        assert all(entry is not None and entry.geometry is None for entry in layout)
+        assert len(layout) == 3
+        # ...and the structure surface's served-sheet list agrees
+        assert len(structure.payload.sheets) == 3
+        assert structure.payload.chartsheets == ["ChartTab"]
+        assert len(structure.payload.sheets) == len(geometry), (
+            "the surfaces must count the same units: worksheets, never "
+            "chartsheets"
+        )
+
     def test_the_legacy_trio_fixtures_answer_all_none_at_the_ir_count(
         self,
     ) -> None:
