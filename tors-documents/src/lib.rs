@@ -18,6 +18,15 @@
 //! - [`pdf_page_count`]: the page tree and nothing else
 //! - [`pdf_classify`]: the cheap text-vs-image preflight (which pages are
 //!   image-only)
+//! - [`page_geometry`]: every unit's declared render box — PDF pages, the
+//!   office families' sections/slides/worksheets, the single-flow
+//!   formats' one `[None]` — the cheap geometry probe the payload shares
+//!   with [`page_layout`]'s per-page boxes (the native
+//!   [`PageGeometry`] pyclass is that surface's entry type too)
+//! - [`page_layout`]: the combined per-unit probe — geometry plus, for
+//!   PDF pages, text spans/lines (words nested) and image boxes, all in
+//!   the page's declared render space, one transform owned here, one
+//!   open per call (`pages=` subsets like the conversion pair)
 //!
 //! GIL model (the crate-wide discipline, applied per function): the
 //! argument borrow of the path string plus argument validation happen
@@ -387,6 +396,928 @@ pub fn pdf_page_count(
         tors::pdf_impl::page_count(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
     })
     .map_err(pdf_lane_error)
+}
+
+/// The `backend="anydoc"` capability probe's GIL-side half
+/// (`page_geometry`'s only pre-detach work beyond argument parsing):
+/// resolve the format as far as it resolves WITHOUT the authoritative
+/// read — an explicit `format=` decides alone, the `data=` lane sniffs
+/// its own resident bytes, the `path=` lane reads the same bounded 64
+/// KiB prefix the two-phase read's first phase reads — and return the
+/// geometry capability refusal when the probed row is one anydoc cannot
+/// serve (the pdf row, the office row; the refusal names the container:
+/// an OLE workbook says `xls`).
+///
+/// `None` = the format did not resolve (defer to the core's
+/// authoritative resolve, post-read) or the row serves the backend. The
+/// path lane's IO failures defer the same way — the detached read
+/// re-runs every gate and produces the real `OSError`/refusal, so a
+/// missing file stays an `OSError` and never a swallowed decision. The
+/// FIFO/device gate runs BEFORE the open: open(2) on a no-writer FIFO
+/// blocks, and this probe runs under the GIL, where that block is
+/// unreclaimable.
+fn probe_capability_refusal(
+    source: &Source<'_>,
+    format: Option<&str>,
+    backend: Backend,
+) -> Option<DocumentError> {
+    let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
+        Source::Data(bytes) => {
+            documents_impl::probe_geometry_capability(bytes, None, format, backend)
+        }
+        Source::Path(path) => {
+            let gated = std::fs::metadata(path)
+                .map_err(|_| ())
+                .and_then(|meta| refuse_non_regular(path, meta.file_type()).map_err(|_| ()));
+            if gated.is_err() {
+                return None;
+            }
+            let mut file = std::fs::File::open(path).ok()?;
+            let (prefix, _over) =
+                documents_impl::read_bounded_into(&mut file, Vec::new(), SNIFF_PREFIX).ok()?;
+            documents_impl::probe_geometry_capability(&prefix, path.to_str(), format, backend)
+        }
+    };
+    probed.err()
+}
+
+/// `tors.documents.page_geometry(path, data=None, format=None,
+/// password=None, backend=None, max_bytes=None)
+/// -> list[PageGeometry | None]` (or `page_geometry(data=...)`): the
+/// declared-box geometry probe — one entry per unit of the resolved
+/// format, `None` where that unit declares no geometry.
+///
+/// The entry, per unit, in points: `width_pt`/`height_pt` (the render
+/// extent — for a PDF page the visible box's extent with the axes
+/// swapped for a 90/270 rotation, the turn already applied), `rotation`
+/// (the PDF engine-normalized `/Rotate` ∈ {0, 90, 180, 270}, a
+/// non-right-angle declaration reporting 0; office units always 0), and
+/// `crop` (a PDF page's declared CropBox REDUCED TO THE MEDIABOX — the
+/// effective crop, the intersection the engine's visible box stands on —
+/// normalized corners, the unrotated source frame; provenance only,
+/// never re-applied; `None` unless a CropBox is declared AND it actually
+/// crops). Office entries always carry `rotation = 0`, `crop = None`.
+///
+/// The unit and length are a documented function of the resolved format:
+/// pdf → one entry per page (the page count); docx → one per section
+/// (the converter's section count, sizes read from the RAW document
+/// layer — a section declaring only margins is `None`, never a
+/// fabricated Letter); pptx → one per slide (the raw deck-wide slide
+/// size, EMU ÷ 12700.0 in float, `None` everywhere when undeclared);
+/// xlsx → one per worksheet, all `None` (a worksheet is an unbounded
+/// grid, not a page); legacy doc/xls/ppt → all `None` at the converter's
+/// section count; html/csv/rtf/epub/odt/ods/odp → exactly one entry,
+/// `None` (unit = whole document, single-flow — never `[]`). `[]` is
+/// reachable exactly when the resolved unit count is zero (a zero-page
+/// PDF, a zero-slide deck). A per-unit box read that fails on an index
+/// the length rule reported is a `None` entry, its siblings intact.
+///
+/// `backend` names the engine lane: `"auto"` (the default) and `"oxide"`
+/// are IDENTICAL on this surface for every format — the geometry lane is
+/// a property of the format, not a choice (a documented divergence from
+/// `Backend.AUTO`'s conversion contract). `"anydoc"` is refused on the
+/// formats whose geometry anydoc structurally lacks (pdf and the office
+/// families) — a format-aware capability `ValueError` raised ahead of
+/// every other refusal; the no-geometry row runs no engine at all, so
+/// every backend (anydoc included) gets the same `[None]` (another
+/// documented divergence from conversion routing's unsupported-pair
+/// errors: there is nothing to refuse and nothing is fallen back).
+///
+/// `format` names the format explicitly (extension spelling, no dot,
+/// case-insensitive; `None` sniffs it from the content markers, with the
+/// path's extension as the last resort) — the explicit name wins over
+/// the sniff wins over the extension, `convert()`'s precedence, so a
+/// `data=` call can name its format with no file to consult.
+///
+/// `password` unlocks an encrypted PDF (the PDF kinds only: a password
+/// on any other format is a `ValueError`, never a silently-ignored
+/// argument). Without one, an encrypted PDF fails closed (`ValueError`);
+/// owner-password-only files authenticate with the empty password and
+/// read normally. An encrypted OOXML package is a typed `ValueError`
+/// from the office parse — never `None`/`[]`, never a password prompt.
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`):
+/// an explicit budget binds pre-read (the `path=`'s stat, the `data=`
+/// length) exactly as on every other entry point, and `None` keeps the
+/// 32 MiB default ceiling as the OFFICE leg's post-read check (the
+/// office parse amplifies its container into resident memory) — the pdf
+/// row and the no-geometry row carry no default ceiling on this surface
+/// (the pdf lane's own limits govern; no engine runs on the no-geometry
+/// row), the read bounded only by the finite 512 MiB backstop. Zero is
+/// refused as the nonsense it is — but CORE-side, sequenced (§6) after
+/// the capability and password-kind refusals, never pre-empting them the
+/// way the other surfaces' binding-side parse does.
+///
+/// With an explicit `format=` naming a no-geometry format
+/// (html/csv/rtf/epub/odt/ods/odp), the answer is format-determined —
+/// `[None]` — and the file is never read: the regular-file gates still
+/// run (a missing path is the same `OSError`, a FIFO the same refusal),
+/// but the bytes are consulted by nobody.
+///
+/// Errors: `OSError` for a missing/unreadable file; `ValueError` for
+/// bytes that resolve to no format, an unknown `format=` name, a bad
+/// backend name, a password on a non-PDF, an over-budget input, a
+/// malformed/encrypted document, or an office container that will not
+/// parse — the pinned §6 order: the format resolves first (the
+/// capability refusal names it, so it cannot precede resolve), then the
+/// capability refusal (under the GIL, before the detach), then the
+/// password-kind refusal, then the max_bytes refusals (zero's included),
+/// then the engine's own encrypted doors.
+///
+/// GIL model: the argument marshalling under the GIL, plus — on
+/// `backend="anydoc"` only — a bounded 64 KiB prefix read that resolves
+/// the format so the capability refusal can fire before the detach (the
+/// sibling PDF probes' ordering, which this surface's format-aware
+/// refusal needs a resolved format to keep); the whole
+/// read+resolve+geometry pass under one `py.detach`, then the entry-list
+/// marshalling (O(units): one small native object per `Some` entry).
+/// ⚠ A malformed PDF can crash the process (uncatchable native stack
+/// exhaustion in the pdf_oxide engine): sandbox untrusted PDFs
+/// (docs/documents.md, SECURITY.md).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    format = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
+pub fn page_geometry(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    format: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<Option<PageGeometry>>> {
+    let source = parse_source(path, data, "page_geometry")?;
+    let format = parse_format(format)?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    // The capability refusal fires HERE — under the GIL, before the
+    // detach and before any byte of the document is read — exactly where
+    // the four PDF-only siblings fire theirs. They can name their format
+    // without resolving (PDF-only by construction); this surface's
+    // refusal is format-aware, so the format resolves first (the helper
+    // below). When even the prefix cannot resolve the format, the
+    // refusal defers to the core's authoritative resolve — §6's
+    // resolve-first clause: a capability refusal cannot name a format it
+    // has not resolved.
+    if backend == Backend::Anydoc
+        && let Some(refusal) = probe_capability_refusal(&source, format, backend)
+    {
+        return Err(document_error(py, refusal)?);
+    }
+    // The zero value threads through (see `parse_max_bytes_on`): the
+    // core's sequenced check is this surface's zero refusal.
+    let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    let entries = match py.detach(move || {
+        let (bytes, hint) = source
+            .into_geometry_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
+        documents_impl::page_geometry(
+            bytes,
+            hint.as_deref(),
+            format,
+            backend,
+            &documents_impl::ConvertOptions {
+                password: password.as_deref(),
+                max_bytes,
+            },
+        )
+    }) {
+        Ok(entries) => entries,
+        Err(err) => return Err(document_error(py, err)?),
+    };
+    // O(units) of native-object construction, post-detach (the
+    // PdfClassification precedent's residue class, one pyclass per entry).
+    Ok(entries
+        .into_iter()
+        .map(|entry| entry.map(|geometry| PageGeometry { inner: geometry }))
+        .collect())
+}
+
+/// One `page_geometry` entry: a unit's declared render box, in points —
+/// the native pyclass the probe returns per page/section/slide/worksheet.
+///
+/// Deliberate deviation from the `PdfClassification` wrapper precedent:
+/// this class is exposed DIRECTLY (no Python wrapper view around it).
+/// The wrapper pattern exists to add typing the native layer lacks —
+/// `PdfClassification` re-types verdict strings as `PageKind` members —
+/// while a geometry entry carries nothing to re-type: the fields are
+/// floats, an int, and a tuple-or-None, exactly as returned. §12 item 2
+/// resolved for native + Rust-side `__eq__`: comparisons are structural
+/// (`==` on two entries compares the four fields; lists of them compare
+/// elementwise), so `page_geometry(path) == page_geometry(path,
+/// backend="oxide")` is a plain list equality — the property the tests
+/// pin.
+#[pyclass]
+pub struct PageGeometry {
+    inner: documents_impl::PageGeometry,
+}
+
+/// The layout classes' shared repr shapes: each class's own Python shape,
+/// never the Rust Debug of the inner structs (`LayoutSpan { … }` is not a
+/// Python shape; a repr is surface). `PageLayout`'s repr nests these, so
+/// the shapes live once and every class prints the way its own `__repr__`
+/// prints standalone.
+fn page_geometry_repr(geometry: &documents_impl::PageGeometry) -> String {
+    let crop = match geometry.crop {
+        Some((x0, y0, x1, y1)) => format!("({x0:?}, {y0:?}, {x1:?}, {y1:?})"),
+        None => "None".to_string(),
+    };
+    format!(
+        "PageGeometry(width_pt={:?}, height_pt={:?}, rotation={}, crop={})",
+        geometry.width_pt, geometry.height_pt, geometry.rotation, crop
+    )
+}
+
+fn text_span_repr(span: &tors::pdf_impl::LayoutSpan) -> String {
+    // the bools spell Python's `True`/`False`, not Rust's `false`
+    let py_bool = |value: bool| if value { "True" } else { "False" };
+    format!(
+        "TextSpan(text={:?}, bbox={:?}, font_size={:?}, font_name={:?}, \
+         is_bold={}, is_italic={}, rotation_degrees={:?}, is_artifact={})",
+        span.text,
+        span.bbox,
+        span.font_size,
+        span.font_name,
+        py_bool(span.is_bold),
+        py_bool(span.is_italic),
+        span.rotation_degrees,
+        py_bool(span.is_artifact)
+    )
+}
+
+fn text_line_repr(line: &tors::pdf_impl::LayoutLine) -> String {
+    // the words as (text, bbox) pairs — the Word getter's own element shape
+    let words = line
+        .words
+        .iter()
+        .map(|w| format!("({:?}, {:?})", w.text, w.bbox))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "TextLine(text={:?}, bbox={:?}, words=[{}])",
+        line.text, line.bbox, words
+    )
+}
+
+fn image_box_repr(image: &tors::pdf_impl::LayoutImage) -> String {
+    format!(
+        "ImageBox(bbox={:?}, width_px={}, height_px={}, rotation_degrees={:?}, paint_order={})",
+        image.bbox, image.width_px, image.height_px, image.rotation_degrees, image.paint_order
+    )
+}
+
+#[pymethods]
+impl PageGeometry {
+    /// The unit's render width in points (positive, finite; the axes
+    /// swapped for a 90/270 PDF rotation).
+    #[getter]
+    fn width_pt(&self) -> f32 {
+        self.inner.width_pt
+    }
+
+    /// The unit's render height in points (the same law).
+    #[getter]
+    fn height_pt(&self) -> f32 {
+        self.inner.height_pt
+    }
+
+    /// The declared rotation, engine-normalized: {0, 90, 180, 270} on the
+    /// PDF lane (a non-right-angle `/Rotate` reports 0), always 0 on the
+    /// office lanes.
+    #[getter]
+    fn rotation(&self) -> i32 {
+        self.inner.rotation
+    }
+
+    /// The PDF page's declared CropBox reduced to the MediaBox (the
+    /// effective crop: the intersection the engine's visible box stands
+    /// on), normalized corners, the unrotated source frame, points —
+    /// `Some` only when a CropBox is declared AND it actually crops;
+    /// provenance for the extent, never re-applied. `None` on every
+    /// office lane.
+    #[getter]
+    fn crop(&self) -> Option<(f32, f32, f32, f32)> {
+        self.inner.crop
+    }
+
+    /// Structural equality: two entries are equal exactly when their four
+    /// fields are (an entry against any other type is `NotImplemented`,
+    /// Python's own protocol).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        page_geometry_repr(&self.inner)
+    }
+}
+
+/// `tors.documents.page_layout(path, data=None, format=None,
+/// password=None, backend=None, pages=None, max_bytes=None)
+/// -> list[PageLayout]` (or `page_layout(data=...)`): the layout probe —
+/// per unit of the resolved format's geometry lane, the unit's geometry
+/// plus, for PDF pages, the page's text spans, text lines, and image
+/// boxes, all in the page's declared render space, from ONE open.
+///
+/// The coordinate space (every box-bearing class here states it):
+/// "points, bottom-left origin of the page's render space; y is the
+/// box's bottom edge; for text the bottom edge is the glyph baseline and
+/// the box extends one font-size upward (em-box; descenders may extend
+/// below). Boxes are unclipped; the page box is the consumer's clip."
+/// The page's render space is the visible box's (the CropBox ∩ MediaBox
+/// region a reader displays) with the page's /Rotate applied — the same
+/// frame `page_geometry`'s width/height declare. One transform owns the
+/// mapping (the engine's raw y-up boxes translated off the visible-box
+/// origin, then rotated 0=identity/90/180/270; the engine's own
+/// pre-mapped spans are mapped back to raw first and carried through the
+/// same rule; image boxes are always raw and take the rule directly), so
+/// no consumer ever re-implements it.
+///
+/// The entries: `page_index` (0-based, mandatory — the `pages=`
+/// normalization reorders and this is what maps an entry back to its
+/// page), `format` (the resolved format's vocabulary name — the
+/// `to_markdown` spelling: the provenance marker that tells you why the
+/// layout lists may be empty, the office row vs a blank/scanned PDF
+/// page), `geometry` (the `page_geometry` entry for that unit — `None`
+/// where the unit's box cannot be read or declares no positive extent,
+/// in which case the layout lists are empty too: no frame, no boxes),
+/// `spans` (runs: text, bbox, font_size, font_name, is_bold, is_italic,
+/// rotation_degrees, is_artifact — the typed-BDC-only /Artifact flag, see
+/// the caveat below), `lines` (text, bbox, words — each word
+/// text + bbox; the per-line join law holds: the line's text is its
+/// words' texts joined with single spaces, and every word's box is
+/// inside the line's box), `images` (bbox, width_px, height_px,
+/// rotation_degrees, paint_order — from the engine's image HANDLES: no
+/// decode, no silent small-image filter, never a swallowed error; the
+/// image never carries a pixel decode here).
+///
+/// Approximation caveat: a non-zero `rotation_degrees` means the box is
+/// the engine's FLATTENED approximation and MUST NOT be used as a
+/// highlight box — transposed or mis-anchored at every non-zero content
+/// rotation, on ANY page (180° same-size/wrong-anchor with zero ink
+/// overlap; ±90° transposed; on a /Rotate 90/270 page additionally mapped,
+/// its line box degraded to a square). Carried honestly by
+/// rotation_degrees, documented, not re-derived. Verified edge (T9,
+/// probed): the flag does NOT cover vertical writing — a WMode-1 run
+/// (tategaki; a Type0 font whose /Encoding CMap name ends in `-V`, e.g.
+/// /Identity-V, or whose embedded CMap declares /WMode 1) carries
+/// `rotation_degrees == 0.0` while its box is the flattened fiction at
+/// its worst: measured (pdf_oxide 0.3.78, 24pt `<00410042>` under
+/// /Identity-V): span bbox (300, 700, -48, 24) — the vertical advance
+/// (-24 pt/glyph) flattened onto x as a NEGATIVE width, the glyphs' true
+/// ink a column at (300, 652, 24, 72), zero overlap — and the line
+/// surface re-lays the glyphs over the normalized box and reports the
+/// REVERSED text ("BA"). The engine's span carries wmode == 1 but wmode
+/// is cut from this surface, so a consumer cannot see it here; on a
+/// /Rotate 90/270 page the run is not engine-premapped and the fiction
+/// rides the forward map. A highlight box for text that may be vertical
+/// writing cannot be validated by rotation_degrees alone.
+///
+/// Image-box caveat: image boxes are NEVER visibility-filtered (the
+/// engine's 2 pt drop law is the TEXT walk's): an image wholly outside
+/// the visible box is still returned, with out-of-range coordinates —
+/// the consumer clips to the page box, and never reads "image present"
+/// as "image visible".
+///
+/// The is_artifact law (typed-BDC-only): true only for a typed
+/// `/Artifact <<…>> BDC` whose `/Type` or `/Subtype` the engine
+/// recognizes (Pagination/Header/Footer/Watermark/PageNumber, Layout,
+/// Page, Background); false for a bare `/Artifact BMC` (the engine's BMC
+/// handler deliberately leaves the artifact type unset, and the span
+/// carries no other artifact bit) and for unrecognized types. So
+/// `is_artifact == false` is NOT evidence of body text: header/footer
+/// detection must not rely on this flag alone.
+///
+/// The unit and length are a documented function of the resolved format —
+/// the GEOMETRY capability table applies to this surface IDENTICALLY:
+/// pdf → one entry per page (or the normalized pages= selection's), docx
+/// → one per section, pptx → one per slide, xlsx → one per worksheet,
+/// legacy doc/xls/ppt → one per converter section — every office row
+/// carrying its declared geometry with EMPTY spans/lines/images (no
+/// office engine exposes text/image boxes: PDF-only for layout), and
+/// html/csv/rtf/epub/odt/ods/odp → exactly one entry, geometry None
+/// (unit = whole document, single-flow). `pages=` is PDF-ONLY (a page
+/// index cannot name a section): a non-None selection on any non-PDF row
+/// is the conversion lane's own typed refusal, never a silent
+/// whole-document answer; on the PDF lane it normalizes exactly as the
+/// conversion pair's (sort + dedup into document order; an empty
+/// selection and an out-of-range index raise the byte-pinned errors);
+/// the output is parallel to the NORMALIZED selection.
+///
+/// `backend` names the engine lane: `"auto"` (the default) and `"oxide"`
+/// are IDENTICAL on this surface for every format (a documented divergence
+/// from `Backend.AUTO`'s conversion contract). `"anydoc"` is refused on
+/// the formats whose geometry anydoc structurally lacks (pdf and the
+/// office families) — the capability table's own refusal, byte-identical
+/// to `page_geometry`'s, raised ahead of every other refusal; the
+/// no-geometry row runs no engine at all, so every backend gets the same
+/// single entry.
+///
+/// `format` names the format explicitly (extension spelling, no dot,
+/// case-insensitive; `None` sniffs it from the content markers, with the
+/// path's extension as the last resort) — the explicit name wins over
+/// the sniff wins over the extension, `convert()`'s precedence.
+///
+/// `password` unlocks an encrypted PDF (the PDF kinds only: a password
+/// on any other format is a `ValueError`, never a silently-ignored
+/// argument). Without one, an encrypted PDF fails closed (`ValueError`);
+/// owner-password-only files authenticate with the empty password and
+/// read normally. An encrypted OOXML package is a typed `ValueError`
+/// from the office parse — never `None`/`[]`, never a password prompt.
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`):
+/// an explicit budget binds pre-read exactly as on every other entry
+/// point, and `None` keeps the 32 MiB default ceiling as the OFFICE
+/// leg's post-read check — the pdf row and the no-geometry row carry no
+/// default ceiling on this surface (the read bounded only by the finite
+/// 512 MiB backstop). Zero is refused as the nonsense it is — but
+/// CORE-side, sequenced after the capability and password-kind refusals,
+/// never pre-empting them. With an explicit `format=` naming a
+/// no-geometry format, the answer is format-determined and the file is
+/// never read (the regular-file gates still run).
+///
+/// Errors: `OSError` for a missing/unreadable file; `ValueError` for
+/// bytes that resolve to no format, an unknown `format=` name, a bad
+/// backend name, a `pages=` selection on a non-PDF (PDF-only, above), a
+/// password on a non-PDF, an over-budget input, a
+/// malformed/encrypted document, an office container that will not
+/// parse, or a `pages=` selection that names no page or an out-of-range
+/// index — the pinned §6 order: the format resolves first, then the
+/// capability refusal (under the GIL, before the detach), then the
+/// password-kind refusal, then the max_bytes refusals, then the
+/// engine's own encrypted doors, then the `pages=` range errors against
+/// the real page count (the range check needs `page_count`, which needs
+/// the open — `pages=[999]` on a locked PDF answers the door error).
+/// Every malformed `pages=`/`max_bytes` refusal
+/// reports AFTER the capability refusal, never before it.
+///
+/// Deliberate deviation from the `PdfClassification` wrapper precedent,
+/// the same one `page_geometry` states: these five classes are exposed
+/// DIRECTLY (no Python wrapper view) — the fields are floats, ints,
+/// bools, strs, and tuples, exactly as returned, nothing to re-type —
+/// and comparison is structural (`==` compares all fields; lists of
+/// them compare elementwise), so `page_layout(path) ==
+/// page_layout(path, backend="oxide")` is a plain list equality.
+///
+/// GIL model: the argument marshalling (including `pages=`' parse and
+/// normalization) under the GIL; on `backend="anydoc"` only, a bounded
+/// 64 KiB prefix read that resolves the format so the capability refusal
+/// can fire before the detach; the whole read+resolve+layout pass under
+/// one `py.detach`; then the O(pages × boxes) nested pyobject
+/// construction (the residue class §12 item 2 names: every span, line,
+/// word, and image the consumer reads materializes its native object
+/// post-detach, on access). ⚠ A malformed PDF can crash the process
+/// (uncatchable native stack exhaustion in the pdf_oxide engine):
+/// sandbox untrusted PDFs (docs/documents.md, SECURITY.md).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    format = None,
+    password = None,
+    backend = None,
+    pages = None,
+    max_bytes = None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn page_layout(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    format: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    pages: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PageLayout>> {
+    let source = parse_source(path, data, "page_layout")?;
+    let format = parse_format(format)?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    // The capability refusal fires HERE — the geometry capability table's
+    // own refusal, byte-identical to page_geometry's (one table, one
+    // message), under the GIL, before the detach and before any byte of
+    // the document is read.
+    if backend == Backend::Anydoc
+        && let Some(refusal) = probe_capability_refusal(&source, format, backend)
+    {
+        return Err(document_error(py, refusal)?);
+    }
+    // The zero value threads through (see `parse_max_bytes_on`): the
+    // core's sequenced check is this surface's zero refusal.
+    let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    let pages = parse_pages(pages)?;
+    let entries = match py.detach(move || {
+        let (bytes, hint) = source
+            .into_geometry_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
+        documents_impl::page_layout(
+            bytes,
+            hint.as_deref(),
+            format,
+            backend,
+            pages,
+            &documents_impl::ConvertOptions {
+                password: password.as_deref(),
+                max_bytes,
+            },
+        )
+    }) {
+        Ok(entries) => entries,
+        Err(err) => return Err(document_error(py, err)?),
+    };
+    // O(pages) of pyclass construction here (one PageLayout per entry);
+    // the O(pages × boxes) nested construction is the getters', on
+    // access, post-detach — the residue class the GIL heartbeat cell
+    // exercises through every field.
+    Ok(entries
+        .into_iter()
+        .map(|inner| PageLayout { inner })
+        .collect())
+}
+
+/// The pyclass for one unit's text run ([`PageLayout.spans`]): the
+/// engine's span evidence, in the page's render space.
+///
+/// Exposed DIRECTLY (no Python wrapper view) — the deliberate deviation
+/// from the `PdfClassification` wrapper precedent, `PageGeometry`'s
+/// stated rationale: the fields are exactly as returned, nothing to
+/// re-type; `==` is structural.
+#[pyclass]
+pub struct TextSpan {
+    inner: tors::pdf_impl::LayoutSpan,
+}
+
+#[pymethods]
+impl TextSpan {
+    /// The run's text.
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// The run's box, `(x, y, w, h)`: points, bottom-left origin of the
+    /// page's render space; y is the box's bottom edge; for text the
+    /// bottom edge is the glyph baseline and the box extends one
+    /// font-size upward (em-box; descenders may extend below). Boxes are
+    /// unclipped; the page box is the consumer's clip.
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        self.inner.bbox
+    }
+
+    /// The run's font size in points (the em-box's height).
+    #[getter]
+    fn font_size(&self) -> f32 {
+        self.inner.font_size
+    }
+
+    /// The run's font name.
+    #[getter]
+    fn font_name(&self) -> &str {
+        &self.inner.font_name
+    }
+
+    /// Bold evidence.
+    #[getter]
+    fn is_bold(&self) -> bool {
+        self.inner.is_bold
+    }
+
+    /// Italic evidence.
+    #[getter]
+    fn is_italic(&self) -> bool {
+        self.inner.is_italic
+    }
+
+    /// The run's own content rotation in degrees — non-zero means the
+    /// box is the engine's flattened approximation and MUST NOT be used
+    /// as a highlight box (transposed or mis-anchored at every non-zero
+    /// content rotation, on any page). Verified NOT to cover vertical
+    /// writing (T9, probed): a WMode-1 run (tategaki) carries
+    /// `rotation_degrees == 0` — the angle is the text matrix's, the
+    /// writing mode plays no part in it — while its box is the flattened
+    /// fiction at its worst (the vertical advance flattened onto x as a
+    /// NEGATIVE width; measured: (300, 700, -48, 24) for a 24pt 2-glyph
+    /// /Identity-V run whose ink is a column at (300, 652, 24, 72)). A
+    /// highlight box for text that may be vertical writing cannot be
+    /// validated by this flag alone.
+    #[getter]
+    fn rotation_degrees(&self) -> f32 {
+        self.inner.rotation_degrees
+    }
+
+    /// Declared /Artifact marked content — TYPED-FORM-ONLY: true only
+    /// for a typed `/Artifact <<…>> BDC` whose /Type or /Subtype the
+    /// engine recognizes; false for a bare `/Artifact BMC` (the engine
+    /// sets no artifact type for it) and unrecognized types. So
+    /// `is_artifact == false` is NOT evidence of body text.
+    #[getter]
+    fn is_artifact(&self) -> bool {
+        self.inner.is_artifact
+    }
+
+    /// Structural equality (all eight fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        text_span_repr(&self.inner)
+    }
+}
+
+/// One word inside a [`TextLine`] (`PageLayout.lines[].words`): the
+/// text and its box — the engine's own gap-clustered word box, never
+/// re-derived downstream.
+#[pyclass]
+pub struct Word {
+    inner: tors::pdf_impl::LayoutWord,
+}
+
+#[pymethods]
+impl Word {
+    /// The word's text.
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// The word's box, `(x, y, w, h)`: points, bottom-left origin of the
+    /// page's render space; y is the box's bottom edge; for text the
+    /// bottom edge is the glyph baseline and the box extends one
+    /// font-size upward (em-box; descenders may extend below). Boxes are
+    /// unclipped; the page box is the consumer's clip.
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        self.inner.bbox
+    }
+
+    /// Structural equality (both fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Word(text={:?}, bbox={:?})",
+            self.inner.text, self.inner.bbox
+        )
+    }
+}
+
+/// One unit's text line ([`PageLayout.lines`]): the engine's own line —
+/// its word clustering is the engine's (gap thresholds are never
+/// re-implemented downstream). The join law: this line's text is its
+/// words' texts joined with single spaces, and every word's box is
+/// inside this line's box (both pinned in the tests).
+#[pyclass]
+pub struct TextLine {
+    inner: tors::pdf_impl::LayoutLine,
+}
+
+#[pymethods]
+impl TextLine {
+    /// The line's text (the engine's join of its words).
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// The line's box, `(x, y, w, h)`: points, bottom-left origin of the
+    /// page's render space; y is the box's bottom edge; for text the
+    /// bottom edge is the glyph baseline and the box extends one
+    /// font-size upward (em-box; descenders may extend below). Boxes are
+    /// unclipped; the page box is the consumer's clip.
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        self.inner.bbox
+    }
+
+    /// The line's words, in reading order.
+    #[getter]
+    fn words(&self) -> Vec<Word> {
+        self.inner
+            .words
+            .iter()
+            .map(|w| Word { inner: w.clone() })
+            .collect()
+    }
+
+    /// Structural equality (all three fields — the words included).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        text_line_repr(&self.inner)
+    }
+}
+
+/// One unit's image box ([`PageLayout.images`]): an image draw's
+/// placement — from the engine's image HANDLES (no decode, no silent
+/// small-image filter, no swallowed errors; `extract_images` is
+/// disqualified for an evidence surface).
+#[pyclass]
+pub struct ImageBox {
+    inner: tors::pdf_impl::LayoutImage,
+}
+
+#[pymethods]
+impl ImageBox {
+    /// The image's axis-aligned box, `(x, y, w, h)`: points, bottom-left
+    /// origin of the page's render space; y is the box's bottom edge;
+    /// for text the bottom edge is the glyph baseline and the box
+    /// extends one font-size upward (em-box; descenders may extend
+    /// below). Boxes are unclipped; the page box is the consumer's clip.
+    /// Image boxes are never visibility-filtered (the engine's 2 pt drop
+    /// law is the TEXT walk's): an image wholly outside the visible box
+    /// is still returned, with out-of-range coordinates — the consumer
+    /// clips to the page box, and never reads "image present" as "image
+    /// visible".
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        self.inner.bbox
+    }
+
+    /// The image's pixel width.
+    #[getter]
+    fn width_px(&self) -> u32 {
+        self.inner.width_px
+    }
+
+    /// The image's pixel height.
+    #[getter]
+    fn height_px(&self) -> u32 {
+        self.inner.height_px
+    }
+
+    /// The CTM's rotation angle in degrees, `atan2`-normalized to
+    /// [0, 360) — not restricted to right angles (a sheared or
+    /// arbitrarily-rotated CTM reports e.g. 45.0; a mirrored CTM 180.0):
+    /// the bbox is always the axis-aligned bound of the transformed unit
+    /// square.
+    #[getter]
+    fn rotation_degrees(&self) -> f32 {
+        self.inner.rotation_degrees
+    }
+
+    /// Page-local identity/z-order: the image's index among the page's
+    /// painted images, in content-stream order.
+    #[getter]
+    fn paint_order(&self) -> u32 {
+        self.inner.paint_order
+    }
+
+    /// Structural equality (all five fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        image_box_repr(&self.inner)
+    }
+}
+
+/// One `page_layout` entry: the unit's geometry plus its text spans,
+/// lines, and image boxes in the page's render space.
+///
+/// Provenance rides ON the entry: `format` is the resolved format's
+/// vocabulary name (the `to_markdown` spelling — `resolved_name`'s, the
+/// Excel kind's container-aware `xls`/`xlsx` case included), and it —
+/// not the entry's shape — tells you why `spans`/`lines`/`images` may
+/// be empty: an office row carries declared geometry with no text
+/// surfaces (no office engine exposes text/image boxes), while a blank,
+/// scanned, or content-unparseable PDF page looks identical in shape on
+/// the pdf lane. Every entry of one call carries the same name (the
+/// format resolves once, before any entry exists).
+///
+/// Exposed DIRECTLY (no Python wrapper view) — the same deliberate
+/// deviation from the `PdfClassification` wrapper precedent `PageGeometry`
+/// states; `==` is structural.
+#[pyclass]
+pub struct PageLayout {
+    inner: tors::pdf_impl::PageLayoutData,
+}
+
+#[pymethods]
+impl PageLayout {
+    /// The 0-based page (or section/slide/worksheet index) this entry
+    /// describes — mandatory on every entry, because the `pages=`
+    /// normalization reorders.
+    #[getter]
+    fn page_index(&self) -> usize {
+        self.inner.page_index
+    }
+
+    /// The resolved format's vocabulary name (``to_markdown``'s
+    /// spelling): the entry's provenance marker. It — not the entry's
+    /// shape — tells you why ``spans``/``lines``/``images`` may be
+    /// empty: an office row carries declared geometry with no text
+    /// surfaces; a blank or scanned PDF page looks identical.
+    #[getter]
+    fn format(&self) -> &str {
+        &self.inner.format
+    }
+
+    /// The unit's declared render box (the `page_geometry` entry):
+    /// `None` where the unit's box cannot be read or declares no
+    /// positive extent — then the layout lists are empty too (no frame,
+    /// no boxes).
+    #[getter]
+    fn geometry(&self) -> Option<PageGeometry> {
+        self.inner.geometry.map(|box_| PageGeometry {
+            inner: documents_impl::PageGeometry::from_page_box(box_),
+        })
+    }
+
+    /// The unit's text spans, reading order (PDF pages only; office
+    /// units carry empty lists — no office engine exposes text boxes;
+    /// the entry's `format` field is the provenance that tells the
+    /// office case from a blank/scanned PDF page).
+    #[getter]
+    fn spans(&self) -> Vec<TextSpan> {
+        self.inner
+            .spans
+            .iter()
+            .map(|s| TextSpan { inner: s.clone() })
+            .collect()
+    }
+
+    /// The unit's text lines, reading order, words nested (PDF pages
+    /// only; office units carry empty lists — the entry's `format`
+    /// field is the provenance the class docstring points at).
+    #[getter]
+    fn lines(&self) -> Vec<TextLine> {
+        self.inner
+            .lines
+            .iter()
+            .map(|l| TextLine { inner: l.clone() })
+            .collect()
+    }
+
+    /// The unit's image boxes, paint order (PDF pages only). Never
+    /// visibility-filtered: an image wholly outside the visible box is
+    /// still returned with out-of-range coordinates — the consumer clips
+    /// to the page box, and never reads "image present" as "image
+    /// visible".
+    #[getter]
+    fn images(&self) -> Vec<ImageBox> {
+        self.inner
+            .images
+            .iter()
+            .map(|i| ImageBox { inner: i.clone() })
+            .collect()
+    }
+
+    /// Structural equality (all six fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        // each list formatted via its class's own Python shape — never the
+        // Rust Debug of the inner structs (`LayoutSpan { … }` is not a
+        // shape a Python consumer recognizes)
+        let spans = self
+            .inner
+            .spans
+            .iter()
+            .map(text_span_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let lines = self
+            .inner
+            .lines
+            .iter()
+            .map(text_line_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let images = self
+            .inner
+            .images
+            .iter()
+            .map(image_box_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "PageLayout(page_index={}, format={:?}, geometry={}, spans=[{}], lines=[{}], images=[{}])",
+            self.inner.page_index,
+            self.inner.format,
+            match &self.inner.geometry {
+                Some(box_) =>
+                    page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
+                None => "None".to_string(),
+            },
+            spans,
+            lines,
+            images
+        )
+    }
 }
 
 /// `tors.documents.pdf_link_uris(path, data=None, password=None,
@@ -939,6 +1870,48 @@ impl Source<'_> {
         format: Option<&str>,
         backend: Backend,
     ) -> Result<(Vec<u8>, Option<String>), InputError> {
+        self.read_input(max_bytes, format, backend, Spine::Conversion)
+    }
+
+    /// The bytes and the name hint: the GEOMETRY probe's entry. The
+    /// divergence from [`Source::into_input`] is two halves, both keyed
+    /// on the geometry capability table (the locked §6, which says the
+    /// read metering keys on the table the surface actually routes by):
+    ///
+    /// - the provisional read ceiling (the `None` budget's two-phase
+    ///   guess) keys on [`documents_impl::provisional_geometry_read_ceiling`]
+    ///   — only the office row meters at the 32 MiB default; the pdf row
+    ///   and the no-geometry row read under [`MAX_INPUT_READ`], so a
+    ///   40 MiB HTML answers `[None]` on `path=` exactly as on `data=`
+    ///   (the parity the conversion table's ceiling broke), and a 34 MiB
+    ///   PDF is read (its own limits govern) instead of refused by a
+    ///   lane it never runs.
+    /// - the no-read door: an explicit `format=` naming a no-geometry
+    ///   format settles the answer before any byte — the core's resolve
+    ///   short-circuits on the name, the geometry table runs no engine
+    ///   on the row, and the entry is the format-determined `[None]` —
+    ///   so the regular-file gates still run (a missing path is the same
+    ///   `OSError`, a FIFO the same refusal) but nothing is read. A
+    ///   directory keeps its pinned EISDIR read refusal, so only regular
+    ///   files pass.
+    fn into_geometry_input(
+        self,
+        max_bytes: Option<usize>,
+        format: Option<&str>,
+        backend: Backend,
+    ) -> Result<(Vec<u8>, Option<String>), InputError> {
+        self.read_input(max_bytes, format, backend, Spine::Geometry)
+    }
+
+    /// [`Source::into_input`]/[`Source::into_geometry_input`]'s shared
+    /// body, keyed by which routing table meters the read.
+    fn read_input(
+        self,
+        max_bytes: Option<usize>,
+        format: Option<&str>,
+        backend: Backend,
+        spine: Spine,
+    ) -> Result<(Vec<u8>, Option<String>), InputError> {
         match self {
             Source::Path(path) => {
                 // parse_path already validated the Unicode, so the hint is
@@ -964,12 +1937,40 @@ impl Source<'_> {
                 refuse_non_regular(&path, meta.file_type())?;
                 refuse_over_ceiling(max_bytes, Some(meta.file_type()), meta.len())?;
 
+                // The geometry spine's no-read door (the method's doc):
+                // an explicit format name that settles the row as
+                // no-geometry answers without the file. Directories fall
+                // through to the read — the EISDIR refusal is the read's
+                // own, and the door must not swallow it.
+                if spine == Spine::Geometry
+                    && !meta.is_dir()
+                    && format.is_some_and(documents_impl::is_no_geometry_format)
+                {
+                    return Ok((Vec::new(), hint_name));
+                }
+
                 // The stat is no longer the authority on how much to read: a
                 // lying stat (procfs' st_size=0) or a sparse hole made the
                 // old read_to_end unbounded. The bounded read is the ceiling.
                 let (bytes, over, used_ceiling) = match max_bytes {
                     // Explicit budget: it is the ceiling, no sniff needed.
                     Some(limit) => {
+                        if limit == 0 {
+                            // A zero budget binds maximally — nothing of
+                            // the document is read — but the value itself
+                            // is the CORE's sequenced refusal on this
+                            // surface (§6: after the capability and
+                            // password-kind checks), so the sniff prefix
+                            // (the metering read's own first phase) still
+                            // feeds the core's resolve and nothing more.
+                            let (prefix, _) = documents_impl::read_bounded_into(
+                                &mut file,
+                                Vec::new(),
+                                SNIFF_PREFIX,
+                            )
+                            .map_err(map_read_err)?;
+                            return Ok((prefix, hint_name));
+                        }
                         let (b, o) = documents_impl::read_bounded_into(file, Vec::new(), limit)
                             .map_err(map_read_err)?;
                         (b, o, limit)
@@ -983,13 +1984,22 @@ impl Source<'_> {
                         // (_prefix_over is true for any file over 64 KiB): phase 2
                         // re-reads from the current file position and the real
                         // ceiling (>= 32 MiB) governs the refusal below.
-                        let ceiling = documents_impl::provisional_read_ceiling(
-                            &prefix,
-                            hint_name.as_deref(),
-                            format,
-                            backend,
-                            MAX_INPUT_READ,
-                        );
+                        let ceiling = match spine {
+                            Spine::Conversion => documents_impl::provisional_read_ceiling(
+                                &prefix,
+                                hint_name.as_deref(),
+                                format,
+                                backend,
+                                MAX_INPUT_READ,
+                            ),
+                            Spine::Geometry => documents_impl::provisional_geometry_read_ceiling(
+                                &prefix,
+                                hint_name.as_deref(),
+                                format,
+                                backend,
+                                MAX_INPUT_READ,
+                            ),
+                        };
                         // Phase 2: continue from the SAME file (position is already past
                         // the prefix), prepending the prefix we already read.
                         let (b, o) = documents_impl::read_bounded_into(file, prefix, ceiling)
@@ -1012,11 +2022,28 @@ impl Source<'_> {
                 // memory, but the parse it would feed is not free). No new
                 // backstop: resident bytes cannot grow past themselves.
                 refuse_over_ceiling(max_bytes, None, bytes.len() as u64)?;
-                // The one copy, inside the detach (the enum's docs).
+                // The one copy, inside the detach (the enum's docs). The
+                // caller's bytes stay WHOLE even under a zero budget: the
+                // core's resolve reads them (the zero VALUE refusal is
+                // sequenced after resolve/capability/password-kind in the
+                // core, and resolve is the step that needs the truth).
                 Ok((bytes.to_vec(), None))
             }
         }
     }
+}
+
+/// Which routing table keys the two-phase read's provisional ceiling (and
+/// whether the no-read door exists): the conversion spine's own
+/// ([`documents_impl::provisional_read_ceiling`] — the anydoc,
+/// office_oxide, and HTML lanes meter at the 32 MiB default) or the
+/// geometry surface's ([`documents_impl::provisional_geometry_read_ceiling`]
+/// — the office row alone meters; the pdf row and the no-geometry row
+/// carry no default ceiling).
+#[derive(Clone, Copy, PartialEq)]
+enum Spine {
+    Conversion,
+    Geometry,
 }
 
 /// io::OutOfMemory from the bounded reader means the input was too large to
@@ -1082,6 +2109,17 @@ fn refuse_over_ceiling(
     // usize -> u64 is lossless on every platform; the stat side is u64
     // natively, so the gate compares in the wider type.
     if size <= limit as u64 {
+        return Ok(());
+    }
+    // A zero LIMIT is never a size refusal: on the geometry surface the
+    // zero value threads through to the core's sequenced value refusal
+    // (§6: after the capability and password-kind checks — the red-team
+    // probe had the binding's pre-emption masking the anydoc refusal on a
+    // docx), and on every other surface `parse_max_bytes` refuses zero
+    // binding-side before a budget exists. Skipping keeps the zero case
+    // out of the ceiling vocabulary entirely ("must be positive" names
+    // it, never a 0-byte ceiling).
+    if limit == 0 {
         return Ok(());
     }
     Err(InputError::Refused(format!(
@@ -1305,6 +2343,35 @@ fn parse_password(password: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String
 /// doctrine. Wrong types raise `TypeError` (bool first: it launders as
 /// an int), wrong values `ValueError` (negative, zero, i64-overflow).
 fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
+    parse_max_bytes_on(max_bytes, ZeroRefusal::Binding)
+}
+
+/// Whether a zero budget is refused at the parse or threaded through.
+/// Every surface but one refuses it here (the house rule: a nonsense
+/// argument never reaches the engines). The exception is the geometry
+/// surfaces (`page_geometry`, `page_layout`): their zero VALUE refusal
+/// is a max_bytes-class refusal
+/// whose locked §6 position is core-side, AFTER the capability and
+/// password-kind checks — the binding's pre-emption would fire it first
+/// (the red-team probe: `page_geometry(data=docx, backend="anydoc",
+/// max_bytes=0)` answered the max_bytes error where the capability
+/// refusal is the truth), so the zero threads through as `Some(0)` and
+/// the core's own zero check (already sequenced) names it.
+#[derive(Clone, Copy)]
+enum ZeroRefusal {
+    /// Refuse zero at the parse (every surface but the geometry
+    /// surfaces).
+    Binding,
+    /// Thread zero through as `Some(0)`; the core's sequenced check
+    /// refuses it (the geometry surfaces: `page_geometry`,
+    /// `page_layout`).
+    CoreSide,
+}
+
+fn parse_max_bytes_on(
+    max_bytes: Option<&Bound<'_, PyAny>>,
+    zero: ZeroRefusal,
+) -> PyResult<Option<usize>> {
     let Some(max_bytes) = max_bytes else {
         return Ok(None);
     };
@@ -1327,7 +2394,12 @@ fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usiz
             py_repr(max_bytes)
         )));
     };
-    if limit <= 0 {
+    // Negative budgets are refused at the parse on EVERY surface,
+    // `page_geometry` included: they are unrepresentable in the core's
+    // `usize` budget, so they are argument-contract refusals (the same
+    // class as a non-int), not sequenced value refusals — zero is the
+    // only representable value refusal, and only it can sequence.
+    if limit < 0 || (limit == 0 && matches!(zero, ZeroRefusal::Binding)) {
         return Err(PyValueError::new_err(format!(
             "max_bytes must be positive (the input ceiling in bytes, binding on every lane \
              when explicit), not {limit}"
@@ -1385,9 +2457,12 @@ fn parse_backend(backend: Option<&Bound<'_, PyAny>>) -> PyResult<Backend> {
 /// call that could never run. A plain `ValueError`: the `Convert` arm's
 /// own mapping, a value refusal per the module's type-vs-value
 /// convention (this is not the format-level UnsupportedBackend, which
-/// only the conversion pair can raise).
+/// only the conversion pair can raise). The family is PDF-only by
+/// construction, so the refusal's format is always `"pdf"` (the
+/// byte-pinned historical text); `page_geometry`'s format-aware refusal
+/// is raised in the core, where the resolved format lives.
 fn refuse_anydoc(capability: &str) -> PyErr {
-    PyValueError::new_err(documents_impl::anydoc_capability_refusal(capability).to_string())
+    PyValueError::new_err(documents_impl::anydoc_capability_refusal(capability, "pdf").to_string())
 }
 
 /// The largest page index any PDF can carry, and therefore the ceiling a
@@ -1639,6 +2714,14 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("NeedsOcrError", m.py().get_type::<NeedsOcrError>())?;
     m.add_class::<PdfClassification>()?;
+    m.add_class::<PageGeometry>()?;
+    m.add_class::<PageLayout>()?;
+    m.add_class::<TextSpan>()?;
+    m.add_class::<TextLine>()?;
+    m.add_class::<Word>()?;
+    m.add_class::<ImageBox>()?;
+    m.add_function(wrap_pyfunction!(page_geometry, m)?)?;
+    m.add_function(wrap_pyfunction!(page_layout, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_classify, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_extract, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_link_uris, m)?)?;

@@ -29,7 +29,15 @@ from __future__ import annotations
 import os
 from enum import Enum
 
-from tors_documents._tors_documents import NeedsOcrError
+from tors_documents._tors_documents import (
+    ImageBox,
+    NeedsOcrError,
+    PageGeometry,
+    PageLayout,
+    TextLine,
+    TextSpan,
+    Word,
+)
 from tors_documents._tors_documents import PdfClassification as _NativePdfClassification
 
 # The wheel's version, baked from the crate's Cargo.toml at build time
@@ -39,6 +47,8 @@ from tors_documents._tors_documents import PdfClassification as _NativePdfClassi
 # import and needs a static fallback pin that drifts stale in source
 # checkouts).
 from tors_documents._tors_documents import __version__ as __version__
+from tors_documents._tors_documents import page_geometry as _native_page_geometry
+from tors_documents._tors_documents import page_layout as _native_page_layout
 from tors_documents._tors_documents import pdf_classify as _native_pdf_classify
 from tors_documents._tors_documents import pdf_extract as _native_pdf_extract
 from tors_documents._tors_documents import pdf_link_uris as _native_pdf_link_uris
@@ -52,10 +62,18 @@ from tors_documents._tors_documents import to_text as _native_to_text
 __all__ = [
     "Backend",
     "Format",
+    "ImageBox",
     "NeedsOcrError",
+    "PageGeometry",
     "PageKind",
+    "PageLayout",
     "PdfClassification",
+    "TextLine",
+    "TextSpan",
+    "Word",
     "__version__",
+    "page_geometry",
+    "page_layout",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",
@@ -73,7 +91,14 @@ class Backend(str, Enum):
     the OOXML/legacy office formats); ``ANYDOC`` forces anydoc. A forced
     backend raises on a format it cannot read, never a silent fallback.
     Members are the accepted strings, so ``backend="auto"`` and
-    ``backend=Backend.AUTO`` are the same call."""
+    ``backend=Backend.AUTO`` are the same call. On the geometry surfaces
+    (``page_geometry``/``page_layout``) ``AUTO`` and ``OXIDE`` are
+    additionally identical for every format (the geometry lane is a
+    property of the format, not a choice), and the no-geometry formats
+    (html/csv/rtf/epub/odt/ods/odp) answer the same single entry on every
+    backend — ``ANYDOC`` included: no engine runs there, so nothing is
+    refused and nothing is fallen back (documented divergences from this
+    enum's conversion contract)."""
 
     AUTO = "auto"
     OXIDE = "oxide"
@@ -290,6 +315,107 @@ def pdf_page_count(
     ``None`` reads the pdf lane under the finite 512 MiB backstop (a
     memory-safety floor, raised with an explicit ``max_bytes=``)."""
     return _native_pdf_page_count(_coerce_path(path), data, password, backend, max_bytes)
+
+
+def page_geometry(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> list[PageGeometry | None]:
+    """The declared-box geometry probe (the full contract is the native
+    function's docstring): one entry per unit of the resolved format —
+    PDF pages, docx sections, pptx slides, xlsx worksheets, legacy
+    sections — ``None`` where that unit declares no geometry, exactly one
+    ``[None]`` entry for the single-flow formats (html/csv/rtf/epub and
+    the ODF family, unit = whole document), ``[]`` only for zero units.
+    Entries are the native :class:`PageGeometry` (exposed directly, with
+    structural ``==`` — the deliberate deviation from the
+    PdfClassification wrapper precedent, stated in its docstring).
+    ``format=`` names the format (explicit name wins over sniff wins over
+    extension); ``backend=`` is ``"auto"``/``"oxide"`` (identical on this
+    surface for every format; ``"anydoc"`` is refused where geometry is
+    obtainable — pdf and the office families — while the no-geometry row
+    answers ``[None]`` on every backend); ``password=`` for an encrypted
+    PDF (a password on any other format is a clean error); an explicit
+    ``max_bytes=`` binds before the read, ``None`` keeps the 32 MiB
+    default ceiling on the office leg (a post-read check there) while the
+    pdf lane reads under the finite 512 MiB backstop. The whole
+    read+resolve+geometry pass runs GIL-free. ⚠ A malformed PDF can crash
+    the process (uncatchable native stack exhaustion in the pdf_oxide
+    engine): sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
+    return _native_page_geometry(
+        _coerce_path(path),
+        data,
+        format,
+        password,
+        backend,
+        max_bytes,
+    )
+
+
+def page_layout(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+) -> list[PageLayout]:
+    """The layout probe (the full contract is the native function's
+    docstring): per unit of the resolved format's geometry lane, the
+    unit's geometry plus — PDF pages only — the page's text spans, text
+    lines (words nested), and image boxes, all in the page's declared
+    render space: **points, bottom-left origin of the page's render
+    space; y is the box's bottom edge; for text the bottom edge is the
+    glyph baseline and the box extends one font-size upward (em-box;
+    descenders may extend below). Boxes are unclipped; the page box is
+    the consumer's clip.** One transform owns the mapping (raw y-up
+    boxes, /Rotate applied; the engine's pre-mapped spans mapped back to
+    raw first), so no consumer re-implements it. A non-zero
+    ``rotation_degrees`` means the box is the engine's flattened
+    approximation and MUST NOT be used as a highlight box (transposed or
+    mis-anchored at every non-zero content rotation, on any page).
+    Image boxes are never visibility-filtered: an image wholly outside
+    the visible box is still returned with out-of-range coordinates —
+    the consumer clips to the page box. The classes are the native
+    :class:`PageLayout`, :class:`TextSpan`, :class:`TextLine`,
+    :class:`Word`, and :class:`ImageBox` (exposed directly, structural
+    ``==`` — the deliberate deviation from the PdfClassification wrapper
+    precedent). ``pages=`` is PDF-only (a page index cannot name a
+    section): a non-None selection on any other format raises the
+    conversion lane's own ``ValueError``; on a PDF it normalizes exactly
+    as the conversion pair's (sort + dedup; empty selection and
+    out-of-range indices raise the same byte-pinned errors) and the
+    output is parallel to the NORMALIZED selection, every entry carrying
+    ``page_index`` — and every malformed ``pages=``/``max_bytes`` refusal
+    reports after the capability refusal. Office rows serve their
+    declared geometry with empty layout lists (no office engine exposes
+    text/image boxes — PDF-only for layout; geometry-Some + empty lists
+    is indistinguishable from a blank/scanned page, so a consumer that
+    needs the provenance carries the resolved format itself); the
+    no-geometry formats answer one ``geometry=None`` entry. ``backend=``
+    is ``"auto"``/``"oxide"`` (identical on this surface; ``"anydoc"`` is
+    refused where geometry is obtainable); ``password=`` for an encrypted
+    PDF; an explicit ``max_bytes=`` binds before the read, ``None`` keeps
+    the 32 MiB default ceiling on the office leg (a post-read check
+    there) while the pdf lane reads under the finite 512 MiB backstop.
+    The whole read+resolve+layout pass runs GIL-free. ⚠ A malformed PDF
+    can crash the process (uncatchable native stack exhaustion in the
+    pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
+    SECURITY.md)."""
+    return _native_page_layout(
+        _coerce_path(path),
+        data,
+        format,
+        password,
+        backend,
+        pages,
+        max_bytes,
+    )
 
 
 class PdfClassification:

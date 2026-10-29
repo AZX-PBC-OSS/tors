@@ -55,6 +55,8 @@ import pytest
 
 from documents import ENGINES_CORPUS
 from tors.documents import (
+    page_geometry,
+    page_layout,
     pdf_classify,
     pdf_extract,
     pdf_link_uris,
@@ -67,11 +69,13 @@ _PDF_TWO_PAGE = ENGINES_CORPUS["pdf_two_page"]
 _REPORT_PDF = Path(__file__).parent / "corpus" / "report.pdf"
 
 # Every public entry point that opens a PDF document (the docs/documents.md
-# signature table): all six share pdf_impl's open() seam, so the depth bomb
+# signature table): all eight share pdf_impl's open() seam, so the depth bomb
 # must refuse on all of them, not just the ones the reporter happened to try.
 _ENTRY_POINTS = (
     to_markdown,
     to_text,
+    page_geometry,
+    page_layout,
     pdf_extract,
     pdf_page_count,
     pdf_classify,
@@ -359,7 +363,9 @@ class TestCompressedStreamBombsRefuseCatchably:
     catchably, not waved through."""
 
     @pytest.mark.parametrize(
-        "fn", [pdf_page_count, to_markdown, pdf_classify], ids=lambda call: call.__name__
+        "fn",
+        [page_geometry, pdf_page_count, to_markdown, pdf_classify],
+        ids=lambda call: call.__name__,
     )
     @pytest.mark.parametrize("kind", ["objstm", "xref"], ids=str)
     def test_a_bomb_hidden_in_a_compressed_stream_refuses_catchably(

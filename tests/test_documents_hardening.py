@@ -61,6 +61,8 @@ from typing import Any
 
 import pytest
 from tors_documents import (
+    page_geometry,
+    page_layout,
     pdf_classify,
     pdf_extract,
     pdf_link_uris,
@@ -176,6 +178,8 @@ class TestNonRegularPathsAreTypedRefusals:
         for call in (
             to_markdown,
             to_text,
+            page_geometry,
+            page_layout,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -405,7 +409,14 @@ class TestNulInPathIsAValueError:
     naming ``path`` (the message convention) and repr'ing the value."""
 
     def test_the_refusal_matches_cpythons_class_and_names_path(self) -> None:
-        for call in (to_markdown, to_text, pdf_page_count, pdf_classify):
+        for call in (
+            to_markdown,
+            to_text,
+            page_geometry,
+            page_layout,
+            pdf_page_count,
+            pdf_classify,
+        ):
             with pytest.raises(ValueError, match="(?i)null") as raised:
                 call("feed\x00name.pdf")
             message = str(raised.value)
@@ -435,7 +446,16 @@ class TestPathCoercionNamesTheArgument:
 
     @pytest.mark.parametrize(
         "call",
-        [to_markdown, to_text, pdf_classify, pdf_extract, pdf_page_count, pdf_link_uris],
+        [
+            to_markdown,
+            to_text,
+            page_geometry,
+            page_layout,
+            pdf_classify,
+            pdf_extract,
+            pdf_page_count,
+            pdf_link_uris,
+        ],
         ids=lambda call: call.__name__,
     )
     def test_an_int_path_is_a_type_error_naming_path(self, call: Any) -> None:

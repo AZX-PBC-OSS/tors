@@ -357,27 +357,162 @@ fn engine_for(kind: Kind, backend: Backend) -> Result<Engine, DocumentError> {
 /// [`DocumentError::UnsupportedBackend`] (that one answers "can this
 /// engine read this format", and PDF+anydoc can: [`engine_for`] routes
 /// the pair; this one answers "can this engine serve this call"). The
-/// four probe-rich calls need per-engine surfaces anydoc's PDF reader
+/// probe-rich calls need per-engine surfaces anydoc's PDF reader
 /// structurally lacks: its entire PDF surface is `to_markdown(bytes)`
 /// whole-document markdown (~anydoc-0.2.4/src/formats/pdf.rs: no
 /// per-page text, no page-count success return, no per-page
-/// classification, no annotation walk), while `pdf_extract`'s per-page
-/// probe is the OCR-routing signal, `pdf_page_count` walks the page
-/// tree, `pdf_classify` classifies per page, and `pdf_link_uris` walks
-/// `/Annots`. The doctrine text lives here, next to the routing table,
-/// so the four functions' messages cannot drift apart; the binding
-/// layer raises it under the GIL at argument-contract time, before any
-/// work runs. Message shape follows [`DocumentError::UnsupportedBackend`]'s
-/// Display: name the backend and the value, name the lack, point at the
-/// fix.
-pub fn anydoc_capability_refusal(capability: &str) -> DocumentError {
-    DocumentError::Convert(format!(
-        "backend \"anydoc\" cannot serve {capability}: anydoc's PDF surface is \
-         whole-document conversion only — to_markdown/to_text with backend=\"anydoc\" \
-         (NeedsOcrError is that lane's scanned-page signal); use backend='auto' or \
-         'oxide' here"
-    ))
+/// classification, no annotation walk, no page-box read), while
+/// `pdf_extract`'s per-page probe is the OCR-routing signal,
+/// `pdf_page_count` walks the page tree, `pdf_classify` classifies per
+/// page, `pdf_link_uris` walks `/Annots`, and `page_geometry` reads the
+/// declared page boxes. The doctrine text lives here, next to the routing
+/// table, so the messages cannot drift apart; the binding layer raises
+/// them under the GIL at argument-contract time where the lane is known
+/// without reading bytes (the PDF-only family), and out of the detached
+/// pass otherwise (`page_geometry`, whose refusal is format-aware and so
+/// needs the resolved format first). Message shape follows
+/// [`DocumentError::UnsupportedBackend`]'s Display: name the backend and
+/// the value, name the lack, point at the fix.
+///
+/// `format` selects the doctrine text: `"pdf"` is the byte-pinned
+/// historical message (the four PDF-only calls' text, unchanged); any
+/// other format name is the geometry surface's office-family refusal —
+/// same shape, the format named, the lack restated for the lane anydoc
+/// has no geometry surface on at all. Both strings are pinned in the
+/// core tests.
+pub fn anydoc_capability_refusal(capability: &str, format: &str) -> DocumentError {
+    DocumentError::Convert(if format == "pdf" {
+        format!(
+            "backend \"anydoc\" cannot serve {capability}: anydoc's PDF surface is \
+             whole-document conversion only — to_markdown/to_text with backend=\"anydoc\" \
+             (NeedsOcrError is that lane's scanned-page signal); use backend='auto' or \
+             'oxide' here"
+        )
+    } else {
+        format!(
+            "backend \"anydoc\" cannot serve {capability} for {format}: anydoc has no \
+             geometry surface; use backend='auto' or 'oxide' here"
+        )
+    })
 }
+
+/// One `page_geometry` entry: a unit's declared render box, in points —
+/// the shared core type. `pdf_impl::PageBox` (the PDF probe's own unit)
+/// maps into it, and the payload crate exposes it as the native
+/// `PageGeometry` pyclass; the fields are the same law on every lane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageGeometry {
+    /// The unit's render width in points. PDF: the visible box's extent,
+    /// the axes swapped for a 90/270 rotation. Office: the declared page
+    /// size (twips ÷ 20 for DOCX, EMU ÷ 12700.0 for PPTX — the raw
+    /// layers' honest conversions), never rotated (`w:orient` is never
+    /// used to swap declared dims — dims only).
+    pub width_pt: f32,
+    /// The unit's render height in points (the same law).
+    pub height_pt: f32,
+    /// The declared rotation, engine-normalized: the PDF engine's
+    /// `/Rotate` ∈ {0, 90, 180, 270} (a non-right-angle declaration
+    /// reports 0); an office unit has no rotation concept and reports 0.
+    pub rotation: i32,
+    /// The PDF page's declared CropBox reduced to the MediaBox (the
+    /// effective crop: the intersection the engine's visible box stands
+    /// on), normalized corners, the unrotated source frame, points —
+    /// `Some` only when a CropBox is declared AND it actually crops.
+    /// `None` on every office lane (no office format declares a crop) and
+    /// on PDF pages without an effective crop. (Phase 2's note, the same
+    /// on `pdf_impl::PageBox`: the visible-box ORIGIN is not carried —
+    /// provenance for the extent, never a rectangle to transform — and
+    /// the phase-2 layout transform must fetch the corners per page
+    /// itself.)
+    pub crop: Option<(f32, f32, f32, f32)>,
+}
+
+impl PageGeometry {
+    /// `pdf_impl::PageBox` (the PDF probe's unit) into the shared type:
+    /// the fields are already the same law, so this is one of the two
+    /// places the two vocabularies meet — the other is `page_layout`'s
+    /// office arm, which maps the shared type back into `pdf_impl::PageBox`
+    /// to serve the layout probe's uniform entry shape. Public for the
+    /// same reason: the payload binding's `PageLayout.geometry` getter
+    /// materializes the shared pyclass from the layout probe's `PageBox`
+    /// per page.
+    pub fn from_page_box(page: pdf_impl::PageBox) -> PageGeometry {
+        PageGeometry {
+            width_pt: page.width_pt,
+            height_pt: page.height_pt,
+            rotation: page.rotation,
+            crop: page.crop,
+        }
+    }
+}
+
+/// The geometry capability table: the second routing table, documented
+/// next to (never as a comment on) [`engine_for`]. Conversion routing
+/// answers "who converts best"; this table answers "who can declare
+/// geometry at all" — and the two deliberately disagree in places:
+///
+/// - `auto` and `oxide` are identical on this surface for every format
+///   (the geometry lane is a property of the format, not a choice): PDF
+///   pages read through pdf_oxide's page-tree walk, the office families
+///   through office_oxide's raw/IR layers, and nothing else runs an
+///   engine at all.
+/// - `anydoc` is refused exactly where geometry is obtainable on a lane
+///   the caller excluded — the pdf row and the office row — with the
+///   format-aware capability refusal ([`anydoc_capability_refusal`]).
+/// - The no-geometry row (html/csv/rtf/epub/odt/ods/odp) runs NO engine
+///   and refuses NO backend: the answer is the backend-independent
+///   single `[None]` entry (unit = whole document, single-flow). This is
+///   a deliberate divergence from conversion routing's `UnsupportedBackend`
+///   pairs (html+oxide/anydoc, the ODF family+oxide): geometry runs no
+///   engine on that row, so there is nothing to refuse and nothing is
+///   silently fallen back — the same statement both backends' docs
+///   carry.
+///
+/// The table is total: every `Kind` is one `Ok` arm (or the refusal) —
+/// no format falls out of a default arm unasked.
+///
+/// `Ok(None)` = the no-geometry row; `Ok(Some(Engine))` = the engine the
+/// geometry read runs on; `Err` = the anydoc capability refusal.
+///
+/// `bytes` is the (prefix of the) document the format is being resolved
+/// for, so the refusal names the CONTAINER the bytes are
+/// ([`resolved_name`]: the Excel kind's one container-aware case — a
+/// legacy OLE workbook is `xls`, a ZIP package `xlsx`), never the kind's
+/// default spelling.
+fn geometry_engine(
+    kind: Kind,
+    backend: Backend,
+    bytes: &[u8],
+) -> Result<Option<Engine>, DocumentError> {
+    let format_name = resolved_name(kind, bytes);
+    match (kind, backend) {
+        (Kind::Pdf, Backend::Anydoc) => Err(anydoc_capability_refusal(
+            PDF_GEOMETRY_CAPABILITY,
+            Kind::Pdf.name(),
+        )),
+        (Kind::Pdf, _) => Ok(Some(Engine::PdfOxide)),
+        (Kind::Docx | Kind::Pptx | Kind::Excel | Kind::Doc | Kind::Ppt, Backend::Anydoc) => Err(
+            anydoc_capability_refusal(OFFICE_GEOMETRY_CAPABILITY, format_name),
+        ),
+        (Kind::Docx | Kind::Pptx | Kind::Excel | Kind::Doc | Kind::Ppt, _) => {
+            Ok(Some(Engine::OfficeOxide))
+        }
+        (
+            Kind::Html | Kind::Rtf | Kind::Odt | Kind::Ods | Kind::Odp | Kind::Epub | Kind::Csv,
+            _,
+        ) => Ok(None),
+    }
+}
+
+/// The PDF lane's capability name in the anydoc refusal (why this call
+/// cannot run there): the declared page-box read anydoc's whole-document
+/// PDF surface has no counterpart for.
+const PDF_GEOMETRY_CAPABILITY: &str = "the declared page-box geometry (no per-page box surface)";
+
+/// The office lane's capability name in the anydoc refusal: the spec's
+/// own "page geometry" — the refusal template spells the format beside
+/// it (`cannot serve page geometry for {format}`).
+const OFFICE_GEOMETRY_CAPABILITY: &str = "page geometry";
 
 /// The document-engine lanes' default input ceiling: 32 MiB, applied to
 /// the two lanes that amplify their input into resident memory: anydoc
@@ -814,6 +949,99 @@ pub fn provisional_read_ceiling(
     } else {
         DEFAULT_ANYDOC_INPUT_LIMIT
     }
+}
+
+/// The geometry surface's pre-read capability probe: the
+/// [`anydoc_capability_refusal`] the `backend="anydoc"` call will raise,
+/// resolved as far as the format resolves WITHOUT the authoritative
+/// (whole-document) read — an explicit `format=` decides alone, then the
+/// content markers in `bytes` (the `data=` lane's own bytes; the `path=`
+/// lane's bounded 64 KiB sniff prefix), then the name hint's extension.
+///
+/// - `Err(refusal)`: the probed format is on a row anydoc cannot serve
+///   (the pdf row, the office row — the refusal names the container, so
+///   an OLE workbook says `xls`). The binding raises it under the GIL,
+///   before the detach and before the read: the four PDF-only siblings'
+///   exact ordering, which this surface could not keep while its refusal
+///   needed a resolved format. (§6's resolve-first clause is why the
+///   probe cannot fire on an unresolvable prefix — a refusal cannot name
+///   a format it has not resolved.)
+/// - `Ok(None)`: the probe could not resolve the format. The core's
+///   authoritative `resolve` — on the real bytes, post-read — stays the
+///   only truth; whatever refusal fires there fires then.
+/// - `Ok(Some(kind))`: resolved, and the row serves this backend.
+pub fn probe_geometry_capability(
+    bytes: &[u8],
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+) -> Result<Option<Kind>, DocumentError> {
+    match resolve(bytes, name_hint, format) {
+        Err(_) => Ok(None),
+        Ok(kind) => geometry_engine(kind, backend, bytes).map(|_| Some(kind)),
+    }
+}
+
+/// The geometry surface's provisional read ceiling —
+/// [`provisional_read_ceiling`] keyed on the GEOMETRY capability table
+/// ([`geometry_engine`]), not the conversion routing table, because the
+/// two meter different lanes: the only amplifying lane on this surface
+/// is the office leg (its parse materializes the container into resident
+/// memory — the same amplification class the conversion lane meters), so
+/// the 32 MiB default applies to the office row ALONE. The pdf row
+/// (pdf_oxide's own limits govern) and the no-geometry row (no engine
+/// runs at all — spec §6 says so) carry NO default ceiling: an
+/// unbounded-prefix 40 MiB HTML is answered `[None]`, not refused, on
+/// this surface, `path=` and `data=` alike (the parity the conversion
+/// table's ceiling broke). An explicit `max_bytes` still binds
+/// everywhere, pre-read — this function is only consulted under `None`.
+/// An unresolvable prefix meters — the safe direction (the office leg's
+/// post-read default still binds if the full bytes resolve there), the
+/// conversion twin's own bias.
+pub fn provisional_geometry_read_ceiling(
+    prefix: &[u8],
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    fallback: usize,
+) -> usize {
+    // Some(Some(office)) = the amplifying row; Some(Some(pdf)) /
+    // Some(None) = rows with no default ceiling; None = the prefix does
+    // not resolve at all (meters, the safe direction).
+    let lane = |bytes: &[u8]| {
+        resolve(bytes, name_hint, format)
+            .ok()
+            .and_then(|kind| geometry_engine(kind, backend, bytes).ok())
+    };
+    let no_default_ceiling = |resolved: Option<Option<Engine>>| {
+        matches!(resolved, Some(Some(Engine::PdfOxide)) | Some(None))
+    };
+    // Drop a trailing partial line so the CSV witness sees only whole
+    // lines — the conversion twin's trim (the untrimmed view below closes
+    // the long-row gap the trim opens).
+    let end = match prefix.iter().rposition(|&b| b == b'\n') {
+        Some(nl) => nl + 1,
+        None => prefix.len(),
+    };
+    let head = &prefix[..end];
+    let unmetered = no_default_ceiling(lane(head)) || no_default_ceiling(lane(prefix));
+    if unmetered {
+        fallback
+    } else {
+        DEFAULT_ANYDOC_INPUT_LIMIT
+    }
+}
+
+/// Whether an explicit format NAME lands on the geometry table's
+/// no-geometry row (the format-determined single `[None]` answer): the
+/// binding layer's no-read door's predicate. When the caller named the
+/// format, the core's `resolve` short-circuits on the name and the
+/// geometry table runs no engine on this row — so the bytes can be
+/// consulted by nobody, and the file need not be read at all. Keyed on
+/// the table itself, never a second spelling of its row.
+pub fn is_no_geometry_format(name: &str) -> bool {
+    Kind::from_name(name)
+        .is_some_and(|kind| geometry_engine(kind, Backend::Auto, &[]).ok() == Some(None))
 }
 
 /// Resolve the format: the explicit name (any leading dot tolerated) beats
@@ -1717,6 +1945,353 @@ fn office_markdown(bytes: Vec<u8>, kind: Kind) -> Result<String, DocumentError> 
         .map(|doc| doc.to_markdown())
 }
 
+/// The multi-format `page_geometry` probe: one entry per unit of the
+/// resolved format's geometry lane (the §6 matrix), `None` where a unit
+/// declares no geometry. The spine mirrors [`convert`]'s shape — resolve,
+/// route through the geometry table, refuse, run the one engine leg —
+/// with the surface's own refusal order (§6, pinned): the format resolves
+/// first (the capability refusal names it), then the capability refusal,
+/// then the password-kind refusal, then `max_bytes` (zero refused HERE —
+/// the binding layer no longer pre-empts it on this surface, so the
+/// value refusal lands after the capability and password-kind checks
+/// where §6 sequences it; an explicit budget is the binding layer's
+/// pre-read gate and the core's post-read ceiling on the office leg;
+/// `None` keeps the 32 MiB default there), then the engine legs' own
+/// encrypted doors.
+///
+/// Per-entry `None` is the single carve-out to no-partial-success: a unit
+/// whose own box declaration cannot be read (or whose declared extent is
+/// non-positive/non-finite) is a `None` entry, siblings intact — see
+/// `pdf_impl::page_geometry` for the PDF rule and [`office_geometry`]'s
+/// per-section alignment for the office one. The no-geometry row is the
+/// backend-independent `[None]`: no engine runs, no refusal fires, and a
+/// `password=` is still refused (a silently-ignored password would claim
+/// a check this surface never ran).
+pub fn page_geometry(
+    bytes: Vec<u8>,
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    options: &ConvertOptions,
+) -> Result<Vec<Option<PageGeometry>>, DocumentError> {
+    let kind = resolve(&bytes, name_hint, format)?;
+    let lane = geometry_engine(kind, backend, &bytes)?;
+    if options.password.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Convert(format!(
+            "password= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.max_bytes.is_some_and(|limit| limit == 0) {
+        return Err(DocumentError::Convert("max_bytes must be positive".into()));
+    }
+    match lane {
+        // The no-geometry row: unit = whole document (single-flow), so
+        // exactly one entry, `None` (never `[]`), for every backend.
+        None => Ok(vec![None]),
+        Some(Engine::PdfOxide) => {
+            let entries = pdf_impl::page_geometry(bytes, options.password).map_err(pdf_error)?;
+            Ok(entries
+                .into_iter()
+                .map(|entry| entry.map(PageGeometry::from_page_box))
+                .collect())
+        }
+        Some(Engine::OfficeOxide) => {
+            // The office leg parses the container into resident memory (the
+            // same amplification class the conversion lane meters): the
+            // same input ceiling, explicit budget over the 32 MiB default.
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::OfficeOxide),
+                    render_size(limit),
+                )));
+            }
+            office_geometry(bytes, kind)
+        }
+        // geometry_engine's table is total: the Anydoc and Html2Md lanes
+        // never come back from it.
+        Some(_) => Err(DocumentError::Convert(
+            "geometry: unreachable engine lane".into(),
+        )),
+    }
+}
+
+/// The office leg of [`page_geometry`]: the OOXML families read their RAW
+/// office_oxide layers for the declared sizes (the honest `Option`s —
+/// `to_ir()`'s page-setup fabrication is the hole this surface exists to
+/// avoid: a margins-only DOCX sectPr or an attribute-less `<w:pgSz>`
+/// fabricates Letter through the IR, and XLSX's converter substitutes
+/// Letter for sheets that declare only margins), with the counts from the
+/// layer the §6 matrix names. The legacy trio (and the Excel kind's OLE
+/// container, which IS a legacy workbook) reads the IR for the section
+/// count alone. The container audit runs first, exactly as on the
+/// conversion lane, and the parse's typed errors (an encrypted-OOXML CFB
+/// container named as such, a missing part) are the whole call's
+/// `ValueError`s, never `None`/`[]`.
+fn office_geometry(bytes: Vec<u8>, kind: Kind) -> Result<Vec<Option<PageGeometry>>, DocumentError> {
+    audit_oxide_container(&bytes)?;
+    // The Excel kind's container decision, taken while the bytes are
+    // still owned (the parse below moves them): the OLE signature is
+    // legacy xls, a ZIP package is xlsx — the same check the reported
+    // name and the conversion lane's engine choice make.
+    let legacy_xls = kind == Kind::Excel && is_ole_container(&bytes);
+    let format = match kind {
+        // The Excel kind's one container-aware case (office_markdown's own
+        // check): the OLE signature is legacy xls, a ZIP package is xlsx —
+        // the hoisted `legacy_xls`, not a second container read.
+        Kind::Excel if legacy_xls => office_oxide::DocumentFormat::Xls,
+        Kind::Excel => office_oxide::DocumentFormat::Xlsx,
+        Kind::Docx => office_oxide::DocumentFormat::Docx,
+        Kind::Pptx => office_oxide::DocumentFormat::Pptx,
+        Kind::Doc => office_oxide::DocumentFormat::Doc,
+        Kind::Ppt => office_oxide::DocumentFormat::Ppt,
+        // unreachable by construction: geometry_engine routes only the
+        // office families here.
+        _ => {
+            return Err(Convert("office_oxide: unreachable kind".into()));
+        }
+    };
+    let doc = office_oxide::Document::from_reader(Cursor::new(bytes), format)
+        .map_err(|e| Convert(format!("office_oxide: {e}")))?;
+    match kind {
+        // DOCX: the declared bit AND the size from the RAW sections
+        // (twips ÷ 20.0, positive dims required); the section count and
+        // order from `to_ir()` (the converter-internal body-window logic
+        // is not replicated here), aligned by the converter's own
+        // `doc.sections.get(idx)` rule: an IR section whose index reaches
+        // past the raw sections is a None entry, mirroring the converter.
+        Kind::Docx => {
+            let count = doc.to_ir().sections.len();
+            let raw = doc
+                .as_docx()
+                .ok_or_else(|| Convert("office_oxide: the docx parse lost its raw layer".into()))?;
+            Ok((0..count)
+                .map(|idx| docx_section_geometry(raw, idx))
+                .collect())
+        }
+        // PPTX: the raw layer's deck-wide slide size, EMU ÷ 12700.0 in
+        // float (NOT the IR's ÷635→twips-integer path, which truncates
+        // before this surface would see it), one entry per raw slide.
+        Kind::Pptx => {
+            let raw = doc
+                .as_pptx()
+                .ok_or_else(|| Convert("office_oxide: the pptx parse lost its raw layer".into()))?;
+            let count = raw.slides.len();
+            let base = raw.presentation.slide_size.as_ref().and_then(|size| {
+                let (width_pt, height_pt) = (size.cx as f32 / 12700.0, size.cy as f32 / 12700.0);
+                let finite_positive = |value: f32| value.is_finite() && value > 0.0;
+                (finite_positive(width_pt) && finite_positive(height_pt)).then_some(PageGeometry {
+                    width_pt,
+                    height_pt,
+                    rotation: 0,
+                    crop: None,
+                })
+            });
+            Ok(vec![base; count])
+        }
+        // The legacy trio — the Excel kind's OLE container included: a
+        // genuine .xls parsed through the legacy converter declares zero
+        // geometry anywhere, and its IR carries one Section per worksheet
+        // (convert_xls's sheets loop; convert_doc one for the document,
+        // convert_ppt one per slide), so the answer is all-None at the IR
+        // section count. The raw xlsx layer this branch must NOT reach
+        // for is None by construction here (a legacy parse has no xlsx
+        // raw layer to lose) — the arm the all-None answer protects.
+        Kind::Doc | Kind::Ppt | Kind::Excel if legacy_xls => {
+            let count = doc.to_ir().sections.len();
+            Ok(vec![None; count])
+        }
+        // XLSX (the ZIP container): all-None — a worksheet is an
+        // unbounded grid, not a page, and the IR's default substitution
+        // makes Some untrustworthy anyway. The count is the RAW worksheet
+        // layer's (all sheets, hidden included), not the IR's
+        // worksheet+Charts count.
+        Kind::Excel => {
+            let raw = doc
+                .as_xlsx()
+                .ok_or_else(|| Convert("office_oxide: the xlsx parse lost its raw layer".into()))?;
+            Ok(vec![None; raw.worksheets.len()])
+        }
+        // unreachable by construction: every office kind is covered above
+        // (the guarded legacy arm took the OLE-container Excel case).
+        _ => {
+            let count = doc.to_ir().sections.len();
+            Ok(vec![None; count])
+        }
+    }
+}
+
+/// One DOCX section's geometry: the RAW `SectionProperties` at `idx`, its
+/// `page_size` if declared with positive dims (twips ÷ 20.0). `None` when
+/// the index is beyond the raw sections, the section declares only
+/// margins (the exact shape `to_ir()` fabricates Letter for — the hole
+/// this raw-layer read exists to close), or the declared dims are
+/// non-positive. Office entries always report rotation 0 and no crop.
+fn docx_section_geometry(
+    raw: &office_oxide::docx::DocxDocument,
+    idx: usize,
+) -> Option<PageGeometry> {
+    let size = &raw.sections.get(idx)?.page_size.as_ref()?;
+    let (width, height) = (size.width.0, size.height.0);
+    (width > 0 && height > 0).then_some(PageGeometry {
+        width_pt: width as f32 / 20.0,
+        height_pt: height as f32 / 20.0,
+        rotation: 0,
+        crop: None,
+    })
+}
+
+/// The multi-format `page_layout` probe: per unit of the resolved format's
+/// geometry lane, the unit's geometry PLUS — PDF only — the page's text
+/// spans, lines, and image boxes in the page's declared render space
+/// (`pdf_impl::page_layout`, spec §5: the D1 space, one transform, one
+/// open). The spine is [`page_geometry`]'s exactly (resolve → capability →
+/// password-kind → max_bytes → door), with the `pages=` selection the two
+/// conversion probes take: delivered to the PDF leg, which normalizes it
+/// with `markdown_pages`' exact rule and error strings, and returns the
+/// output parallel to the NORMALIZED selection, every entry carrying its
+/// `page_index`. `pages=` is PDF-ONLY (a page index cannot name a
+/// section/slide/worksheet): a non-`None` selection on any non-PDF row is
+/// convert()'s own typed refusal, never a silent whole-document answer.
+///
+/// Layout content is PDF-only ("the capability table applies to
+/// page_layout identically; PDF-only for layout"): no office engine
+/// exposes text/image boxes, so the office rows serve their geometry with
+/// EMPTY spans/lines/images — the honest empty (the empty-lists-not-errors
+/// law's shape: no engine surface, never a fabricated one), the no-geometry
+/// row its single `geometry: None` entry. Every entry carries the resolved
+/// format's vocabulary name (`resolved_name` spelling) as its `format`
+/// field: the format — not the entry's shape — tells a consumer holding
+/// only an entry why the layout lists are empty (an office row: no text
+/// surfaces; a blank, scanned, or content-unparseable PDF page: the same
+/// shape on the pdf lane). PDF failure semantics: per
+/// `pdf_impl::page_layout` (§7): a page whose box read fails is
+/// `geometry: None` + empty lists, siblings intact; an unparseable content
+/// stream is empty lists, geometry intact; encrypted doors fail closed.
+/// Image boxes are never visibility-filtered (the engine's 2 pt drop law
+/// is the TEXT walk's): a wholly-outside-the-crop image is returned with
+/// out-of-range coordinates — the consumer clips to the page box.
+/// A non-zero `rotation_degrees` on a span means its box is the engine's
+/// flattened approximation and MUST NOT be used as a highlight box —
+/// and the flag does NOT cover vertical writing (the verified T9 edge,
+/// probed: a WMode-1 tategaki run carries `rotation_degrees == 0` with a
+/// negative-width flattened box; see `pdf_impl::page_layout` for the
+/// measured evidence).
+///
+/// Refusal order (the pinned §6 precedence, unchanged by the `pages=`
+/// refusal): a malformed `pages=` selection or a zero `max_bytes` is
+/// reported AFTER the capability refusal, never before it — the sibling
+/// surfaces' behavior note, restated here because both arguments parse at
+/// this seam.
+pub fn page_layout(
+    bytes: Vec<u8>,
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    pages: Option<Vec<usize>>,
+    options: &ConvertOptions,
+) -> Result<Vec<pdf_impl::PageLayoutData>, DocumentError> {
+    let kind = resolve(&bytes, name_hint, format)?;
+    let lane = geometry_engine(kind, backend, &bytes)?;
+    // The entry's provenance marker: the resolved format's vocabulary
+    // name (`resolved_name` spelling — the same string to_markdown
+    // reports, the Excel kind's container-aware xls/xlsx case
+    // included), resolved ONCE here and stamped on every entry of every
+    // lane below (pdf_impl threads it through its constructors). The
+    // format — not the entry's shape — tells a consumer holding only an
+    // entry why its spans/lines/images are empty (an office row carries
+    // declared geometry with no text surfaces; a blank or scanned PDF
+    // page looks identical).
+    let format_name = resolved_name(kind, &bytes);
+    // `pages=` is a PDF-lane parameter: the selection indexes PAGES, and a
+    // section/slide/worksheet is not a page — a non-None selection on any
+    // non-PDF row is convert()'s own typed refusal (byte-identical wording,
+    // the same `Pages` error), never a silent whole-document answer. The
+    // capability refusal above still wins first (convert()'s ordering: the
+    // engine route precedes the pages check). On the PDF row the selection
+    // normalizes in `pdf_impl::page_layout` (the empty-selection and
+    // out-of-range refusals, markdown_pages' byte-pinned strings).
+    if pages.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Pages(format!(
+            "pages= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.password.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Convert(format!(
+            "password= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.max_bytes.is_some_and(|limit| limit == 0) {
+        return Err(DocumentError::Convert("max_bytes must be positive".into()));
+    }
+    match lane {
+        // The no-geometry row: unit = whole document (single-flow), so
+        // exactly one entry with no geometry and no layout content, for
+        // every backend.
+        None => Ok(vec![pdf_impl::PageLayoutData {
+            page_index: 0,
+            format: format_name.to_string(),
+            geometry: None,
+            spans: Vec::new(),
+            lines: Vec::new(),
+            images: Vec::new(),
+        }]),
+        Some(Engine::PdfOxide) => {
+            pdf_impl::page_layout(bytes, pages.as_deref(), options.password, format_name)
+                .map_err(pages_error)
+        }
+        Some(Engine::OfficeOxide) => {
+            // The office leg parses the container into resident memory (the
+            // same amplification class the conversion lane meters): the
+            // same input ceiling, explicit budget over the 32 MiB default.
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::OfficeOxide),
+                    render_size(limit),
+                )));
+            }
+            Ok(office_geometry(bytes, kind)?
+                .into_iter()
+                .enumerate()
+                .map(|(page_index, geometry)| pdf_impl::PageLayoutData {
+                    page_index,
+                    format: format_name.to_string(),
+                    geometry: geometry.map(|g| pdf_impl::PageBox {
+                        width_pt: g.width_pt,
+                        height_pt: g.height_pt,
+                        rotation: g.rotation,
+                        crop: g.crop,
+                    }),
+                    spans: Vec::new(),
+                    lines: Vec::new(),
+                    images: Vec::new(),
+                })
+                .collect())
+        }
+        // geometry_engine's table is total: the Anydoc and Html2Md lanes
+        // never come back from it.
+        Some(_) => Err(DocumentError::Convert(
+            "layout: unreachable engine lane".into(),
+        )),
+    }
+}
+
 /// The HTML conversion: html-to-markdown-rs under the options the lane
 /// measured with. `extract_metadata: false` suppresses the YAML frontmatter
 /// its default configuration emits for `<title>`/`<meta>`: the body is the
@@ -1779,6 +2354,7 @@ fn anydoc_error(err: AnydocError) -> DocumentError {
 
 #[cfg(all(test, feature = "documents"))]
 mod tests {
+
     use super::*;
 
     /// The polluted-head HTML fixture: title, style, and script all noise a
@@ -2823,7 +3399,10 @@ mod tests {
         // anydoc PDF surface pointed at): the binding layer raises this
         // exact text, under the GIL, for all four functions, so the
         // string is the contract and lives with the routing table.
-        let err = anydoc_capability_refusal("the per-page text probe (the OCR-routing signal)");
+        let err = anydoc_capability_refusal(
+            "the per-page text probe (the OCR-routing signal)",
+            Kind::Pdf.name(),
+        );
         assert_eq!(
             err.to_string(),
             "backend \"anydoc\" cannot serve the per-page text probe (the OCR-routing signal): \
@@ -2837,7 +3416,7 @@ mod tests {
             "per-page classification (its only per-page knowledge is the binary needs-OCR refusal)",
             "the /Annots link walk (it has no annotation surface)",
         ] {
-            let text = anydoc_capability_refusal(capability).to_string();
+            let text = anydoc_capability_refusal(capability, Kind::Pdf.name()).to_string();
             assert!(
                 text.contains(capability),
                 "must name the capability: {text:?}"
@@ -2847,6 +3426,866 @@ mod tests {
                 "must point at the anydoc PDF surface: {text:?}"
             );
         }
+        // the office-family refusal (the geometry surface's second
+        // message, the spec's own string): same shape, the format named,
+        // the lack restated — byte-pinned per format.
+        for format in ["docx", "pptx", "xlsx", "doc", "xls", "ppt"] {
+            let err = anydoc_capability_refusal("page geometry", format);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "backend \"anydoc\" cannot serve page geometry for {format}: anydoc has \
+                     no geometry surface; use backend='auto' or 'oxide' here"
+                )
+            );
+        }
+        // and the geometry probe's own PDF capability rides the historical
+        // message unchanged (the format parameter selects the doctrine
+        // text, never a second PDF wording)
+        let geometry_pdf = anydoc_capability_refusal(PDF_GEOMETRY_CAPABILITY, "pdf").to_string();
+        assert!(geometry_pdf.contains("cannot serve the declared page-box geometry"));
+        assert!(geometry_pdf.contains("to_markdown/to_text with backend=\"anydoc\""));
+    }
+
+    #[test]
+    fn the_geometry_capability_table_is_total() {
+        // Every kind × every backend: the §6 matrix, asserted as the
+        // function's own totality. `Ok(None)` is the no-geometry row (no
+        // engine runs, the backend-independent [None]); the office and
+        // pdf rows route to their engines for auto/oxide and refuse
+        // anydoc; and — the deliberate divergence from conversion
+        // routing — NO no-geometry pair raises UnsupportedBackend here
+        // (html+oxide/anydoc and the ODF family+oxide convert-refuse, but
+        // geometry runs no engine on that row, so there is nothing to
+        // refuse).
+        for backend in [Backend::Auto, Backend::Oxide, Backend::Anydoc] {
+            match geometry_engine(Kind::Pdf, backend, b"") {
+                Ok(Some(Engine::PdfOxide)) => assert!(backend != Backend::Anydoc),
+                Err(DocumentError::Convert(what)) => {
+                    assert_eq!(backend, Backend::Anydoc, "pdf");
+                    assert!(
+                        what.contains("cannot serve the declared page-box geometry"),
+                        "{what}"
+                    );
+                }
+                other => panic!("pdf x {backend:?}: {other:?}"),
+            }
+            for kind in [Kind::Docx, Kind::Pptx, Kind::Excel, Kind::Doc, Kind::Ppt] {
+                match geometry_engine(kind, backend, b"") {
+                    Ok(Some(Engine::OfficeOxide)) => assert!(backend != Backend::Anydoc),
+                    Err(DocumentError::Convert(what)) => {
+                        assert_eq!(backend, Backend::Anydoc, "{kind:?}");
+                        assert!(what.contains("no geometry surface"), "{what}");
+                    }
+                    other => panic!("{kind:?} x {backend:?}: {other:?}"),
+                }
+            }
+            for kind in [
+                Kind::Html,
+                Kind::Rtf,
+                Kind::Odt,
+                Kind::Ods,
+                Kind::Odp,
+                Kind::Epub,
+                Kind::Csv,
+            ] {
+                assert_eq!(
+                    geometry_engine(kind, backend, b"").ok(),
+                    Some(None),
+                    "the no-geometry row must be backend-independent: {kind:?} x {backend:?}"
+                );
+            }
+        }
+    }
+
+    // --- the page-geometry spine and its office legs (the §9 pins) ---------
+
+    /// A minimal readable docx whose body XML is the fixture's to write
+    /// (the sectPr/pgSz shapes the DOCX leg's pins need). The container is
+    /// `write_docx_bytes`'s shape: content types + document part.
+    fn docx_with_body(body: &str) -> Vec<u8> {
+        let document = format!(
+            "<?xml version=\"1.0\"?>\n<w:document xmlns:w=\"http://schemas.openxmlformats.org/\
+             wordprocessingml/2006/main\"><w:body>{body}</w:body></w:document>"
+        );
+        let content_types = b"<?xml version=\"1.0\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>";
+        let rels = b"<?xml version=\"1.0\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>";
+        zip_of(&[
+            ("[Content_Types].xml", content_types),
+            ("_rels/.rels", rels),
+            ("word/document.xml", document.as_bytes()),
+        ])
+    }
+
+    /// A minimal readable pptx: `slide_size` (the raw sldSz fragment, or
+    /// `None` to omit the element) and the slide parts (an empty deck for
+    /// `&[]`).
+    fn pptx_with(slide_size: Option<&str>, slides: &[&str]) -> Vec<u8> {
+        let sld_id_list = slides
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                format!(
+                    "<p:sldId id=\"{}\" r:id=\"rId{}\"/>",
+                    256 + index,
+                    index + 1
+                )
+            })
+            .collect::<String>();
+        let sld_sz = slide_size.unwrap_or("");
+        let presentation = format!(
+            "<?xml version=\"1.0\"?>\n<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/\
+             presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/\
+             officeDocument/2006/relationships\"><p:sldIdLst>{sld_id_list}</p:sldIdLst>\
+             {sld_sz}</p:presentation>"
+        );
+        let mut entries: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "[Content_Types].xml",
+                br#"<?xml version="1.0"?><?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/></Types>"#
+                    .to_vec(),
+            ),
+            (
+                "_rels/.rels",
+                br#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#
+                    .to_vec(),
+            ),
+            ("ppt/presentation.xml", presentation.into_bytes()),
+        ];
+        let mut slide_rels = String::from(
+            "<?xml version=\"1.0\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+        );
+        for (index, body) in slides.iter().enumerate() {
+            let name = format!("ppt/slides/slide{}.xml", index + 1);
+            let slide = format!(
+                "<?xml version=\"1.0\"?>\n<p:sld xmlns:p=\"http://schemas.openxmlformats.org/\
+                 presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/\
+                 drawingml/2006/main\"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>{body}\
+                 </p:spTree></p:cSld></p:sld>"
+            );
+            entries.push((Box::leak(name.into_boxed_str()), slide.into_bytes()));
+            slide_rels.push_str(&format!(
+                "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/\
+                 officeDocument/2006/relationships/slide\" Target=\"slides/slide{}.xml\"/>",
+                index + 1,
+                index + 1
+            ));
+        }
+        slide_rels.push_str("</Relationships>");
+        entries.push(("ppt/_rels/presentation.xml.rels", slide_rels.into_bytes()));
+        let owned: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(name, data)| (*name, data.as_slice()))
+            .collect();
+        zip_of(&owned)
+    }
+
+    /// A minimal readable xlsx: `sheet_states` carries one sheet name per
+    /// entry (`Some("hidden")` for a hidden one); `sheet_extras` rides
+    /// into every sheet's XML (the pageSetup fragment the doctrine pin
+    /// needs).
+    fn xlsx_with(sheets: &[(&str, Option<&str>)], sheet_extras: &str) -> Vec<u8> {
+        let main_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        let rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let sheet_list = sheets
+            .iter()
+            .enumerate()
+            .map(|(index, (name, state))| {
+                let hidden = match state {
+                    Some("hidden") => " state=\"hidden\"",
+                    _ => "",
+                };
+                format!(
+                    "<sheet name=\"{name}\" sheetId=\"{}\" r:id=\"rId{}\"{hidden}/>",
+                    index + 1,
+                    index + 1
+                )
+            })
+            .collect::<String>();
+        let workbook = format!(
+            "<?xml version=\"1.0\"?>\n<workbook xmlns=\"{main_ns}\" xmlns:r=\"{rel_ns}\">\
+             <sheets>{sheet_list}</sheets></workbook>"
+        );
+        let mut rels = String::from(
+            "<?xml version=\"1.0\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+        );
+        for index in 0..sheets.len() {
+            rels.push_str(&format!(
+                "<Relationship Id=\"rId{}\" Type=\"{rel_ns}/worksheet\" \
+                 Target=\"worksheets/sheet{}.xml\"/>",
+                index + 1,
+                index + 1
+            ));
+        }
+        rels.push_str("</Relationships>");
+        let mut content_types = String::from(
+            "<?xml version=\"1.0\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>",
+        );
+        for index in 0..sheets.len() {
+            content_types.push_str(&format!(
+                "<Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\
+                 \"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
+                index + 1
+            ));
+        }
+        content_types.push_str("</Types>");
+        let mut entries: Vec<(&str, Vec<u8>)> = vec![
+            ("[Content_Types].xml", content_types.into_bytes()),
+            (
+                "_rels/.rels",
+                format!(
+                    "<?xml version=\"1.0\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"{rel_ns}/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+                )
+                .into_bytes(),
+            ),
+            ("xl/workbook.xml", workbook.into_bytes()),
+            ("xl/_rels/workbook.xml.rels", rels.into_bytes()),
+        ];
+        for index in 0..sheets.len() {
+            let name = format!("xl/worksheets/sheet{}.xml", index + 1);
+            let sheet = format!(
+                "<?xml version=\"1.0\"?>\n<worksheet xmlns=\"{main_ns}\">\
+                 <sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>cell</t></is></c>\
+                 </row></sheetData>{sheet_extras}</worksheet>"
+            );
+            entries.push((Box::leak(name.into_boxed_str()), sheet.into_bytes()));
+        }
+        let owned: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(name, data)| (*name, data.as_slice()))
+            .collect();
+        zip_of(&owned)
+    }
+
+    /// The geometry answers for bytes named by extension: the spine's
+    /// entry as the binding calls it (no explicit format; the extension
+    /// resolves).
+    fn geometry_named(name: &str, bytes: &[u8]) -> Vec<Option<PageGeometry>> {
+        page_geometry(
+            bytes.to_vec(),
+            Some(name),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap()
+    }
+
+    fn geometry_err(name: &str, bytes: &[u8], backend: Backend) -> DocumentError {
+        page_geometry(
+            bytes.to_vec(),
+            Some(name),
+            None,
+            backend,
+            &ConvertOptions::default(),
+        )
+        .expect_err("the call must refuse")
+    }
+
+    /// §9 item 8, the DOCX leg: pgSz-bearing → Some(612, 792) exact;
+    /// margins-only → None (the raw-layer amendment's own pinning test —
+    /// this FAILS under the to_ir()-only path, which fabricates Letter);
+    /// no sectPr → the single None; `<w:pgSz>` without attributes → the
+    /// engine's Letter default (the named engine limitation); a section
+    /// index reaching past the raw sections → None, the converter's own
+    /// `sections.get(idx)` rule; office entries always rotation 0, no
+    /// crop.
+    #[test]
+    fn the_docx_geometry_is_the_raw_layers_declared_size() {
+        let pgsz = geometry_named(
+            "a.docx",
+            &docx_with_body(
+                "<w:p><w:r><w:t>body</w:t></w:r></w:p>\
+                 <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
+            ),
+        );
+        assert_eq!(pgsz.len(), 1);
+        assert_eq!(
+            pgsz[0],
+            Some(PageGeometry {
+                width_pt: 612.0,
+                height_pt: 792.0,
+                rotation: 0,
+                crop: None,
+            })
+        );
+        // margins-only: page_size is None in the RAW layer → None entry.
+        // Under to_ir() this same sectPr yields a fabricated Letter — the
+        // hole the raw read closes.
+        let margins_only = geometry_named(
+            "m.docx",
+            &docx_with_body(
+                "<w:p><w:r><w:t>body</w:t></w:r></w:p>\
+                 <w:sectPr><w:pgMar w:top=\"1440\" w:bottom=\"1440\" \
+                 w:left=\"1800\" w:right=\"1800\"/></w:sectPr>",
+            ),
+        );
+        assert_eq!(margins_only, vec![None]);
+        // no sectPr at all: one section by construction, no declared size
+        let no_sectpr = geometry_named("n.docx", &write_docx_bytes());
+        assert_eq!(no_sectpr, vec![None]);
+        // `<w:pgSz>` without attributes: the RAW layer's Letter default —
+        // the named engine limitation, pinned as the documented behavior.
+        let bare = geometry_named(
+            "b.docx",
+            &docx_with_body("<w:p><w:r><w:t>body</w:t></w:r></w:p><w:sectPr><w:pgSz/></w:sectPr>"),
+        );
+        assert_eq!(
+            bare[0],
+            Some(PageGeometry {
+                width_pt: 612.0,
+                height_pt: 792.0,
+                rotation: 0,
+                crop: None,
+            })
+        );
+        // a mid-document section break + a body-level sectPr: two IR
+        // sections, each aligned to its raw section IN ORDER (the
+        // converter's own `sections.get(idx)` rule) — different declared
+        // sizes per section, both Some.
+        let two_sections = geometry_named(
+            "two.docx",
+            &docx_with_body(
+                "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr>\
+                 </w:pPr><w:r><w:t>first</w:t></w:r></w:p>\
+                 <w:p><w:r><w:t>second</w:t></w:r></w:p>\
+                 <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
+            ),
+        );
+        assert_eq!(two_sections.len(), 2);
+        assert_eq!(two_sections[0].unwrap().width_pt, 595.3); // 11906 twips ÷ 20
+        assert_eq!(two_sections[1].unwrap().width_pt, 612.0); // 12240 twips ÷ 20
+        let beyond = geometry_named(
+            "beyond.docx",
+            &docx_with_body(
+                "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr>\
+                 </w:pPr><w:r><w:t>first</w:t></w:r></w:p>\
+                 <w:p><w:r><w:t>second</w:t></w:r></w:p>\
+                 <w:p><w:r><w:t>third</w:t></w:r></w:p>",
+            ),
+        );
+        assert_eq!(beyond.len(), 2);
+        assert!(beyond[0].is_some());
+        assert_eq!(
+            beyond[1], None,
+            "the trailing window beyond the raw sections"
+        );
+    }
+
+    /// §9 item 8/9: the PPTX leg reads the RAW slide size (EMU ÷ 12700.0
+    /// in float — 12192000×6858000 EMU is exactly 960×540 points), one
+    /// entry per slide; undeclared → None everywhere; a 0-slide deck →
+    /// `[]` (zero units); and the XLSX leg is all-None at the RAW
+    /// worksheet count — a pageSetup-bearing sheet included, hidden
+    /// sheets included.
+    #[test]
+    fn the_pptx_geometry_is_the_raw_emu_layer_and_xlsx_is_all_none() {
+        let sized = geometry_named(
+            "deck.pptx",
+            &pptx_with(
+                Some("<p:sldSz cx=\"12192000\" cy=\"6858000\"/>"),
+                &["<p:sp/>", "<p:sp/>"],
+            ),
+        );
+        assert_eq!(sized.len(), 2);
+        for entry in &sized {
+            assert_eq!(
+                entry,
+                &Some(PageGeometry {
+                    width_pt: 960.0,
+                    height_pt: 540.0,
+                    rotation: 0,
+                    crop: None,
+                })
+            );
+        }
+        // undeclared slide size: None everywhere, slides still counted
+        let undeclared = geometry_named(
+            "plain.pptx",
+            &pptx_with(None, &["<p:sp/>", "<p:sp/>", "<p:sp/>"]),
+        );
+        assert_eq!(undeclared, vec![None, None, None]);
+        // the 0-slide deck: [] is a count (zero units), reachable here
+        let empty_deck = geometry_named("none.pptx", &pptx_with(None, &[]));
+        assert_eq!(empty_deck, Vec::<Option<PageGeometry>>::new());
+        // XLSX: a pageSetup-bearing sheet is None anyway (the doctrine
+        // pin: the IR would fabricate Letter for it); the count is the
+        // raw worksheet count, hidden sheets included.
+        let paged = geometry_named(
+            "book.xlsx",
+            &xlsx_with(
+                &[("Samples", None)],
+                "<pageMargins left=\"0.7\" right=\"0.7\"/><pageSetup paperSize=\"1\"/>",
+            ),
+        );
+        assert_eq!(paged, vec![None]);
+        let hidden = geometry_named(
+            "two.xlsx",
+            &xlsx_with(&[("Samples", None), ("Secret", Some("hidden"))], ""),
+        );
+        assert_eq!(hidden, vec![None, None]);
+    }
+
+    /// §9 item 9/10: the single-flow row is exactly `[None]` — by
+    /// content-marker sniff and by explicit name (the same answer), on
+    /// every backend; and the length law over a mini-corpus of every
+    /// family: PDF pages, docx sections, pptx slides, xlsx worksheets,
+    /// legacy IR sections, single-flow one.
+    #[test]
+    fn single_flow_formats_are_one_none_entry_and_lengths_follow_the_matrix() {
+        for (name, bytes) in [
+            ("a.html", POLLUTED_HTML.as_bytes().to_vec()),
+            ("b.csv", b"unit,status\nT-101,healthy\n".to_vec()),
+            ("c.rtf", b"{\\rtf1\\ansi\\pard x\\par\n}\n".to_vec()),
+        ] {
+            for backend in [Backend::Auto, Backend::Oxide, Backend::Anydoc] {
+                let entries = page_geometry(
+                    bytes.clone(),
+                    Some(name),
+                    None,
+                    backend,
+                    &ConvertOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(entries, vec![None], "{name} x {backend:?}");
+            }
+            // the explicit name is the same answer as the sniff
+            let named = page_geometry(
+                bytes.clone(),
+                None,
+                Some(name.split('.').next_back().unwrap()),
+                Backend::Auto,
+                &ConvertOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(named, vec![None], "{name} by format=");
+        }
+        // the length law, every family (the mini-corpus):
+        let pdf = geometry_named("a.pdf", &two_page_pdf("one", "two"));
+        assert_eq!(pdf.len(), 2);
+        assert!(pdf.iter().all(|entry| entry.is_some()));
+        let docx = geometry_named(
+            "a.docx",
+            &docx_with_body("<w:p><w:r><w:t>x</w:t></w:r></w:p>"),
+        );
+        assert_eq!(docx.len(), 1);
+        let pptx = geometry_named("a.pptx", &pptx_with(None, &["<p:sp/>"]));
+        assert_eq!(pptx.len(), 1);
+        let xlsx = geometry_named("a.xlsx", &xlsx_with(&[("S", None), ("T", None)], ""));
+        assert_eq!(xlsx.len(), 2);
+        // the legacy trio, end to end (the committed soffice-generated
+        // fixtures under tests/legacy_corpus/ — OLE bytes no in-test
+        // builder can fake): all-None at the IR section count — doc: the
+        // one document section; xls: one Section per worksheet (three);
+        // ppt: one per slide (three). §4's legacy row, pinned on real
+        // bytes.
+        let doc_fixture = page_geometry(
+            include_bytes!("../tests/legacy_corpus/t.doc").to_vec(),
+            Some("t.doc"),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(doc_fixture, vec![None]);
+        let xls_fixture = page_geometry(
+            include_bytes!("../tests/legacy_corpus/book3.xls").to_vec(),
+            Some("book3.xls"),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(xls_fixture, vec![None, None, None]);
+        let ppt_fixture = page_geometry(
+            include_bytes!("../tests/legacy_corpus/deck3.ppt").to_vec(),
+            Some("deck3.ppt"),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(ppt_fixture, vec![None, None, None]);
+        // the container decision rides the BYTES, not the name: the same
+        // workbook named .xlsx still routes the legacy parser (all-None,
+        // three) — and sniff reports the container's own name.
+        let by_xlsx_name = page_geometry(
+            include_bytes!("../tests/legacy_corpus/book3.xls").to_vec(),
+            Some("book3.xlsx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(by_xlsx_name, vec![None, None, None]);
+        assert_eq!(
+            sniff(include_bytes!("../tests/legacy_corpus/book3.xls")),
+            Some("xls")
+        );
+    }
+
+    /// The refusal order on the geometry spine (§6, pinned): the
+    /// capability refusal (format-aware) precedes the password-kind
+    /// refusal, which precedes the zero-max_bytes refusal, which precedes
+    /// the encrypted door; the pdf lane's own refusals keep their texts.
+    #[test]
+    fn the_geometry_refusals_precede_each_other_in_the_pinned_order() {
+        let docx = docx_with_body("<w:p><w:r><w:t>x</w:t></w:r></w:p>");
+        // anydoc on an office format: the office message, byte-pinned
+        let err = geometry_err("a.docx", &docx, Backend::Anydoc);
+        assert_eq!(
+            err.to_string(),
+            "backend \"anydoc\" cannot serve page geometry for docx: anydoc has no \
+             geometry surface; use backend='auto' or 'oxide' here"
+        );
+        // the refusal names the CONTAINER the bytes are (resolved_name's
+        // one container-aware case): a legacy OLE workbook under anydoc
+        // says xls, never the Excel kind's default xlsx spelling.
+        let err = geometry_err("a.xls", &ole_with_stream("Workbook"), Backend::Anydoc);
+        assert_eq!(
+            err.to_string(),
+            "backend \"anydoc\" cannot serve page geometry for xls: anydoc has no \
+             geometry surface; use backend='auto' or 'oxide' here"
+        );
+        // capability refusal BEFORE the password-kind refusal: a password
+        // on a docx under anydoc surfaces the capability refusal
+        let err = page_geometry(
+            docx.clone(),
+            Some("a.docx"),
+            None,
+            Backend::Anydoc,
+            &ConvertOptions {
+                password: Some("torque"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot serve page geometry"),
+            "{err:?}"
+        );
+        // the password-kind refusal precedes the zero-max_bytes refusal
+        let err = page_geometry(
+            docx.clone(),
+            Some("a.docx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions {
+                password: Some("torque"),
+                max_bytes: Some(0),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("password= applies to PDF documents only"),
+            "{err:?}"
+        );
+        // zero max_bytes refused (the binding refuses it under the GIL;
+        // the core is self-sufficient about it too)
+        let err = page_geometry(
+            docx,
+            Some("a.docx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions {
+                max_bytes: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "max_bytes must be positive");
+        // anydoc on a pdf: the historical PDF message shape, with this
+        // probe's capability named
+        let err = geometry_err("a.pdf", &two_page_pdf("one", "two"), Backend::Anydoc);
+        assert!(
+            err.to_string().starts_with(
+                "backend \"anydoc\" cannot serve the declared page-box geometry \
+                 (no per-page box surface): anydoc's PDF surface is whole-document \
+                 conversion only"
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// §9 item 11, the office leg's input ceiling: an explicit budget
+    /// binds (the same refusal the conversion lane raises, naming the
+    /// office_oxide lane), `None` keeps the 32 MiB default, and the
+    /// garbage container is a typed parse error — never None/[].
+    #[test]
+    fn the_office_geometry_leg_carries_the_input_ceiling_and_typed_parse_errors() {
+        let docx = docx_with_body("<w:p><w:r><w:t>x</w:t></w:r></w:p>");
+        let err = page_geometry(
+            docx.clone(),
+            Some("a.docx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions {
+                max_bytes: Some(64),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("office_oxide engine lane's input ceiling"),
+            "{err:?}"
+        );
+        // under the explicit ceiling: the geometry comes through
+        let entries = page_geometry(
+            docx.clone(),
+            Some("a.docx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions {
+                max_bytes: Some(1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(entries, vec![None]);
+        // garbage named docx: the container parse's typed Convert error
+        let err = geometry_err(
+            "junk.docx",
+            b"PK\x03\x04 not a package at all",
+            Backend::Auto,
+        );
+        assert!(matches!(err, DocumentError::Convert(_)), "{err:?}");
+        // the encrypted-OOXML door (§7): an OLE/CFB container standing
+        // where a docx belongs — the encrypted-package shape's container —
+        // is the typed "encrypted" refusal, never None/[], never a
+        // password prompt.
+        let err = geometry_err(
+            "locked.docx",
+            &ole_with_stream("EncryptedPackage"),
+            Backend::Auto,
+        );
+        assert!(err.to_string().contains("encrypted"), "{err:?}");
+        // an OLE container standing where an XLSX is named: the container
+        // decision routes it to the LEGACY parser (the same check the
+        // conversion lane's engine choice makes), whose zero-worksheet
+        // answer for these junk-stream bytes is the zero-unit [] — never
+        // the xlsx raw-layer error the pre-fix leg raised for every OLE
+        // workbook (the red-team blocker: a genuine .xls lost its parse
+        // to a raw layer it never had). The real workbook is pinned
+        // all-None at three by the committed fixture, below.
+        let entries = page_geometry(
+            ole_with_stream("Workbook"),
+            Some("locked.xlsx"),
+            None,
+            Backend::Auto,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(entries, Vec::<Option<PageGeometry>>::new());
+        // garbage named pdf: the pdf lane's own typed refusal
+        let err = geometry_err("junk.pdf", b"garbage", Backend::Auto);
+        assert!(matches!(err, DocumentError::Convert(_)), "{err:?}");
+        // the no-geometry row never parses: undetectable bytes named csv
+        // still answer [None] (validation = format resolution)
+        let entries = geometry_named("x.csv", b"single line only");
+        assert_eq!(entries, vec![None]);
+    }
+
+    // --- the page_layout spine (spec §8 commit 4's routing half) -----------
+
+    /// The spine's routes on the layout surface: the pdf leg carries the
+    /// real content (spans/lines/images in render space, pages= honored);
+    /// the office rows serve their geometry with EMPTY layout lists (no
+    /// office engine exposes text/image boxes — PDF-only for layout); the
+    /// no-geometry row is the single geometry-None entry; and the refusal
+    /// order is page_geometry's (the capability refusal is format-aware
+    /// and names the same messages).
+    #[test]
+    fn the_layout_spine_routes_and_refuses_like_the_geometry_spine() {
+        let layout = |name: &str, bytes: &[u8], pages: Option<Vec<usize>>| {
+            page_layout(
+                bytes.to_vec(),
+                Some(name),
+                None,
+                Backend::Auto,
+                pages,
+                &ConvertOptions::default(),
+            )
+        };
+        // pdf: one entry per page with real content; page_index carried.
+        let entries = layout("a.pdf", &two_page_pdf("alpha", "beta"), None).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries.iter().map(|e| e.page_index).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(entries[0].geometry.is_some());
+        assert_eq!(entries[0].spans[0].text, "alpha");
+        assert!(!entries[0].spans[0].is_bold);
+        assert!(!entries[0].lines.is_empty() && entries[0].images.is_empty());
+        // the format marker: every entry of one call carries the resolved
+        // format's vocabulary name — on the pdf lane always "pdf"
+        assert!(
+            entries.iter().all(|e| e.format == "pdf"),
+            "the pdf lane's entries carry format=pdf"
+        );
+        // pages= subset: parallel to the normalized selection
+        let entries = layout("a.pdf", &two_page_pdf("alpha", "beta"), Some(vec![1])).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].page_index, 1);
+        assert_eq!(entries[0].spans[0].text, "beta");
+        // the byte-pinned pages= refusals (markdown_pages' strings)
+        let err = layout("a.pdf", &two_page_pdf("alpha", "beta"), Some(vec![])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "pages= selected no pages: pass None for the whole document"
+        );
+        let err = layout("a.pdf", &two_page_pdf("alpha", "beta"), Some(vec![2])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "page index 2 is out of range for a 2-page document (pages= is 0-based)"
+        );
+        // pages= is PDF-only (F1): a non-None selection on every non-PDF
+        // row — office and no-geometry alike — is convert()'s own typed
+        // refusal, byte-identical wording, never the silent
+        // whole-document answer the phase-2 diff shipped (probed:
+        // pages=[0] and pages=[7] on a two-section docx both returned
+        // BOTH sections).
+        let html = b"<!DOCTYPE html>\n<html><body>hi</body></html>".to_vec();
+        for (name, bytes, resolved) in [
+            (
+                "a.docx",
+                docx_with_body("<w:p><w:r><w:t>x</w:t></w:r></w:p>"),
+                "docx",
+            ),
+            ("a.pptx", pptx_with(Some(""), &[""]), "pptx"),
+            ("a.xlsx", xlsx_with(&[("Sheet1", None)], ""), "xlsx"),
+            ("x.html", html, "html"),
+        ] {
+            let err = layout(name, &bytes, Some(vec![0])).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("pages= applies to PDF documents only, not {resolved:?}"),
+                "{name}: pages= must be refused off the PDF lane"
+            );
+        }
+        // office: geometry + empty layout lists (PDF-only for layout), the
+        // format marker naming the resolved kind
+        let docx = docx_with_body(
+            "<w:p><w:r><w:t>body</w:t></w:r></w:p>\
+             <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
+        );
+        let entries = layout("a.docx", &docx, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].page_index, 0);
+        assert_eq!(entries[0].format, "docx", "the office arm's format marker");
+        assert_eq!(
+            entries[0]
+                .geometry
+                .map(|g| (g.width_pt, g.height_pt, g.rotation, g.crop)),
+            Some((612.0, 792.0, 0, None))
+        );
+        assert!(
+            entries[0].spans.is_empty()
+                && entries[0].lines.is_empty()
+                && entries[0].images.is_empty()
+        );
+        // the no-geometry row: the single geometry-None entry, format named
+        let entries = layout("x.csv", b"single line only", None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].geometry.is_none());
+        assert!(entries[0].spans.is_empty());
+        assert_eq!(entries[0].format, "csv");
+        // the legacy trio on the committed OLE fixtures: all-None geometry,
+        // IR section counts, and the format marker naming the RESOLVED
+        // kind — the Excel kind's one container-aware case included (the
+        // OLE workbook reports "xls", never the kind's default "xlsx"
+        // spelling — the same name to_markdown reports).
+        let doc_fixture = page_layout(
+            include_bytes!("../tests/legacy_corpus/t.doc").to_vec(),
+            Some("t.doc"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(doc_fixture.len(), 1);
+        assert_eq!(doc_fixture[0].format, "doc");
+        assert!(doc_fixture[0].geometry.is_none());
+        let xls_fixture = page_layout(
+            include_bytes!("../tests/legacy_corpus/book3.xls").to_vec(),
+            Some("book3.xls"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(xls_fixture.len(), 3);
+        assert!(
+            xls_fixture.iter().all(|e| e.format == "xls"),
+            "{xls_fixture:?}"
+        );
+        let ppt_fixture = page_layout(
+            include_bytes!("../tests/legacy_corpus/deck3.ppt").to_vec(),
+            Some("deck3.ppt"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(ppt_fixture.len(), 3);
+        assert!(ppt_fixture.iter().all(|e| e.format == "ppt"));
+        // refusal order, page_geometry's: anydoc capability refusal on the
+        // office row — THE TABLE'S ONE REFUSAL, byte-identical on both
+        // surfaces (the geometry capability table applies to page_layout
+        // identically, refusal text included)
+        let err = page_layout(
+            docx.clone(),
+            Some("a.docx"),
+            None,
+            Backend::Anydoc,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "backend \"anydoc\" cannot serve page geometry for docx: anydoc has no \
+             geometry surface; use backend='auto' or 'oxide' here"
+        );
+        // password-kind refusal precedes zero-max_bytes
+        let err = page_layout(
+            docx,
+            Some("a.docx"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions {
+                password: Some("torque"),
+                max_bytes: Some(0),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("password= applies to PDF documents only"),
+            "{err:?}"
+        );
+        // the pdf lane's malformed document is the typed whole-call
+        // refusal (the encrypted DOOR is pdf_impl::open's, shared by every
+        // probe, pinned on the geometry probe in pdf_impl's tests and on
+        // page_layout at the binding layer's encrypted-entries tuple)
+        let err = page_layout(
+            b"%PDF-1.4 garbage".to_vec(),
+            Some("a.pdf"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cross-reference"), "{err:?}");
     }
 
     #[test]
@@ -2991,6 +4430,152 @@ mod tests {
             PROVISIONAL_FALLBACK,
         );
         assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    // --- the geometry surface's own read metering and pre-read probe
+    // --- (the conversion table's ceiling metered lanes this surface
+    // --- never runs; the §6 law keys the geometry table) ----------------
+
+    #[test]
+    fn the_geometry_ceiling_meters_the_office_row_only() {
+        // office row: the amplifying lane — the 32 MiB default. Both
+        // resolution paths: an explicit format= (the bytes never
+        // consulted) and the name-hint fallback (the bytes carry no
+        // positive marker).
+        assert_eq!(
+            provisional_geometry_read_ceiling(
+                b"\x00\x01",
+                None,
+                Some("docx"),
+                Backend::Auto,
+                PROVISIONAL_FALLBACK,
+            ),
+            DEFAULT_ANYDOC_INPUT_LIMIT
+        );
+        assert_eq!(
+            provisional_geometry_read_ceiling(
+                b"\x00\x01",
+                Some("a.docx"),
+                None,
+                Backend::Auto,
+                PROVISIONAL_FALLBACK,
+            ),
+            DEFAULT_ANYDOC_INPUT_LIMIT
+        );
+        // the pdf row: no default ceiling (pdf_oxide's own limits govern)
+        assert_eq!(
+            provisional_geometry_read_ceiling(
+                b"%PDF-1.4\n...",
+                Some("x.pdf"),
+                None,
+                Backend::Auto,
+                PROVISIONAL_FALLBACK,
+            ),
+            PROVISIONAL_FALLBACK
+        );
+        // the no-geometry row: no engine runs, no default ceiling — the
+        // parity case the conversion table's ceiling broke (a 40 MiB html
+        // answered [None] on data= and refused on path=)
+        for (bytes, hint) in [
+            (&b"<!doctype html><html><body>\n<h1>t</h1>\n"[..], "x.html"),
+            (b"unit,status\na,ok\n", "x.csv"),
+            (b"{\\rtf1\\ansi x}", "x.rtf"),
+        ] {
+            assert_eq!(
+                provisional_geometry_read_ceiling(
+                    bytes,
+                    Some(hint),
+                    None,
+                    Backend::Auto,
+                    PROVISIONAL_FALLBACK,
+                ),
+                PROVISIONAL_FALLBACK,
+                "{hint}"
+            );
+        }
+        // unresolvable: meters — the safe direction (the office leg's
+        // post-read default still binds if the full bytes resolve there)
+        assert_eq!(
+            provisional_geometry_read_ceiling(
+                b"\x00\x01\x02",
+                Some("blob.bin"),
+                None,
+                Backend::Auto,
+                PROVISIONAL_FALLBACK,
+            ),
+            DEFAULT_ANYDOC_INPUT_LIMIT
+        );
+        // and the office row meters under anydoc too (the refusal would
+        // fire pre-read at the binding; the ceiling stays consistent)
+        assert_eq!(
+            provisional_geometry_read_ceiling(
+                b"PK\x03\x04",
+                Some("a.xlsx"),
+                None,
+                Backend::Anydoc,
+                PROVISIONAL_FALLBACK,
+            ),
+            DEFAULT_ANYDOC_INPUT_LIMIT
+        );
+    }
+
+    #[test]
+    fn the_geometry_probe_refuses_the_served_rows_and_defers_the_unresolvable() {
+        // resolved to a served row under anydoc: the refusal, naming the
+        // container the bytes are
+        let err = probe_geometry_capability(b"%PDF-1.4\n", Some("x.pdf"), None, Backend::Anydoc)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot serve the declared page-box geometry"),
+            "{err:?}"
+        );
+        let err = probe_geometry_capability(b"PK\x03\x04", Some("a.docx"), None, Backend::Anydoc)
+            .unwrap_err();
+        assert!(err.to_string().contains("for docx"), "{err:?}");
+        // resolved to the no-geometry row under anydoc: no refusal
+        assert_eq!(
+            probe_geometry_capability(
+                b"<!doctype html><html><body>",
+                Some("x.html"),
+                None,
+                Backend::Anydoc,
+            )
+            .unwrap(),
+            Some(Kind::Html)
+        );
+        // auto/oxide refuse nothing on any row
+        assert_eq!(
+            probe_geometry_capability(b"%PDF-1.4\n", Some("x.pdf"), None, Backend::Auto).unwrap(),
+            Some(Kind::Pdf)
+        );
+        // unresolvable: Ok(None) — the refusal defers to the core's
+        // authoritative resolve (§6's resolve-first clause)
+        assert_eq!(
+            probe_geometry_capability(b"garbage", None, None, Backend::Anydoc).unwrap(),
+            None
+        );
+        // an explicit format= decides without the bytes at all
+        let err =
+            probe_geometry_capability(b"garbage", None, Some("pdf"), Backend::Anydoc).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot serve the declared page-box geometry"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_no_geometry_door_predicate_is_the_tables_row_not_a_second_spelling() {
+        for name in ["html", "csv", "tsv", "rtf", "epub", "odt", "ods", "odp"] {
+            assert!(is_no_geometry_format(name), "{name}");
+        }
+        for name in ["pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt"] {
+            assert!(!is_no_geometry_format(name), "{name}");
+        }
+        // an unknown name is simply not on the row (resolve rejects it
+        // later, its own refusal)
+        assert!(!is_no_geometry_format("flib"));
     }
 
     #[test]

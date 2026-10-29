@@ -23,7 +23,13 @@ from __future__ import annotations
 
 import os
 
-from tors_documents import Backend, Format, PdfClassification
+from tors_documents import (
+    Backend,
+    Format,
+    PageGeometry,
+    PageLayout,
+    PdfClassification,
+)
 
 async def to_markdown(
     path: str | os.PathLike[str] | None = ...,
@@ -71,3 +77,20 @@ async def pdf_classify(
     backend: Backend | str = ...,
     max_bytes: int | None = ...,
 ) -> PdfClassification: ...
+async def page_geometry(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    format: Format | str | None = ...,
+    password: str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
+) -> list[PageGeometry | None]: ...
+async def page_layout(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    format: Format | str | None = ...,
+    password: str | None = ...,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = ...,
+) -> list[PageLayout]: ...

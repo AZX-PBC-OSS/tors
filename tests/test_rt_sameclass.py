@@ -9,9 +9,12 @@ The PR closed the *read* side (``read_bounded_into`` + the two-phase
 1. declared-page-count allocation: ``pdf_impl::link_uris`` sizes
    ``Vec::with_capacity(count)`` from ``doc.page_count()`` — whose
    primary source is the PDF's *declared* ``/Count`` (pdf_oxide
-   ``document.rs::get_page_count_standard``). Pin: does the declared
-   number survive to the allocation, or do the /Count validations
-   (MAX_PAGES + xref-len) bound it first?
+   ``document.rs::get_page_count_standard``). The same bug class has two
+   newer members on the page-geometry probes: ``page_geometry``'s own
+   ``Vec::with_capacity(count)`` (src/pdf_impl.rs:892) and
+   ``page_layout``'s ``(0..count).collect()`` (src/pdf_impl.rs:1179).
+   Pin: does the declared number survive to the allocations, or do the
+   /Count validations (MAX_PAGES + xref-len) bound it first?
 2. decompression bombs on the office lanes: office_oxide caps a part at
    512 MiB (declared-size pre-check + ``take()`` during decompression +
    post-check), anydoc at 128 MiB/entry — pin both refusals empirically
@@ -246,19 +249,23 @@ _KILLED = (-9, -6, 137, 134)
 # --- 1: the declared /Count and the link walk's with_capacity ----------------
 
 
-class TestDeclaredPageCountCannotSizeTheLinkWalk:
+class TestDeclaredPageCountCannotSizeTheProbeAllocations:
     """pdf_impl::link_uris (src/pdf_impl.rs:267) allocates
     Vec::with_capacity(doc.page_count()?) — and pdf_oxide's
     page_count trusts the page tree's DECLARED /Count first
-    (document.rs::get_page_count_standard). The validations that must
-    fire before the allocation: /Count > 8,388,607 (MAX_PAGES) falls
-    back to a tree scan, and /Count > xref.len() falls back too. Pin:
-    a declared billion pages must not reach the allocation."""
+    (document.rs::get_page_count_standard). The same bug class has two
+    newer members: page_geometry's Vec::with_capacity(count)
+    (src/pdf_impl.rs:892) and page_layout's (0..count).collect()
+    (src/pdf_impl.rs:1179). The validations that must fire before the
+    allocations: /Count > 8,388,607 (MAX_PAGES) falls back to a tree
+    scan, and /Count > xref.len() falls back too. Pin: a declared
+    billion pages must not reach any of the allocations."""
 
-    def test_a_declared_billion_pages_cannot_abort_or_bloat_the_link_walk(self) -> None:
+    def test_a_declared_billion_pages_cannot_abort_or_bloat_the_probes(self) -> None:
         pdf = _pdf_with_declared_count(2_000_000_000)
         code = f"""
-from tors_documents import pdf_link_uris, pdf_page_count
+from tors_documents import page_geometry, page_layout, pdf_link_uris
+from tors_documents import pdf_page_count
 try:
     count = pdf_page_count(data={pdf!r})
     print(f"PAGE_COUNT {{count}}")
@@ -269,18 +276,30 @@ try:
     print(f"LINK_URIS ok ({{len(links)}} pages)")
 except BaseException as exc:
     print(f"link_uris raised {{type(exc).__name__}}: {{str(exc)[:120]}}")
+try:
+    geometry = page_geometry(data={pdf!r})
+    print(f"PAGE_GEOMETRY ok ({{len(geometry)}} pages)")
+except BaseException as exc:
+    print(f"page_geometry raised {{type(exc).__name__}}: {{str(exc)[:120]}}")
+try:
+    layout = page_layout(data={pdf!r})
+    print(f"PAGE_LAYOUT ok ({{len(layout)}} pages)")
+except BaseException as exc:
+    print(f"page_layout raised {{type(exc).__name__}}: {{str(exc)[:120]}}")
 for line in open('/proc/self/status'):
     if line.startswith(('VmHWM:', 'VmPeak:')):
         import sys; sys.stdout.write(line)
 """
         done = _probe(code, timeout=60)
         assert done.returncode not in _KILLED, (
-            f"the declared /Count reached the with_capacity and the process died "
+            f"the declared /Count reached a with_capacity and the process died "
             f"(rc={done.returncode}):\n{done.stdout}\n{done.stderr}"
         )
         assert done.returncode == 0, f"probe child failed:\n{done.stdout}\n{done.stderr}"
         assert "PAGE_COUNT" in done.stdout or "raised" in done.stdout
         assert "LINK_URIS" in done.stdout or "raised" in done.stdout
+        assert "PAGE_GEOMETRY" in done.stdout or "raised" in done.stdout
+        assert "PAGE_LAYOUT" in done.stdout or "raised" in done.stdout
         # Bounded: a handful of pages' worth of allocation, not billions of
         # Vec elements (each 24 bytes). 300 MB of high-water is already
         # generous for a 3-object PDF.

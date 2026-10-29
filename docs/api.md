@@ -7916,7 +7916,7 @@ heartbeat-granularity and 8-thread byte-identical concurrency gates).
 |---|---|
 | `OSError` | the file is missing or unreadable (IO): a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
 | `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the type only, never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes: `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float; a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=`; all argument-contract failures, raised under the GIL before any work runs |
-| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB ceiling, and the pdf lane reads under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, and on `page_geometry`/`page_layout` for pdf and the office families, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; on `page_layout`, a `pages=` selection on a non-PDF (PDF-only: a page index cannot name a section); an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB ceiling, and the pdf lane reads under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
 | `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages: route the document to an OCR stage |
 
 **Format resolution order**: a mislabeled or extensionless file (a temp-file download,
@@ -8404,6 +8404,138 @@ cls = tors.documents.pdf_classify("tests/engines_corpus/engines_blank.pdf")
 **Async**: `await tors.documents.aio.pdf_classify(...)` runs this under
 `asyncio.to_thread` so the event loop stays responsive across the call.
 
+## `tors.documents.page_geometry`
+
+```python
+def page_geometry(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> list[PageGeometry | None]: ...
+```
+
+The declared-box geometry probe: one entry per unit of the resolved format —
+PDF pages, docx sections, pptx slides, xlsx worksheets, legacy
+doc/xls/ppt sections — `None` where that unit declares no box, `[]` only for
+zero units. Each `Some` entry is a `PageGeometry` (below): the render extent
+in points with the axes swapped for a 90/270 PDF rotation (the turn already
+applied), the engine-normalized `/Rotate` (a non-right-angle declaration
+reports 0), and the declared CropBox reduced to the MediaBox (the effective
+crop) as `crop` provenance — never re-applied. The unit-and-length table,
+the office rows' raw-layer reads, and the office-row caveat are in
+[documents.md](documents.md#page-geometry-and-layout).
+
+`backend=` is `"auto"`/`"oxide"` — identical on this surface for every format
+(the geometry lane is a property of the format, not a choice) — while
+`"anydoc"` is refused where geometry is obtainable (pdf and the office
+families: the capability refusal, raised before any work runs) and answered
+`[None]` on the no-geometry row (no engine runs there, so nothing is
+refused). `pages=` does not exist on this surface: a page index cannot name
+a section/slide/worksheet. `password=` unlocks an encrypted PDF; an explicit
+`max_bytes=` binds before the read, `None` keeps the 32 MiB default ceiling
+on the office leg (its parse amplifies the container into resident memory);
+the pdf row and the no-geometry row carry no default ceiling. Refusal
+order: the format resolves first, then the capability refusal, then the
+password-kind refusal, then the `max_bytes` refusals, then the engine's own
+encrypted doors.
+
+```python
+import tors.documents
+
+tors.documents.page_geometry("tests/engines_corpus/engines_two_page.pdf")
+# [PageGeometry(width_pt=612.0, height_pt=792.0, rotation=0, crop=None),
+#  PageGeometry(width_pt=612.0, height_pt=792.0, rotation=0, crop=None)]
+tors.documents.page_geometry(data=b"unit,status\nT-101,healthy\nT-102,failing\n")
+# [None]: a single-flow format's one entry, unit = whole document
+```
+
+**Async**: `await tors.documents.aio.page_geometry(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
+## `tors.documents.page_layout`
+
+```python
+def page_layout(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+) -> list[PageLayout]: ...
+```
+
+The layout probe: per unit of the resolved format's geometry lane, the
+unit's geometry plus — PDF pages only — the page's text spans, text lines
+(words nested), and image boxes, all in the page's declared render space
+(**points, bottom-left origin, y-up; /Rotate applied; one transform owned by
+the library**, the same frame `page_geometry` declares; boxes are unclipped,
+the page box is the consumer's clip; coordinates are single-precision f32 —
+expect ~1e-4 pt quantization). One open per call. Office rows serve
+their declared geometry with empty layout lists (no office engine exposes
+text/image boxes); the no-geometry formats answer one `geometry=None` entry.
+
+The three honesty laws a highlight/evidence consumer must read first (full
+statements in [documents.md](documents.md#page-geometry-and-layout)):
+`rotation_degrees != 0` means the box is the engine's flattened
+approximation and MUST NOT be used as a highlight box (wrong at every
+non-zero content rotation, on any page); `is_artifact` is typed-BDC-only —
+`is_artifact == false` is NOT evidence of body text; and image boxes are
+never visibility-filtered — an image wholly outside the visible box is
+still returned with out-of-range coordinates, so the consumer clips.
+Verified edge (T9, probed): the `rotation_degrees` flag does NOT cover
+vertical writing — a WMode-1 run (tategaki; a Type0 font whose `/Encoding`
+CMap name ends in `-V`, e.g. `/Identity-V`) carries
+`rotation_degrees == 0.0` while its box is the flattened fiction at its
+worst: measured (pdf_oxide 0.3.78, a 24pt 2-glyph run at (300, 700)):
+span bbox `(300, 700, -48, 24)` — the run's vertical advance (-24 pt per
+glyph) flattened onto x as a NEGATIVE width, the glyphs' true ink a
+column at `(300, 652, 24, 72)` with zero overlap — and the line surface
+re-lays the glyphs over the normalized box and reports the REVERSED text
+(`"BA"` for `"AB"`, box `(252, 700, 48, 24)`). The engine's span carries
+`wmode == 1`, but wmode is deliberately cut from this surface; treat
+vertical-writing sources as outside the highlight-box guarantee entirely.
+
+The text is its own stream, grounded per line: a line's text is its words'
+texts joined with exactly one space (and no word's text carries
+whitespace), so word offsets inside `line.text` are cumulative word lengths
+plus one separator per gap. It is a reconstruction, not a slice of the
+page: ground into this stream by line, never into `extract_text` output
+(no `concat(spans) == extract_text` invariant exists).
+
+`pages=` is PDF-only (a page index cannot name a section): a non-`None`
+selection on any other format raises the conversion lane's own `ValueError`;
+on a PDF it normalizes sort+dedup into document order, the output is
+parallel to the NORMALIZED selection, and every entry carries its
+`page_index` (the empty-selection and out-of-range errors are the
+byte-pinned ones `to_markdown` raises). `backend=`/`password=`/`max_bytes=`
+behave exactly as on `page_geometry`, refusal order included (a malformed
+`pages=`/`max_bytes` reports after the capability refusal).
+
+```python
+import tors.documents
+
+pages = tors.documents.page_layout("tests/engines_corpus/engines_two_page.pdf")
+pages[0].page_index, pages[0].spans[0].text, pages[0].spans[0].bbox
+# (0, 'first page line', (50.0, 700.0, 71.36399841308594, 12.0))
+line = pages[1].lines[0]
+line.text, [(w.text, w.bbox) for w in line.words]
+# ('second page line', [('second', (50.0, 700.0, 38.68798828125, 12.0)),
+#                       ('page', (92.02398681640625, 700.0, 26.68798828125, 12.0)),
+#                       ('line', (122.0479736328125, 700.0, 18.6719970703125, 12.0))])
+" ".join(w.text for w in line.words) == line.text  # the join law, per line
+# True
+tors.documents.page_layout("tests/engines_corpus/engines_report.docx", pages=[0])
+# ValueError: pages= applies to PDF documents only, not "docx"
+```
+
+**Async**: `await tors.documents.aio.page_layout(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
 ## `tors.documents.PdfClassification`
 
 The `pdf_classify` result: the preflight's answer with the routing rules derived
@@ -8461,6 +8593,110 @@ accepted strings. `"empty"` is deliberately distinct from `"scanned"` (see
 neither extractable nor an image to recover, and `pages_needing_ocr`
 excludes it.
 
+## `tors.documents.PageGeometry`
+
+One `page_geometry` entry: a unit's declared render box, in points. The
+native pyclass exposed directly (no Python wrapper view: the deliberate
+deviation from the `PdfClassification` wrapper precedent — a geometry entry
+carries nothing to re-type); `==` is structural (the four fields), so
+`page_geometry(path) == page_geometry(path, backend="oxide")` is a plain
+list equality. Attributes:
+
+- `width_pt: float` / `height_pt: float` — the unit's render extent,
+  positive and finite; the axes swapped for a 90/270 PDF rotation (the turn
+  already applied).
+- `rotation: int` — the declared rotation, engine-normalized: `{0, 90, 180,
+  270}` on the PDF lane (a non-right-angle `/Rotate` reports 0), always 0
+  on the office lanes.
+- `crop: tuple[float, float, float, float] | None` — the PDF page's
+  declared CropBox reduced to the MediaBox (the effective crop: the
+  intersection the engine's visible box stands on), normalized corners, the
+  unrotated source frame. Provenance for the extent only: never re-applied,
+  never re-swapped, `None` unless a CropBox is declared AND it actually
+  crops, `None` on every office lane.
+
+## `tors.documents.PageLayout`
+
+One `page_layout` entry: the unit's geometry plus its text spans, lines,
+and image boxes in the page's declared render space — the native pyclass
+exposed directly (the `PageGeometry` deviation note applies to all five
+layout classes); `==` is structural (the six fields). Attributes:
+`page_index: int` (0-based, mandatory on every entry — the `pages=`
+normalization reorders), `format: str` (the resolved format's vocabulary
+name — the `to_markdown` spelling, the container-aware `xls`/`xlsx` case
+included; every entry of one call carries the same name), `geometry:
+PageGeometry | None` (`None` where the unit's box cannot be read or
+declares no positive extent — then the layout lists are empty too),
+`spans: list[TextSpan]`, `lines: list[TextLine]` (words nested),
+`images: list[ImageBox]`.
+
+Provenance rides on the entry: `format` — not the entry's shape — tells
+you why `spans`/`lines`/`images` may be empty. An office row carries
+declared geometry with no text surfaces (no office engine exposes
+text/image boxes); a blank, scanned, or content-unparseable PDF page
+reports the same shape on the pdf lane. A consumer holding only an entry
+reads `entry.format` and knows which case it is.
+
+## `tors.documents.TextSpan`
+
+One `page_layout` text run (`PageLayout.spans[]`): the engine's span
+evidence, `==` structural (the eight fields). Attributes:
+
+- `text: str`, `bbox: tuple[float, float, float, float]` — the run's box in
+  the page's render space: points, bottom-left origin; y is the box's
+  bottom edge, and for text that edge is the glyph baseline, the box
+  extending one font-size upward (em-box; descenders may extend below).
+  Boxes are unclipped; the page box is the consumer's clip. Coordinates
+  are single-precision f32; expect ~1e-4 pt quantization.
+- `font_size: float`, `font_name: str`, `is_bold: bool`, `is_italic: bool`
+  — the honest font/style evidence (no `heading_level` heuristic: these
+  two fields are the signal).
+- `rotation_degrees: float` — the run's own content rotation. **Non-zero
+  means the box is the engine's flattened approximation and MUST NOT be
+  used as a highlight box** (transposed or mis-anchored at every non-zero
+  content rotation, on any page). Verified NOT to cover vertical writing
+  (T9, probed): a WMode-1 run (tategaki) carries `rotation_degrees == 0`
+  — the angle is the text matrix's, the writing mode plays no part in it
+  — while its box is the flattened fiction at its worst (measured:
+  `(300, 700, -48, 24)` for a 24pt 2-glyph `/Identity-V` run whose ink is
+  a column at `(300, 652, 24, 72)`; the line surface reports the reversed
+  text). A highlight box for text that may be vertical writing cannot be
+  validated by this flag alone.
+- `is_artifact: bool` — declared `/Artifact` marked content, TYPED-FORM-ONLY:
+  true only for a typed `/Artifact <<…>> BDC` whose `/Type` or `/Subtype`
+  the engine recognizes; false for a bare `/Artifact BMC` and unrecognized
+  types. **`is_artifact == false` is NOT evidence of body text.**
+
+## `tors.documents.TextLine`
+
+One `page_layout` text line (`PageLayout.lines[]`): the engine's own line —
+its word clustering (gap thresholds) is never re-implemented downstream;
+`==` is structural (the three fields, the words included). Attributes:
+`text: str`, `bbox: tuple` (the union of its words' boxes), and
+`words: list[Word]` in reading order. The join law: `line.text` is its
+words' texts joined with exactly one space, and no word's text carries
+whitespace — so word offsets inside `line.text` are cumulative word lengths
+plus one separator per gap. A rotated run is emitted as its own line; its
+line box is subject to the same `rotation_degrees` caveat as the span's.
+
+## `tors.documents.ImageBox`
+
+One `page_layout` image box (`PageLayout.images[]`): an image draw's
+placement, from the engine's image HANDLES — no decode, no silent
+small-image filter, no swallowed errors (`extract_images` is disqualified
+for an evidence surface); `==` is structural (the five fields).
+Attributes: `bbox: tuple` (axis-aligned, render space, same clip law as
+every box here — and **never visibility-filtered**: an image wholly outside
+the visible box is still returned, with out-of-range coordinates; the
+consumer clips, and never reads "image present" as "image visible"),
+`width_px: int` / `height_px: int` (the XObject's declared pixel dims),
+`rotation_degrees: float` (the CTM's rotation angle, `atan2`-normalized to
+`[0, 360)` — not restricted to right angles: evidence, never a transform
+instruction; the bbox is always the axis-aligned bound of the transformed
+unit square), and `paint_order: int` (the image's index among the page's
+painted images, in content-stream order — the only stable handle the
+engine offers).
+
 ## `tors.documents.Backend` / `tors.documents.Format`
 
 ```python
@@ -8501,8 +8737,9 @@ never disagree.
 
 ## `tors.documents.aio`
 
-The awaitable spellings of the six path functions (`to_markdown`, `to_text`,
-`pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_link_uris`), each an
+The awaitable spellings of the eight path functions (`to_markdown`, `to_text`,
+`pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_link_uris`,
+`page_geometry`, `page_layout`), each an
 unconditional `asyncio.to_thread` dispatch, signatures identical to the sync
 spellings, `path`/`data=` flowing through unchanged (pinned by the suite). The same doctrine as `tors.aio`: every one of these calls is a single
 native pass whose cost scales with the document (a small one is milliseconds, a large

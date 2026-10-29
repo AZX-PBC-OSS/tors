@@ -1146,13 +1146,34 @@ def _pdf_from_objects(objects: list[bytes]) -> bytes:
     return bytes(out)
 
 
-def _pdf_page_objects(content: bytes, *, annots: bool = False) -> list[bytes]:
+def _pdf_page_objects(
+    content: bytes,
+    *,
+    annots: bool = False,
+    mediabox: str = "[0 0 612 792]",
+    rotate: int | None = None,
+    cropbox: str | None = None,
+) -> list[bytes]:
+    """One page's objects, with the page-box fragments the geometry
+    fixtures need: ``mediabox``/``rotate``/``cropbox`` spell the page
+    dict's /MediaBox, /Rotate, and /CropBox. The defaults are the
+    historical bytes exactly (``[0 0 612 792]``, no /Rotate, no /CropBox),
+    so every committed fixture the pinned corpora carry builds
+    byte-identically through this function."""
+    extras = ""
+    if rotate is not None:
+        extras += f" /Rotate {rotate}"
+    if cropbox is not None:
+        extras += f" /CropBox {cropbox}"
     annot_entry = b" /Annots [6 0 R]" if annots else b""
+    page_dict = (
+        "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >>"
+        f" /MediaBox {mediabox}{extras} /Contents 5 0 R"
+    ).encode("ascii")
     return [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >>"
-        b" /MediaBox [0 0 612 792] /Contents 5 0 R" + annot_entry + b" >>",
+        page_dict + annot_entry + b" >>",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         f"<< /Length {len(content)} >>\nstream\n".encode("ascii") + content + b"\nendstream",
     ]
@@ -1293,6 +1314,495 @@ def generate_pdf_big(lines: int = 6000) -> bytes:
     moves.append("ET")
     content = "\n".join(moves).encode("ascii")
     return _pdf_from_objects(_pdf_page_objects(content))
+
+
+# --- the page-geometry fixtures (standalone, on demand: the
+# --- generate_pdf_big precedent — committed-corpus membership would add
+# --- them to the conversion matrix's sweeps, which they carry no new
+# --- content for; the geometry probes build their own bytes) ---------------
+
+
+def generate_pdf_crop() -> bytes:
+    """A CropBox strictly inside the MediaBox ([100 100 500 700] on
+    [0 0 612 792]): the geometry probe's crop-subset golden — the render
+    extent 400×600, crop provenance Some((100, 100, 500, 700))."""
+    content = b"BT /F1 12 Tf 150 600 Td (cropped page line) Tj ET"
+    return _pdf_from_objects(
+        _pdf_page_objects(content, cropbox="[100 100 500 700]")
+    )
+
+
+def generate_pdf_rotate(angle: int) -> bytes:
+    """A portrait page declared /Rotate `angle`: the swap-law goldens
+    (90/270 → 792×612; 180 → 612×792) and, for a non-right angle, the
+    engine-normalization pin (rotation 0, unrotated frame)."""
+    content = b"BT /F1 12 Tf 72 700 Td (rotated page line) Tj ET"
+    return _pdf_from_objects(_pdf_page_objects(content, rotate=angle))
+
+
+def generate_pdf_media_origin() -> bytes:
+    """A nonzero MediaBox origin ([50 50 662 842]): the extent is the
+    box's width/height (612×792), never the corners; with a CropBox the
+    declared corners survive verbatim."""
+    content = b"BT /F1 12 Tf 100 700 Td (offset origin line) Tj ET"
+    return _pdf_from_objects(
+        _pdf_page_objects(content, mediabox="[50 50 662 842]", cropbox="[100 100 500 700]")
+    )
+
+
+def generate_pdf_zero_pages() -> bytes:
+    """A page tree with /Count 0 and no kids: the zero-page shape whose
+    geometry answer is the empty list ([] is a count, not an error)."""
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [] /Count 0 >>",
+        ]
+    )
+
+
+def generate_pdf_pages(count: int) -> bytes:
+    """A `count`-page PDF of bare MediaBox-only page dicts (no content
+    streams): the geometry probe's own load fixture — page_geometry parses
+    no content, so the page count IS the work, and the per-entry pyclass
+    marshalling is what the §9 item-12 heartbeat cell exercises. Not
+    committed to the corpus; built on demand (the generate_pdf_big
+    precedent)."""
+    kids = " ".join(f"{3 + page} 0 R" for page in range(count))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
+    ]
+    objects.extend(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+        for _ in range(count)
+    )
+    return _pdf_from_objects(objects)
+
+
+def generate_pdf_crop_partial() -> bytes:
+    """A CropBox that HANGS OFF the MediaBox's edge ([300 300 800 900] on
+    [0 0 612 792]): the partial-overlap golden — the entry is the
+    INTERSECTION (the engine only exposes the intersection): extent
+    312x492, crop (300, 300, 612, 792), never the declared box's own
+    500x600. The crop wording ("the declared CropBox reduced to the
+    MediaBox — the effective crop") is this fixture's shape."""
+    content = b"BT /F1 12 Tf 350 650 Td (partially cropped page line) Tj ET"
+    return _pdf_from_objects(
+        _pdf_page_objects(content, cropbox="[300 300 800 900]")
+    )
+
+
+# --- the page-layout fixtures (standalone, on demand: the geometry
+# --- fixtures' precedent — none carries conversion content the matrix's
+# --- sweeps need; the layout probes build their own bytes) -------------------
+
+LAYOUT_RED_1X1 = (
+    b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1"
+    b" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode"
+    b" /Length 7 >>\nstream\nFF0000>\nendstream"
+)
+
+
+def generate_pdf_layout(
+    content: bytes,
+    *,
+    mediabox: str = "[0 0 612 792]",
+    rotate: int | None = None,
+    cropbox: str | None = None,
+    fonts: list[str] | None = None,
+    image_ops: bytes | None = None,
+    images: list[bytes] | None = None,
+) -> bytes:
+    """The layout fixtures' one builder: one page with a content stream,
+    optional /Rotate and /CropBox page-dict entries, optional extra fonts
+    (the /F2+ faces named in ``fonts`` — /F1 is always Helvetica), and
+    either an image draw (`image_ops` — the numbers between `cm` and
+    `/Im1 Do`; the red 1×1 XObject is added and referenced as /Im1) or a
+    content stream drawing ``images[0..]`` itself (the /Im1, /Im2…
+    references it spells). Object numbering: catalog 1, pages 2, page 3,
+    fonts 4.., content stream next, then the image XObjects."""
+    fonts = ["Helvetica", *(fonts or [])]
+    if image_ops is not None:
+        content = b"q " + image_ops + b" cm /Im1 Do Q"
+    content_number = 4 + len(fonts)
+    extras = ""
+    if rotate is not None:
+        extras += f" /Rotate {rotate}"
+    if cropbox is not None:
+        extras += f" /CropBox {cropbox}"
+    xobject_entry = ""
+    if image_ops is not None or images:
+        xobject_entry = f" /XObject << /Im1 {content_number + 1} 0 R >>"
+    resources = (
+        "<< /Font << "
+        + " ".join(f"/F{1 + i} {4 + i} 0 R" for i in range(len(fonts)))
+        + " >>"
+        + xobject_entry
+        + " >>"
+    )
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            f"<< /Type /Page /Parent 2 0 R /Resources {resources}"
+            f" /MediaBox {mediabox}{extras} /Contents {content_number} 0 R >>"
+        ).encode("ascii"),
+    ]
+    for base_font in fonts:
+        objects.append(
+            f"<< /Type /Font /Subtype /Type1 /BaseFont /{base_font} >>".encode("ascii")
+        )
+    objects.append(
+        f"<< /Length {len(content)} >>\nstream\n".encode("ascii")
+        + content
+        + b"\nendstream"
+    )
+    if image_ops is not None:
+        images = [LAYOUT_RED_1X1]
+    for image in images or []:
+        objects.append(image)
+    return _pdf_from_objects(objects)
+
+
+def generate_pdf_layout_baseline() -> bytes:
+    """The D2 pin's fixture: runs at the y-up baselines 700 (24pt "Hello")
+    and 100 (12pt "World") — the layout probe's rot-0 identity golden
+    (72, 700, ~54.67, 24), no y-flip."""
+    content = b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET\nBT /F1 12 Tf 72 100 Td (World) Tj ET"
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_layout_rotated(angle: int) -> bytes:
+    """A horizontal run at (72, 700) on a page declared /Rotate `angle`:
+    the forward-rule goldens ((700, 485.33, 24, 54.67) at 90;
+    (485.33, 68, 54.67, 24) at 180) and the /Rotate 45 normalization pin."""
+    content = b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET"
+    return generate_pdf_layout(content, rotate=angle)
+
+
+def generate_pdf_layout_crop() -> bytes:
+    """The crop-subset golden: CropBox [100 100 500 700], one run inside
+    (150, 600) — lands at (50, 500, 64.03, 24) — and one fully outside
+    (30, 30), which the engine drops."""
+    content = b"BT /F1 24 Tf 150 600 Td (Inside) Tj ET\nBT /F1 24 Tf 30 30 Td (Outside) Tj ET"
+    return generate_pdf_layout(content, cropbox="[100 100 500 700]")
+
+
+def generate_pdf_layout_crop_partial_span() -> bytes:
+    """T7's fixture: a run starting at x=480 that advances past the crop's
+    right edge (500) — kept, and its box comes back UNCLIPPED."""
+    content = b"BT /F1 24 Tf 480 600 Td (Hang) Tj ET"
+    return generate_pdf_layout(content, cropbox="[100 100 500 700]")
+
+
+def generate_pdf_layout_rotated_run() -> bytes:
+    """T3's fixture: a horizontal run (72, 700) plus a rotated-content run
+    (`Tm [0 1 -1 0 300 300]`, "Side") on a /Rotate 90 page — the
+    inverse-map case: both land in the same frame; the rotated run's box
+    is the engine's flattened approximation, carried by
+    rotation_degrees=90."""
+    content = (
+        b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET\n"
+        b"BT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=90)
+
+
+def generate_pdf_layout_bold_mid_line() -> bytes:
+    """Two runs on ONE baseline, the second /Helvetica-Bold: spans split
+    where lines merge (two spans, one line, bold evidence per run)."""
+    return generate_pdf_layout(
+        b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET\nBT /F2 24 Tf 140 700 Td (World) Tj ET",
+        fonts=["Helvetica-Bold"],
+    )
+
+
+def generate_pdf_layout_artifact() -> bytes:
+    """A /Artifact-tagged (typed BDC) header run over a body run: the
+    is_artifact pin (declared furniture flagged, body not)."""
+    content = (
+        b"/Artifact << /Type /Pagination /Subtype /Header >> BDC\n"
+        b"BT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\n"
+        b"BT /F1 12 Tf 72 600 Td (Body) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_layout_artifact_bmc() -> bytes:
+    """The T11 limitation's fixture: the BARE `/Artifact BMC` form (no
+    properties dictionary) over a body run. The engine's BMC handler sets
+    its internal inside-artifact bit but deliberately leaves the artifact
+    type unset (extractors/text.rs:6487-6489), and the span carries no
+    other artifact bit — so the furniture span is NOT flagged, and
+    `is_artifact == false` is NOT evidence of body text. Pinned False so
+    the limitation cannot be silently "fixed" without a spec re-read."""
+    content = (
+        b"/Artifact BMC\n"
+        b"BT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\n"
+        b"BT /F1 12 Tf 72 600 Td (Body) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_layout_image(rotate: int | None = None) -> bytes:
+    """The red 1×1 image drawn at CTM [100 0 0 100 200 200] (user-space
+    rect 200,200 100×100), optionally on a /Rotate 90 page: the
+    handles-only pins (extract_images would silently return ZERO for the
+    1×1 image)."""
+    return generate_pdf_layout(b"", rotate=rotate, image_ops=b"100 0 0 100 200 200")
+
+
+def generate_pdf_layout_two_images() -> bytes:
+    """Two images, one page (the content stream draws both): paint_order
+    pins content-stream order."""
+    return generate_pdf_layout(
+        b"q 50 0 0 50 100 100 cm /Im1 Do Q\nq 60 0 0 60 300 400 cm /Im1 Do Q",
+        images=[LAYOUT_RED_1X1],
+    )
+
+
+def generate_pdf_layout_pages(count: int, lines: int = 1) -> bytes:
+    """`count` pages, each carrying `lines` real text spans (12 lines per
+    page makes the native span walk dominate the call's wall — the GIL
+    heartbeat cell's op must be several heartbeat ticks long for the
+    ratio to resolve, the sibling cells' methodology): the GIL cell's
+    fixture (§9 item 12 — page_layout's marshalling is O(pages × boxes)
+    nested Python-object construction post-detach, so the fixture needs
+    spans, which generate_pdf_pages's MediaBox-only pages lack). Not
+    committed to the corpus; built on demand."""
+    # Object layout: catalog 1, pages 2, font 3, then per page a page dict
+    # (4 + 2i) and its content stream (5 + 2i).
+    kids = " ".join(f"{4 + page * 2} 0 R" for page in range(count))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    body = "\n".join(
+        f"BT /F1 12 Tf 50 {720 - line * 20} Td (page line {line} of the layout heartbeat"
+        " fixture) Tj ET"
+        for line in range(lines)
+    ).encode("ascii")
+    for page in range(count):
+        objects.append(
+
+                "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 3 0 R >> >>"
+                f" /MediaBox [0 0 612 792] /Contents {5 + page * 2} 0 R >>".encode("ascii")
+
+        )
+        objects.append(
+            f"<< /Length {len(body)} >>\nstream\n".encode("ascii") + body + b"\nendstream"
+        )
+    return _pdf_from_objects(objects)
+
+
+def generate_pdf_layout_wmode1() -> bytes:
+    """T9's verified fixture: a WMode-1 (tategaki, vertical-writing) run —
+    a Type0 font with ``/Encoding /Identity-V`` (the predefined-CMap-name
+    vertical signal the engine reads on Tf), a non-embedded CIDFontType2
+    descendant (``/DW 1000``), and a ToUnicode CMap mapping CIDs 0x41/0x42
+    to 'A'/'B' — drawn at ``300 700 Td``, 24pt. Measured (pdf_oxide
+    0.3.78): the span reports bbox ``(300, 700, -48, 24)`` (the run's
+    vertical advance, -24 pt/glyph via the spec /DW2 default ``w1y =
+    -1000``, flattened onto x as a NEGATIVE width) with
+    ``rotation_degrees == 0.0`` (the angle is the text matrix's; the
+    writing mode plays no part in it) — the honesty flag does NOT cover
+    vertical writing; the line surface re-lays the glyphs over the
+    normalized box and reports the REVERSED text ("BA"), box ``(252, 700,
+    48, 24)``."""
+    tounicode = (
+        "/CIDInit /ProcSet findresource begin\n"
+        "12 dict begin\n"
+        "begincmap\n"
+        "/CMapName /Test-V def\n"
+        "1 begincodespacerange\n"
+        "<0000> <FFFF>\n"
+        "endcodespacerange\n"
+        "2 beginbfchar\n"
+        "<0041> <0041>\n"
+        "<0042> <0042>\n"
+        "endbfchar\n"
+        "endcmap\n"
+        "CMapName currentdict /CMap defineresource pop\n"
+        "end\n"
+        "end"
+    ).encode("ascii")
+    content = b"BT /F1 24 Tf 300 700 Td <00410042> Tj ET"
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (
+                b"<< /Type /Page /Parent 2 0 R /Resources"
+                b" << /Font << /F1 4 0 R >> >> /MediaBox [0 0 612 792] /Contents 5 0 R >>"
+            ),
+            (
+                b"<< /Type /Font /Subtype /Type0 /BaseFont /TestVert /Encoding /Identity-V"
+                b" /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>"
+            ),
+            f"<< /Length {len(content)} >>\nstream\n".encode("ascii")
+            + content
+            + b"\nendstream",
+            (
+                b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /TestVert /CIDSystemInfo"
+                b" << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >>"
+            ),
+            f"<< /Length {len(tounicode)} >>\nstream\n".encode("ascii")
+            + tounicode
+            + b"\nendstream",
+        ]
+    )
+
+
+def generate_pdf_layout_broken_flate() -> bytes:
+    """T8's decode-failure fixture: a page whose /Contents declares
+    /FlateDecode but carries bytes that are not zlib (the header byte
+    alone refuses to inflate). The engine's unwrap_or_default law: the
+    page's geometry stays intact and every content list comes back EMPTY,
+    never an error."""
+    junk = b"this is not zlib data, not even close"
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+            f"<< /Length {len(junk)} /Filter /FlateDecode >>\nstream\n".encode("ascii")
+            + junk
+            + b"\nendstream",
+        ]
+    )
+
+
+def generate_pdf_layout_dangling_contents() -> bytes:
+    """T8's dangling-ref fixture: a page dict whose /Contents names an
+    object the file does not carry (99 0 R). Same law as the broken-Flate
+    shape: geometry intact, empty content lists, never an error."""
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 99 0 R >>",
+        ]
+    )
+
+
+# --- the office geometry fixtures (standalone, on demand: the same
+# --- generate_pdf_big precedent — none of them carries conversion content
+# --- the matrix's sweeps need, and the committed corpora stay unpinned to
+# --- them) --------------------------------------------------------------
+
+_DOCX_PGSZ = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+_DOCX_MARGINS_ONLY = (
+    '<w:sectPr><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>'
+)
+
+
+def _docx_with_sectpr(sectpr: str) -> bytes:
+    """generate_docx's container with the body's trailing `<w:sectPr>`
+    spelled by the fixture (the office geometry lane's raw-layer
+    fixtures)."""
+    body = "".join(_docx_paragraph(paragraph) for paragraph in DOCX_PARAGRAPHS)
+    document = (
+        _XML_DECL
+        + f'<w:document xmlns:w="{_W_NS}"><w:body>{body}{sectpr}</w:body></w:document>\n'
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", DOCX_CONTENT_TYPES.encode("utf-8")),
+            ("_rels/.rels", DOCX_RELS.encode("utf-8")),
+            ("word/document.xml", document.encode("utf-8")),
+        ]
+    )
+
+
+def generate_docx_pgsz() -> bytes:
+    """A pgSz-bearing docx (Letter, 12240×15840 twips): the geometry
+    probe's Some(612.0, 792.0) exact golden."""
+    return _docx_with_sectpr(_DOCX_PGSZ)
+
+
+def generate_docx_margins_only() -> bytes:
+    """A margins-only sectPr (no `<w:pgSz>`): the raw-layer amendment's
+    own pinning fixture — the geometry probe must answer None, where the
+    to_ir() path would fabricate Letter."""
+    return _docx_with_sectpr(_DOCX_MARGINS_ONLY)
+
+
+def generate_pptx_sldsz() -> bytes:
+    """generate_pptx_rich's deck with a declared slide size
+    (12192000×6858000 EMU): the geometry probe's Some(960.0, 540.0)
+    exact golden (EMU ÷ 12700.0 in float)."""
+    with zipfile.ZipFile(io.BytesIO(generate_pptx_rich())) as archive:
+        entries = [(item.filename, archive.read(item.filename)) for item in archive.infolist()]
+    rewritten = []
+    for name, data in entries:
+        if name == "ppt/presentation.xml":
+            text = data.decode("utf-8")
+            marker = "</p:sldIdLst>"
+            text = text.replace(
+                marker,
+                marker + '<p:sldSz cx="12192000" cy="6858000"/>',
+            )
+            data = text.encode("utf-8")
+        rewritten.append((name, data))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in rewritten:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o644 << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, data)
+    return buffer.getvalue()
+
+
+def generate_pptx_empty() -> bytes:
+    """A deck whose slide list is empty and which carries no slide parts:
+    the zero-slide shape (geometry answer: the empty list), if the
+    engine's parser accepts it."""
+    presentation = (
+        _XML_DECL
+        + f'<p:presentation xmlns:p="{_P_NS}" xmlns:r="{_DOC_NS}">'
+        "<p:sldIdLst/></p:presentation>"
+    )
+    content_types = (
+        _XML_DECL
+        + f'<Types xmlns="{_CT_NS}">'
+        + _CT_RELS
+        + _CT_XML
+        + _CT_PPTX_MAIN
+        + "</Types>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", content_types.encode("utf-8")),
+            ("_rels/.rels", _root_rels("ppt/presentation.xml").encode("utf-8")),
+            ("ppt/presentation.xml", presentation.encode("utf-8")),
+        ]
+    )
+
+
+def generate_xlsx_chart() -> bytes:
+    """generate_xlsx's workbook plus one `xl/charts/chart1.xml` part
+    carrying chart text: the IR gains a "Charts" section for it (the
+    converter's worksheet+Charts count) while the geometry probe's
+    length law stays the RAW worksheet count — the fixture that pins the
+    two counts apart."""
+    chart = (
+        _XML_DECL
+        + '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+        + ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        + "<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Units per quarter"
+        + "</a:t></a:r></a:p></c:rich></c:tx></c:title>"
+        + '<c:plotArea><c:barChart><c:ser><c:tx><c:v>Series name</c:v></c:tx>'
+        + '<c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt>'
+        + "</c:strCache></c:strRef></c:cat></c:ser></c:barChart></c:plotArea>"
+        + "</c:chart></c:chartSpace>"
+    )
+    with zipfile.ZipFile(io.BytesIO(generate_xlsx())) as archive:
+        entries = [(item.filename, archive.read(item.filename)) for item in archive.infolist()]
+    return _zip_bytes(entries + [("xl/charts/chart1.xml", chart.encode("utf-8"))])
 
 
 # --- the registry ------------------------------------------------------------

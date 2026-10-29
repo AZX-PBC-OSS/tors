@@ -314,6 +314,15 @@ documents = ["dep:pdf_oxide", "dep:anydoc", "dep:office_oxide", "dep:html-to-mar
 [dev-dependencies]
 criterion = "0.8"
 strsim = "0.11.1"
+# The render-anchored layout oracle (§9, `src/pdf_impl.rs` tests): the
+# layout probe's goldens are pinned against pdf_oxide's own rasterizer —
+# the marker's mapped box must land where the render puts its ink — so
+# TEST builds need pdf_oxide's `rendering` feature (tiny-skia + the font
+# stacks). A dev-dependency edge unifies features into test/clippy builds
+# only: the shipped wheel (tors-documents builds tors-core with
+# `features = ["documents"]`, no dev tree) never compiles the renderer,
+# keeping the Cargo.toml [dependencies] comment's lean-base law intact.
+pdf_oxide = { version = "0.3.78", features = ["rendering"] }
 # The random bench's uuid4 comparator only: `Uuid::new_v4()` (the crate's
 # own getrandom-per-call rng path — verified in its source; the
 # thread-cached engine is the separate opt-in fast-rng feature) is what

@@ -138,7 +138,7 @@ actually return.
 
 107 functions plus two small helper classes and six pinned constants (five
 charset alphabets and the key-family tuple),
-grouped by what they do; the `documents` extra adds seven document-extraction
+grouped by what they do; the `documents` extra adds nine document-extraction
 functions and its own helper types. Full signatures, argument contracts, and
 edge cases are in the [API reference](docs/api.md).
 
@@ -168,7 +168,7 @@ edge cases are in the [API reference](docs/api.md).
 | Near-duplicate detection & dedup | `simhash_distance`, `shingle_jaccard`, `shingle_dice`, `dedup_near_dup` (greedy keep-first over small candidate sets), `lsh_candidates`/`lsh_probability`/`lsh_threshold` (stateless MinHash banding over `minhash_signature` output; no persistent LSH index) |
 | UUIDv7 field operations | `uuid7_timestamp_ms`, `uuid_version`, `uuid_parse` |
 | Text-processing pipelines | `apply_pipeline`, `CompiledLemmaDict` |
-| Document-format extraction (`tors.documents`) | `to_markdown`, `to_text`, `sniff`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris` |
+| Document-format extraction (`tors.documents`) | `to_markdown`, `to_text`, `sniff`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris`, `page_geometry`, `page_layout` |
 
 ## Highlights
 
