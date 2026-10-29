@@ -33,12 +33,17 @@ check: lint test
 # (tests/test_documents_engines.py) run against the tors.documents payload
 # (tors-documents/, the uv-workspace member), and a plain `uv sync --locked`
 # is exact: it would uninstall the payload and silently skip those gates.
+# --group docs for the same exactness reason: the docs group (mkdocs,
+# mkdocs-material) is NON-default (pyproject.toml's default-groups is
+# ["dev"] only), so without naming it here a plain sync never installs it —
+# or EVICTS it, and `make lint`'s mkdocs gate dies on the missing tool (a
+# `--no-install-project` sync like ci.yml's ruff step is likewise exact).
 # Both workspace members are force-reinstalled: uv's wheel cache does not
 # key on Rust sources (the `dev` target's note), so without the flag a
 # re-run after a pull keeps BOTH wheels' native code stale — the same trap
 # `dev` exists to disarm, one level up.
 install:
-	uv sync --locked --extra documents --reinstall-package tors \
+	uv sync --locked --extra documents --group docs --reinstall-package tors \
 		--reinstall-package tors-documents
 
 # Rebuild the extension after Rust edits. uv's wheel cache does not key on
@@ -70,7 +75,7 @@ install:
 dev:
 	-find python/tors -maxdepth 1 -name '_tors*.so' ! -name '_tors.abi3.so' -delete
 	-find tors-documents/python -name '*.so' -delete
-	uv sync --locked --extra documents --reinstall-package tors \
+	uv sync --locked --extra documents --group docs --reinstall-package tors \
 		--reinstall-package tors-documents
 
 # The ci.yml lint job, verbatim: fmt gate (root workspace AND the fuzz
@@ -191,7 +196,6 @@ gen-html-table:
 # alternation). It stays committed as the repro harness, joining the run
 # lists when pdf_oxide ships a cap.
 FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming
-
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \
 		echo "=== $$t (30s) ==="; \
