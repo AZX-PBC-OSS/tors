@@ -1393,6 +1393,29 @@ def generate_pdf_crop_partial() -> bytes:
     )
 
 
+def generate_pdf_page_labels() -> bytes:
+    """A 6-page PDF whose catalog carries a multi-range /PageLabels
+    numbering tree (ISO 32000 §12.4.2): lower-roman from value 3
+    (pages 0-2: iii, iv, v), decimal with an "A-" prefix (pages 3-4:
+    A-1, A-2), and a styleless prefix-only "cover" range (page 5: the
+    constant label). The page-labels probe's load fixture: the tree is
+    catalog data, so no page needs content, and the three styles'
+    rendered goldens pin the covering rule end to end (never a
+    fabricated ordinal)."""
+    kids = " ".join(f"{3 + page} 0 R" for page in range(6))
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums "
+            b"[0 << /S /r /St 3 >> 3 << /S /D /P (A-) >> 5 << /P (cover) >>] >> >>",
+            f"<< /Type /Pages /Kids [{kids}] /Count 6 >>".encode("ascii"),
+            *(
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+                for _ in range(6)
+            ),
+        ]
+    )
+
+
 # --- the page-layout fixtures (standalone, on demand: the geometry
 # --- fixtures' precedent — none carries conversion content the matrix's
 # --- sweeps need; the layout probes build their own bytes) -------------------

@@ -51,6 +51,8 @@ from tors.documents import (
     pdf_extract,
     pdf_link_uris,
     pdf_page_count,
+    pdf_page_labels,
+    pdf_security,
 )
 
 
@@ -124,6 +126,8 @@ _ENTRY_POINTS = [
     page_geometry,
     page_layout,
     pdf_page_count,
+    pdf_page_labels,
+    pdf_security,
     pdf_extract,
     pdf_classify,
     pdf_link_uris,

@@ -30,6 +30,7 @@ from tors_documents import (
     PageLayout,
     PageTables,
     PdfClassification,
+    PdfSecurity,
 )
 
 async def to_markdown(
@@ -64,6 +65,20 @@ async def pdf_page_count(
     backend: Backend | str = ...,
     max_bytes: int | None = ...,
 ) -> int: ...
+async def pdf_page_labels(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    password: str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
+) -> list[str | None]: ...
+async def pdf_security(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    password: str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
+) -> PdfSecurity: ...
 async def pdf_link_uris(
     path: str | os.PathLike[str] | None = ...,
     data: bytes | None = ...,

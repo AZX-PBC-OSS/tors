@@ -43,6 +43,12 @@ from tors_documents.aio import (
     pdf_page_count as pdf_page_count,
 )
 from tors_documents.aio import (
+    pdf_page_labels as pdf_page_labels,
+)
+from tors_documents.aio import (
+    pdf_security as pdf_security,
+)
+from tors_documents.aio import (
     to_markdown as to_markdown,
 )
 from tors_documents.aio import (
@@ -57,6 +63,8 @@ __all__ = [
     "pdf_extract",
     "pdf_link_uris",
     "pdf_page_count",
+    "pdf_page_labels",
+    "pdf_security",
     "to_markdown",
     "to_text",
 ]

@@ -56,6 +56,8 @@ from tors_documents import (
     pdf_extract,
     pdf_link_uris,
     pdf_page_count,
+    pdf_page_labels,
+    pdf_security,
     to_markdown,
     to_text,
 )
@@ -386,6 +388,8 @@ PUBLIC_CONVERSION_SURFACE: tuple[tuple[Callable[..., object], bool], ...] = (
     (pdf_extract, True),
     (pdf_link_uris, True),
     (pdf_page_count, True),
+    (pdf_page_labels, True),
+    (pdf_security, True),
 )
 
 

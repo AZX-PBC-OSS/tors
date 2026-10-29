@@ -56,6 +56,8 @@ _WRAPPED = (
     "pdf_extract",
     "pdf_link_uris",
     "pdf_page_count",
+    "pdf_page_labels",
+    "pdf_security",
     "to_markdown",
     "to_text",
 )

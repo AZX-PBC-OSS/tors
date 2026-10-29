@@ -115,6 +115,8 @@ try:  # the payload wheel (tors[documents])
         PageGeometry,
         PageLayout,
         PageTables,
+        PdfPermissions,
+        PdfSecurity,
         Row,
         Table,
         TextLine,
@@ -126,6 +128,8 @@ try:  # the payload wheel (tors[documents])
         pdf_classify,
         pdf_extract,
         pdf_page_count,
+        pdf_page_labels,
+        pdf_security,
         sniff,
         to_markdown,
         to_text,
@@ -139,6 +143,8 @@ except ImportError:  # pragma: no cover - the in-base wiring alternative
             PageGeometry,
             PageLayout,
             PageTables,
+            PdfPermissions,
+            PdfSecurity,
             Row,
             Table,
             TextLine,
@@ -150,6 +156,8 @@ except ImportError:  # pragma: no cover - the in-base wiring alternative
             pdf_classify,
             pdf_extract,
             pdf_page_count,
+            pdf_page_labels,
+            pdf_security,
             sniff,
             to_markdown,
             to_text,
@@ -1429,6 +1437,8 @@ class TestPdfFamilyBackendAndBudget:
         capabilities = {
             pdf_extract: "the per-page text probe",
             pdf_page_count: "the page tree",
+            pdf_page_labels: "the /PageLabels numbering tree",
+            pdf_security: "the /Encrypt security state",
             pdf_classify: "per-page classification",
             pdf_link_uris: "the /Annots link walk",
         }
@@ -1685,6 +1695,8 @@ class TestPdfFamilyBackendAndBudget:
         capabilities = {
             "pdf_extract": "the per-page text probe",
             "pdf_page_count": "the page tree",
+            "pdf_page_labels": "the /PageLabels numbering tree",
+            "pdf_security": "the /Encrypt security state",
             "pdf_classify": "per-page classification",
             "pdf_link_uris": "the /Annots link walk",
         }
@@ -1841,13 +1853,15 @@ class TestBytesInputAndLinkWalk:
 # --- encrypted PDFs: the password door (fail-closed lane) ------------------------
 
 
-def _encrypted_pdf(password: str = "torque") -> bytes:
+def _encrypted_pdf(user_password: str = "torque", owner_password: str | None = None) -> bytes:
     """A one-page RC4-128-encrypted PDF carrying exactly one line of text:
     fpdf2 writes the page, pypdf rewrites it encrypted: RC4-128 because
     it is pure-python in pypdf (AES would drag in the cryptography
     package, which the dev group does not carry). pypdf salts the
     encryption randomly per call, so no test may assert on these bytes:
-    only on behavior."""
+    only on behavior. ``user_password=""`` with an ``owner_password=``
+    spells the owner-password-only shape (the empty user password
+    authenticates at open and reads fine)."""
     import io
 
     from fpdf import FPDF
@@ -1859,7 +1873,10 @@ def _encrypted_pdf(password: str = "torque") -> bytes:
     pdf.cell(0, 8, text="Confidential torque figures", new_x="LMARGIN", new_y="NEXT")
     writer = PdfWriter()
     writer.append(io.BytesIO(bytes(pdf.output())))
-    writer.encrypt(user_password=password, algorithm="RC4-128")
+    encrypt = {"user_password": user_password, "algorithm": "RC4-128"}
+    if owner_password is not None:
+        encrypt["owner_password"] = owner_password
+    writer.encrypt(**encrypt)
     locked = io.BytesIO()
     writer.write(locked)
     return locked.getvalue()
@@ -1871,13 +1888,19 @@ class TestEncryptedPdfs:
     named: never empty output (the pre-fix masking: to_markdown and
     pdf_extract silently returned "" on a locked PDF while classify
     raised, so a routing caller read "no text" where the truth was "no
-    access"; the door check now sits in front of every engine lane)."""
+    access"; the door check now sits in front of every engine lane).
+    The one documented carve-out is ``pdf_security`` (#208): it REPORTS
+    the locked state instead of raising — its agreement with the door is
+    pinned in its own test below, never in this loop."""
 
     def test_every_entry_fails_closed_without_a_password(self) -> None:
-        """All nine entries (both convert modes, all four PDF-only
-        calls, and the three geometry-lane probes) refuse a locked PDF with
-        pdf_oxide's ValueError naming the encryption, before any engine
-        work. The defect this gate makes
+        """All ten raise-entries (both convert modes, the five PDF-only
+        probes including ``pdf_page_labels``, and the three geometry-lane
+        probes) refuse a locked PDF with pdf_oxide's ValueError naming
+        the encryption, before any engine work — ``pdf_security`` is the
+        deliberate carve-out (it reports state instead; its own
+        agreement test below pins that both doors answer the same
+        question). The defect this gate makes
         impossible to regress: the pre-fix wheel's to_markdown/pdf_extract
         returned EMPTY output on these same bytes (the empty-string
         masking: indistinguishable from a blank document); today no entry
@@ -1894,6 +1917,7 @@ class TestEncryptedPdfs:
             pdf_classify,
             pdf_extract,
             pdf_page_count,
+            pdf_page_labels,
             pdf_link_uris,
         )
         for entry in entries:
@@ -1987,6 +2011,271 @@ class TestEncryptedPdfs:
             resolved, markdown = asyncio.run(aio_module.to_markdown(data=locked, password="torque"))
             assert resolved is Format.PDF
             assert "Confidential torque figures" in markdown
+
+
+# --- the pdf_security probe (issue #208): the door's reported-state carve-out ------
+
+
+def _malformed_encrypt_pdf(encrypt_body: bytes) -> bytes:
+    """A valid two-page PDF whose trailer names a broken /Encrypt dict:
+    the handler-refused shape the conflation cells need (the door check
+    cannot initialize the handler, so it reports fail-closed on both
+    sides; pdf_security reports the same with or without a password)."""
+    out = bytearray(b"%PDF-1.4\n")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        encrypt_body,
+    ]
+    offsets = [0]
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for offset in offsets[1:]:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        b"trailer\n<< /Size 6 /Root 1 0 R /Encrypt 5 0 R "
+        b"/ID [<00112233445566778899aabbccddeeff> "
+        b"<00112233445566778899aabbccddeeff>] >>\n"
+    )
+    out += f"startxref\n{xref_at}\n%%EOF\n".encode()
+    return bytes(out)
+
+
+class TestPdfSecurity:
+    """``pdf_security`` (#208): the typed encryption/permissions probe.
+    It is the DOOR's documented carve-out — it reports the locked state
+    instead of raising, so it must never join the fail-closed loop (its
+    agreement with the door is pinned here instead) — and its four
+    fields carry the reading rule
+    ``readable = !encrypted || unlocked || owner_password_only``."""
+
+    def test_the_four_field_matrix_over_the_nine_cells(self, tmp_path: Path) -> None:
+        """Every cell pinned, NONE raising: unencrypted; user-locked
+        with None/""/right/wrong; owner-only (pypdf's ``user_password=""``
+        encrypt) with None/""/right/wrong. The trap cell is named: a
+        wrong password on an owner-only document reports
+        ``unlocked=False, owner_password_only=True`` — the document
+        reads fine with NO password, and the door raises on the wrong
+        one; ``unlocked == false`` is never "locked"."""
+        from tors_documents import PdfPermissions
+
+        unlocked_pdf = ENGINES_CORPUS["pdf_two_page"]
+        user_locked = _encrypted_pdf()
+        owner_locked = _encrypted_pdf(user_password="", owner_password="owner")
+
+        report = pdf_security(data=unlocked_pdf)
+        assert report.encrypted is False
+        assert report.unlocked_with_supplied_password is True
+        assert report.permissions is None
+        assert report.owner_password_only is False
+        # a password on an unencrypted document is a no-op, never an error
+        report = pdf_security(data=unlocked_pdf, password="anything")
+        assert report.encrypted is False and report.unlocked_with_supplied_password is True
+
+        for password in (None, ""):
+            report = pdf_security(data=user_locked, password=password)
+            assert report.encrypted is True
+            assert report.unlocked_with_supplied_password is False
+            assert report.owner_password_only is False
+            assert isinstance(report.permissions, PdfPermissions)
+        report = pdf_security(data=user_locked, password="torque")
+        assert (report.encrypted, report.unlocked_with_supplied_password) == (True, True)
+        assert report.owner_password_only is False
+        report = pdf_security(data=user_locked, password="wrong")
+        assert (report.encrypted, report.unlocked_with_supplied_password) == (True, False)
+
+        for password in (None, ""):
+            report = pdf_security(data=owner_locked, password=password)
+            assert report.encrypted is True
+            assert report.unlocked_with_supplied_password is True
+            assert report.owner_password_only is True
+        report = pdf_security(data=owner_locked, password="owner")
+        assert (report.encrypted, report.unlocked_with_supplied_password) == (True, True)
+        # the trap cell: unlocked=False yet owner_password_only=True
+        report = pdf_security(data=owner_locked, password="wrong")
+        assert report.unlocked_with_supplied_password is False
+        assert report.owner_password_only is True
+        assert isinstance(report.permissions, PdfPermissions)
+
+    def test_permissions_carry_the_named_bits_and_raw_p(self) -> None:
+        """The /P decode: the eight named bits plus ``raw_p`` (the
+        engine's within-i32 view). The pypdf fixture's /P reports
+        ``-4``-shaped (all named bits true: every bit of value 4 and up
+        is set in the two's-complement ``-4``)."""
+        report = pdf_security(data=_encrypted_pdf())
+        permissions = report.permissions
+        assert permissions is not None
+        assert permissions.raw_p == -4
+        assert permissions.print_low_res is True
+        assert permissions.modify is True
+        assert permissions.copy is True
+        assert permissions.annotate is True
+        assert permissions.fill_forms is True
+        assert permissions.accessibility is True
+        assert permissions.assemble is True
+        assert permissions.print_high_res is True
+
+    def test_the_conflation_cells_report_identically_with_or_without_a_password(self) -> None:
+        """A malformed /Encrypt dict reports
+        ``{True, False, None, False}`` with OR without a supplied
+        password (R1's uniformity — the pre-fix pass raised exactly on
+        the with-password spelling); "needs a password" is
+        indistinguishable from "this build/policy refuses the cipher"."""
+        for body in (
+            b"<< >>",  # empty dict: missing /Filter /O /U
+            b"<< /Filter /Standard /V 99 /R 9 /O <00> /U <00> /P -4 >>",  # unsupported /V
+        ):
+            blob = _malformed_encrypt_pdf(body)
+            for password in (None, "torque"):
+                report = pdf_security(data=blob, password=password)
+                assert report.encrypted is True
+                assert report.unlocked_with_supplied_password is False
+                assert report.permissions is None
+                assert report.owner_password_only is False
+
+    def test_the_security_door_agreement_on_the_fixture_matrix(self, tmp_path: Path) -> None:
+        """The carve-out's own agreement pin (F16's scoping): the
+        geometry probe raises exactly when the security report says the
+        call held no working credentials —
+        ``page_geometry(...).is_err() == (encrypted &&
+        !unlocked_with_supplied_password)``. Booleans only; BOTH source
+        spellings (``path=`` and ``data=``); BOTH password spellings
+        (``None`` and ``""`` — the empty string takes the door's
+        did-not-unlock branch while None takes the no-password one); and
+        the malformed-/Encrypt cells where the guard reports. The ``==``
+        is a claim about these fixtures, not a law (a malformed page
+        tree breaks the converse)."""
+        unlocked_pdf = ENGINES_CORPUS["pdf_two_page"]
+        user_locked = _encrypted_pdf()
+        owner_locked = _encrypted_pdf(user_password="", owner_password="owner")
+        malformed = _malformed_encrypt_pdf(b"<< >>")
+        paths: dict[str, str] = {}
+        for name, blob in (
+            ("unencrypted", unlocked_pdf),
+            ("user-locked", user_locked),
+            ("owner-only", owner_locked),
+            ("malformed", malformed),
+        ):
+            path = tmp_path / f"{name}.pdf"
+            path.write_bytes(blob)
+            paths[name] = str(path)
+
+        for name, blob in (
+            ("unencrypted", unlocked_pdf),
+            ("user-locked", user_locked),
+            ("owner-only", owner_locked),
+            ("malformed", malformed),
+        ):
+            for password in (None, ""):
+                for source in ({"data": blob}, {"path": paths[name]}):
+                    report = pdf_security(**source, password=password)
+                    # the door's boolean: page_geometry raises or answers
+                    try:
+                        page_geometry(**source, password=password)
+                        door_raises = False
+                    except ValueError:
+                        door_raises = True
+                    assert door_raises == (
+                        report.encrypted and not report.unlocked_with_supplied_password
+                    ), f"{name} with password {password!r} ({source})"
+
+    def test_data_and_path_spellings_agree_and_aio_matches(self, tmp_path: Path) -> None:
+        """``data=`` and ``path=`` answer the same four fields, and the
+        aio spelling wraps the same probe (the family's parity law)."""
+        import asyncio
+
+        from tors_documents import aio as payload_aio
+
+        from tors.documents import aio as shim_aio
+
+        owner_locked = _encrypted_pdf(user_password="", owner_password="owner")
+        path = tmp_path / "owner.pdf"
+        path.write_bytes(owner_locked)
+        by_data = pdf_security(data=owner_locked)
+        by_path = pdf_security(path=str(path))
+        assert by_data == by_path
+        assert asyncio.run(payload_aio.pdf_security(data=owner_locked)) == by_data
+        assert asyncio.run(shim_aio.pdf_security(data=owner_locked)) == by_data
+
+
+# --- the pdf_page_labels probe (issue #207) ----------------------------------------
+
+
+class TestPdfPageLabels:
+    """``pdf_page_labels`` (#207): the page label a reader displays, per
+    page — the ISO 32000 §12.4.2 numbering tree, ``None`` reserved for
+    "the page declares no label" (the fabricate-an-ordinal signal), the
+    door governing unchanged (a locked document raises, never
+    ciphertext labels)."""
+
+    def test_the_multi_range_fixture_renders_the_three_styles(self, tmp_path: Path) -> None:
+        """The generator fixture's goldens: lower-roman from value 3,
+        decimal with an "A-" prefix, and the styleless constant
+        "cover" — and the data=/path= spellings agree."""
+        from documents import generate_pdf_page_labels
+
+        blob = generate_pdf_page_labels()
+        path = tmp_path / "labels.pdf"
+        path.write_bytes(blob)
+        expected = ["iii", "iv", "v", "A-1", "A-2", "cover"]
+        assert pdf_page_labels(data=blob) == expected
+        assert pdf_page_labels(path=str(path)) == expected
+        assert pdf_page_labels(data=blob, backend="oxide") == expected
+
+    def test_no_tree_and_leading_gaps_answer_none_never_an_ordinal(self) -> None:
+        """A tree-less document answers every page None (the caller's
+        fabricate-an-ordinal signal — never a fabricated "1"); a tree
+        whose first range starts late leaves the leading pages None."""
+        from documents import ENGINES_CORPUS, generate_pdf_pages
+
+        two_page = ENGINES_CORPUS["pdf_two_page"]
+        assert pdf_page_labels(data=two_page) == [None, None]
+        # length is always the page count
+        assert len(pdf_page_labels(data=generate_pdf_pages(5))) == 5
+
+    def test_length_is_the_page_count_and_zero_pages_is_empty(self) -> None:
+        """The length law on several fixtures, and the zero-page shape
+        answers [] (a count, not an error)."""
+        from documents import ENGINES_CORPUS, generate_pdf_zero_pages
+
+        report = pdf_page_labels(data=ENGINES_CORPUS["pdf_two_page"])
+        assert len(report) == pdf_page_count(data=ENGINES_CORPUS["pdf_two_page"])
+        assert pdf_page_labels(data=generate_pdf_zero_pages()) == []
+
+    def test_the_encrypted_door_governs_labels_too(self) -> None:
+        """A user-locked document raises the door error (never
+        ciphertext labels — the extractor engine-side is not auth-gated,
+        so open() is the labels' only gate), and an owner-password-only
+        document reads its DECRYPTED labels with the empty password.
+        The writer must CLONE the catalog (``clone_from=``) for the
+        /PageLabels tree to survive the encrypt — ``append`` drops it
+        (measured: the appended file honestly answers all-None, a
+        tree-less document's true answer)."""
+        import io
+
+        from pypdf import PdfReader, PdfWriter
+
+        from documents import generate_pdf_page_labels
+
+        locked = _encrypted_pdf()
+        with pytest.raises(ValueError, match="encrypted and requires a password"):
+            pdf_page_labels(data=locked)
+        with pytest.raises(ValueError, match="did not unlock"):
+            pdf_page_labels(data=locked, password="not-the-password")
+        # owner-only: the labels come through decrypted
+        source = io.BytesIO(generate_pdf_page_labels())
+        writer = PdfWriter(clone_from=PdfReader(source))
+        writer.encrypt(user_password="", owner_password="owner", algorithm="RC4-128")
+        out = io.BytesIO()
+        writer.write(out)
+        labels = pdf_page_labels(data=out.getvalue())
+        assert labels == ["iii", "iv", "v", "A-1", "A-2", "cover"]
 
 
 # --- the page-geometry probe (the geometry lane's contract) -----------------------
@@ -3879,6 +4168,29 @@ class TestLayoutClassContracts:
             (Table, ["rows", "has_header", "col_count", "bbox"]),
             (Row, ["cells", "is_header"]),
             (Cell, ["text", "bbox", "colspan", "rowspan"]),
+            (
+                PdfSecurity,
+                [
+                    "encrypted",
+                    "unlocked_with_supplied_password",
+                    "permissions",
+                    "owner_password_only",
+                ],
+            ),
+            (
+                PdfPermissions,
+                [
+                    "print_low_res",
+                    "modify",
+                    "copy",
+                    "annotate",
+                    "fill_forms",
+                    "accessibility",
+                    "assemble",
+                    "print_high_res",
+                    "raw_p",
+                ],
+            ),
         ],
     )
     def test_the_getter_set_is_exactly_the_field_list_and_read_only(
@@ -3893,12 +4205,15 @@ class TestLayoutClassContracts:
         )
         # read-only, on a live instance (the ImageBox from an image-bearing
         # fixture — the baseline page carries none; the tables classes from
-        # the ruled fixture). pyo3's getters are the native type's own
-        # descriptors (not `property` objects); the read-only half is the
-        # setattr refusal.
+        # the ruled fixture; PdfPermissions's live sample from an ENCRYPTED
+        # fixture — the class has no constructor, and only an encrypted
+        # document carries a /P dict to report). pyo3's getters are the
+        # native type's own descriptors (not `property` objects); the
+        # read-only half is the setattr refusal.
         page = page_layout(data=generate_pdf_layout_baseline())[0]
         image_page = page_layout(data=generate_pdf_layout_image())[0]
         tabled = page_tables(data=generate_pdf_table_ruled())[0]
+        security = pdf_security(data=_encrypted_pdf())
         samples: dict[type, object] = {
             PageLayout: page,
             TextSpan: page.spans[0],
@@ -3909,6 +4224,8 @@ class TestLayoutClassContracts:
             Table: tabled.tables[0],
             Row: tabled.tables[0].rows[0],
             Cell: tabled.tables[0].rows[0].cells[0],
+            PdfSecurity: security,
+            PdfPermissions: security.permissions,
         }
         live = samples[klass]
         for field in fields:
@@ -3952,6 +4269,20 @@ class TestLayoutClassContracts:
         assert 'format="pdf"' in repr(tables_entry), repr(tables_entry)
         # the refused marker rides the repr too
         assert "tables_refused=False" in repr(tables_entry), repr(tables_entry)
+        # the security classes: structural equality (two calls over the
+        # same encrypted bytes — pypdf salts per call, so the reports can
+        # differ in NO field; the same call twice is the same answer) and
+        # the repr naming the class and the fields
+        locked = _encrypted_pdf()
+        report = pdf_security(data=locked)
+        same = pdf_security(data=locked)
+        assert report == same
+        assert repr(report).startswith("PdfSecurity(encrypted=True")
+        assert "owner_password_only=" in repr(report)
+        # PdfPermissions's repr carries every named bit and the raw integer
+        perms_repr = repr(report.permissions)
+        assert perms_repr.startswith("PdfPermissions(")
+        assert "print_low_res=" in perms_repr and "raw_p=" in perms_repr
 
 
 # --- the anydoc input ceiling (max_bytes=) ---------------------------------------
