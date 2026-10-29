@@ -26,6 +26,7 @@ jobs:
     # Runs once, not per matrix leg: Rust fmt/clippy is Python-version-agnostic, so the
     # 3.10–3.14 matrix would buy five identical copies of the same signal.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -113,6 +114,19 @@ jobs:
           manifest-path: tors-documents/Cargo.toml
           command-arguments: licenses advisories bans
 
+      - name: Cargo deny (fuzz crate lock)
+        # The THIRD independent lockfile: fuzz/ is also deliberately not a
+        # workspace member (its Cargo.toml's header) and resolves its own
+        # fuzz/Cargo.lock, which neither pass above reads — libfuzzer-sys
+        # and its tree ride that lock, so its advisories gate here too.
+        # (release-lock-sync.yml refreshes the two locks above on release
+        # PRs; this one is not version-synced, which is exactly why it
+        # needs its own advisory gate instead.)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          command-arguments: licenses advisories bans
+
       - name: Install uv
         # For the ruff step below: ruff is a dev-group dependency (pyproject.toml),
         # so the lockfile, not this workflow, owns its version.
@@ -149,12 +163,50 @@ jobs:
         # the test job's business).
         run: uvx pyright@1.1.414
 
+  msrv:
+    # The declared MSRV (Cargo.toml's rust-version = "1.90", and
+    # tors-documents/Cargo.toml's own "1.90") is otherwise verified nowhere:
+    # every other job runs stable, and the wasm job's 1.93.0 clears it
+    # incidentally. A dependency bump that quietly raised the resolved
+    # tree's rust-version floor would otherwise publish a rust-version lie
+    # that only a user on exactly 1.90 hits. cargo refuses to build any
+    # graph whose packages demand a newer rustc, so a check per graph is
+    # the whole gate: base, documents engine tree, and the payload crate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust 1.90
+        # The MSRV itself, exactly as declared — not stable, which would
+        # verify nothing.
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # 1.90.0
+        with:
+          toolchain: "1.90.0"
+
+      - name: Cache cargo
+        # Same choice as the lint job's cache step (rationale there); the
+        # workspaces list covers the payload crate's own target dir.
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> target\ntors-documents -> tors-documents/target"
+
+      - name: Cargo check (base graph)
+        run: cargo check --locked --no-default-features
+
+      - name: Cargo check (documents engine tree)
+        run: cargo check --locked --no-default-features --features documents
+
+      - name: Cargo check (documents payload crate)
+        run: cargo check --locked --manifest-path tors-documents/Cargo.toml
+
   test:
     # Cheap signals first: a fmt or clippy
     # failure surfaces from `lint` in one fast job instead of after five matrix legs have
     # each spent a uv sync + extension build on the same break.
     needs: [lint]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -174,8 +226,14 @@ jobs:
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
-        # Same choice as the lint job's cache step (rationale there).
+        # Same choice as the lint job's cache step (rationale there). The
+        # workspaces list matches the lint job's too: the sync below builds
+        # the payload wheel's extension into tors-documents/target, which
+        # the default root-only key never caches — without it every matrix
+        # leg pays a cold engine-tree build per run.
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -228,6 +286,7 @@ jobs:
     # 3.12 leg's.
     needs: [lint]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -237,7 +296,12 @@ jobs:
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
+        # Same choice and workspaces list as the test job's cache step
+        # (rationale there): the sync below also builds the payload into
+        # tors-documents/target.
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -290,6 +354,7 @@ jobs:
     # target of active suspicion is a local `cargo +nightly fuzz run
     # <target>`, not something this job runs.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -313,16 +378,26 @@ jobs:
         # weekly pass; this loop had drifted from both (truncate_ellipsis,
         # controls, json_repair were Makefile-only). gfm_strip joined the
         # lists when its char-boundary fence-trim panic was fixed
-        # (strip_fence_content, unit-pinned). documents_markdown stays
+        # (strip_fence_content, unit-pinned). The nine never-wired targets
+        # (chunk-budget, chunk-text, detect-encoding, first-invalid-charset,
+        # grounding, ground_sentences, grounding_coverage, near_dup,
+        # uuid-text) joined 2026-10-29 — see the Makefile's FUZZ_TARGETS
+        # comment. documents_markdown stays
         # deliberately absent: it SIGSEGVs on a KNOWN upstream bug
         # (pdf_oxide 0.3.78 parse_object/parse_array recursion, no depth
         # cap); the Makefile's FUZZ_TARGETS comment carries the repro.
         # It stays built and committed as the repro harness, joining the
-        # run lists when pdf_oxide ships a cap.
+        # run lists when pdf_oxide ships a cap. The eight newer documents
+        # surfaces (page_images, page_text_chars, document_structure,
+        # page_geometry, page_layout, page_tables, pdf_page_labels,
+        # pdf_security) have no targets either, parked on the same
+        # recorded decision (seven of them parse PDF bytes through the
+        # same uncapped parser; none gets one until pdf_oxide ships the
+        # cap).
         working-directory: fuzz
         run: |
           set -e
-          for t in decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming; do
+          for t in decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf rank_fusion truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid secrets lsh score_fusion weighted_minhash json_repair_streaming chunk-budget chunk-text detect-encoding first-invalid-charset grounding ground_sentences grounding_coverage near_dup uuid-text; do
             echo "=== $t ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=15 -close_fd_mask=3
           done

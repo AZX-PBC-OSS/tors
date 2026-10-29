@@ -73,11 +73,17 @@ allow = [
     #   permissive than the 0BSD already allowed. (Not OSI-approved as a
     #   license precisely because it dedicates rather than licenses; inside
     #   this gate's "permissive only" intent all the same.)
+    # - NCSA: libfuzzer-sys ((MIT OR Apache-2.0) AND NCSA), the fuzz
+    #   crate's harness — the AND conjunct is LLVM's libFuzzer C++ sources
+    #   it embeds, which the University of Illinois/NCSA Open Source
+    #   License (LLVM's own license, OSI-approved) governs: a BSD-style
+    #   permissive grant, the LLVM-exception family already allowed above.
     "Apache-2.0 WITH LLVM-exception",
     "Unicode-3.0",
     "0BSD",
     "MIT-0",
     "CC0-1.0",
+    "NCSA",
 ]
 # The allowlist is policy, not a measurement of today's tree: BSD-2/3-Clause,
 # ISC, and Zlib are allowed for future dependencies before any of them is
