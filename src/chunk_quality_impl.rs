@@ -47,11 +47,18 @@
 //! network, no dependencies beyond the crate's own segmenters and
 //! shingle hashes, so a caller can gate a chunking-config sweep on them
 //! the way the study's selector does, per document, in milliseconds.
+//! The scans are a sort + binary-search sweep, O((S + C) log(S + C)) in
+//! the sentence and chunk counts — the first cut's per-sentence and
+//! per-chunk full rescans were O(S * C) and measured 8.1x growth for a
+//! 3x input at document scale (802 ms -> 6530 ms); the sweep measures
+//! ~3x on the same shape, the linear class the "milliseconds" claim
+//! needs.
 
 use std::collections::HashSet;
 
 use crate::grounding_impl::sentence_spans;
 use crate::near_dup_impl::shingle_hashes;
+use crate::truncate_impl::char_count;
 
 /// The shingle width for the cohesion proxy: the near-duplicate family's
 /// own documented default (`shingle_jaccard`/`shingle_dice`'s
@@ -88,7 +95,11 @@ fn dice(a: &HashSet<u64>, b: &HashSet<u64>) -> f64 {
 /// panics on any input: an empty text, an empty chunk list, and
 /// token-free text all return the pinned degenerate shape
 /// (integrity 1.0: no chunk boundary crosses any sentence, vacuously;
-/// cohesion 0.0: no (sentence, chunk) pair exists to average).
+/// cohesion 0.0: no (sentence, chunk) pair exists to average), and a
+/// span out of range is SKIPPED by the defensive guard, not indexed —
+/// the guard compares against the CODEPOINT count (`char_count`), so a
+/// byte-valid-but-over-the-chars span (("é")'s (0, 2)) is a skip, not a
+/// `byte_at` panic.
 pub fn chunk_quality(chunks: &[(usize, usize)], text: &str, tau: usize) -> ChunkQuality {
     // The gold blocks: the suite's own UAX #29 sentence spans. Built
     // once; the same segmentation every grounding surface publishes.
@@ -98,18 +109,33 @@ pub fn chunk_quality(chunks: &[(usize, usize)], text: &str, tau: usize) -> Chunk
     // --- integrity: the fraction of sentences (gold blocks) no chunk
     // boundary crosses. A boundary p (either edge of any chunk) crosses
     // the sentence spanning (s, e) iff s < p < e and p sits farther than
-    // tau from both edges; the vacuous case (no sentences) is 1.0, the
-    // honest reading of "no boundary crosses anything".
+    // tau from both edges — exactly the integer window p in
+    // [s + tau + 1, e - tau - 1] (p > s + tau and p < e - tau; the
+    // saturating_sub keeps e - tau from underflowing when tau >= e,
+    // where the window is empty). The vacuous case (no sentences) is 1.0, the
+    // honest reading of "no boundary crosses anything". The boundary
+    // set is sorted and deduped ONCE, each sentence then asks one pair
+    // of binary searches — the question is "does any boundary fall in
+    // the window", so duplicates are free and the pass is
+    // O((S + C) log C) where the first cut's per-sentence
+    // chunks.iter().any() rescan was O(S * C).
     let integrity = if n == 0 {
         1.0
     } else {
+        let mut bounds: Vec<usize> = Vec::with_capacity(chunks.len() * 2);
+        for &(cs, ce) in chunks {
+            bounds.push(cs);
+            bounds.push(ce);
+        }
+        bounds.sort_unstable();
+        bounds.dedup();
         let crossed = sentences
             .iter()
             .filter(|&&(s, e, _, _)| {
-                chunks.iter().any(|&(cs, ce)| {
-                    let crosses = |p: usize| s < p && p < e && p - s > tau && e - p > tau;
-                    crosses(cs) || crosses(ce)
-                })
+                let lo = s.saturating_add(tau).saturating_add(1);
+                let hi = e.saturating_sub(tau);
+                lo < hi
+                    && bounds.partition_point(|&p| p < lo) != bounds.partition_point(|&p| p < hi)
             })
             .count();
         1.0 - crossed as f64 / n as f64
@@ -120,7 +146,25 @@ pub fn chunk_quality(chunks: &[(usize, usize)], text: &str, tau: usize) -> Chunk
     // set is computed exactly once (up front); a sentence contained in
     // several chunks of an overlapping caller's set contributes once per
     // containing chunk, the honest mean over the (sentence, chunk) pairs
-    // that exist. The chunk's span is sliced through a
+    // that exist.
+    //
+    // The containment lookup is the sweep that keeps the pass linear in
+    // the pair count rather than quadratic in it: the segmentation's
+    // spans are sorted and non-overlapping (UAX #29 emits them in text
+    // order), so their starts AND ends are non-decreasing (for i < j:
+    // e_i <= s_j < e_j), which makes the sentences a chunk (cs, ce)
+    // contains exactly the contiguous index range [lo, hi) — lo the
+    // first span with start >= cs, hi the count of spans with end <= ce
+    // — two binary searches per chunk where the first cut scanned every
+    // sentence per chunk (O(S) each, O(S * C) total).
+    //
+    // The pairs are still enumerated in the SAME order the naive scan
+    // produced them — chunks in caller order, each chunk's contained
+    // sentences in sentence order — so the f64 accumulation is
+    // bit-identical, not merely equal-to-last-ulp (the binding's
+    // exact-equality differential gate rides on it).
+    //
+    // The chunk's span is sliced through a
     // char-index-to-byte-offset table (the spans are codepoint offsets;
     // the shingle tokenizer wants a &str, and re-walking chars per chunk
     // would be quadratic in the chunk count).
@@ -135,21 +179,35 @@ pub fn chunk_quality(chunks: &[(usize, usize)], text: &str, tau: usize) -> Chunk
         .map(|&(_, _, bs, be)| shingle_hashes(&text[bs..be], SHINGLE_WIDTH))
         .collect();
 
+    // The defensive guard's units: the spans are CODEPOINT offsets, so
+    // the bound is the codepoint count (`char_count`), never
+    // `text.len()`'s bytes — a byte-valid span (("é")'s (0, 2): 1
+    // codepoint, 2 bytes) passed the byte comparison and indexed
+    // `byte_at` past its chars + 1 entries, panicking inside a function
+    // documented never to (unreachable through the binding, whose
+    // wrapper validates against the codepoint count; this core is a pub
+    // module of an rlib, so the guard is the contract).
+    let text_chars = char_count(text);
     let mut total = 0.0f64;
     let mut count = 0usize;
     for &(cs, ce) in chunks {
-        if cs > ce || ce > text.len() {
-            // Unreachable through the binding (the wrapper validates
-            // every span), the core's defensive contract: skip rather
-            // than panic, a bad span simply contains nothing.
+        if cs > ce || ce > text_chars {
+            // The core's defensive contract: skip rather than panic, a
+            // bad span simply contains nothing.
+            continue;
+        }
+        let lo = sentences.partition_point(|&(s, _, _, _)| s < cs);
+        let hi = sentences.partition_point(|&(_, e, _, _)| e <= ce);
+        if lo >= hi {
+            // No contained sentence: the chunk's own shingle set is
+            // never needed (the naive scan computed it anyway — a pure
+            // call, so skipping it changes nothing observable).
             continue;
         }
         let chunk_set = shingle_hashes(&text[byte_at[cs]..byte_at[ce]], SHINGLE_WIDTH);
-        for (i, &(s, e, _, _)) in sentences.iter().enumerate() {
-            if cs <= s && e <= ce {
-                total += dice(&sentence_sets[i], &chunk_set);
-                count += 1;
-            }
+        for set in sentence_sets[lo..hi].iter() {
+            total += dice(set, &chunk_set);
+            count += 1;
         }
     }
     let cohesion = if count == 0 {
@@ -264,5 +322,35 @@ mod tests {
         // cohesion 1.0 (the chunk's shingle set IS the sentence's).
         let one = chunk_quality(&[(0, 14)], "One two three.", 0);
         assert_eq!(one.cohesion, 1.0);
+    }
+
+    #[test]
+    fn a_byte_valid_but_past_the_chars_span_is_skipped_not_panicked() {
+        // "é" is 1 codepoint, 2 UTF-8 bytes. The span (0, 2) is valid
+        // in BYTES and passes a byte-typed range guard (2 > 2 is
+        // false), but `byte_at` has chars + 1 = 2 entries, so
+        // byte_at[2] panicked inside the function documented "never
+        // panics on any input" — the guard must compare against the
+        // CODEPOINT count and SKIP the span (the "skip rather than
+        // panic" contract): no (sentence, chunk) pair exists, so the
+        // pinned degenerate shape comes back, never a panic.
+        let q = chunk_quality(&[(0, 2)], "é", 0);
+        assert_eq!(
+            q,
+            ChunkQuality {
+                integrity: 1.0,
+                cohesion: 0.0
+            }
+        );
+        // Same guard, the start edge: a span opening past the char
+        // count is skipped too (and one byte-valid on both ends but
+        // reversed — cs > ce — stays skipped, the guard's first arm).
+        assert_eq!(
+            chunk_quality(&[(3, 4)], "é", 0),
+            ChunkQuality {
+                integrity: 1.0,
+                cohesion: 0.0
+            }
+        );
     }
 }

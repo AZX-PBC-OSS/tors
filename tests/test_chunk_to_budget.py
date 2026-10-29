@@ -276,6 +276,27 @@ class TestValidation:
         with pytest.raises(TypeError, match="token_offsets must be a sequence"):
             tors.chunk_to_offsets(text, 42, max_tokens=2)  # type: ignore[arg-type]
 
+    def test_the_callers_iterator_error_rides_the_canned_message(self) -> None:
+        # The canned refusals normalize the TYPE (the existing arms') but
+        # carry the original exception's text inline (the debuggability
+        # rule): a caller iterable that raises should name itself, not
+        # vanish into a canned message.
+        def raising_offsets():
+            yield (0, 4)
+            raise ValueError("custom marker")
+
+        with pytest.raises(ValueError, match="custom marker"):
+            tors.chunk_to_offsets(self.TEXT, raising_offsets(), max_tokens=2)
+        # The canned prefix stays, the type stays ValueError (the same
+        # arm's normalization), the marker rides inline after it.
+        with pytest.raises(ValueError, match="token_offsets must be a sequence") as exc:
+            tors.chunk_to_offsets(self.TEXT, raising_offsets(), max_tokens=2)
+        assert "custom marker" in str(exc.value)
+        # The non-iterable arm carries the original failure too.
+        with pytest.raises(TypeError, match="token_offsets must be a sequence") as exc2:
+            tors.chunk_to_offsets(self.TEXT, 42, max_tokens=2)  # type: ignore[arg-type]
+        assert "not iterable" in str(exc2.value)
+
 
 # ---- the base contract ------------------------------------------------------
 
