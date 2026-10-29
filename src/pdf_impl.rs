@@ -1912,9 +1912,11 @@ pub struct PageTablesData {
     pub tables: Vec<TableEntry>,
     /// The A9 marker: TRUE iff this surface deliberately declined to serve
     /// a page whose inputs indicate possible table content — the
-    /// frame-incoherent /Rotate classes (A1) or the table-primitive edge
-    /// cap (A6). Reading rule: `tables_refused` + `geometry.rotation !=
-    /// 0` → frame incoherence; `true` at rotation 0 → the edge cap.
+    /// frame-incoherent /Rotate classes (A1), the table-primitive edge
+    /// cap (A6), or an UNREADABLE path walk (A12's fail-closed: no
+    /// decision from an input you couldn't read). Reading rule:
+    /// `tables_refused` + `geometry.rotation != 0` → frame incoherence;
+    /// `true` at rotation 0 → the edge cap or the unreadable path input.
     /// FALSE for no-tables pages, for content-stream failures (unknowable
     /// — stays indistinguishable from no-tables by design), and on office
     /// rows (their marker is `format`).
@@ -1925,9 +1927,11 @@ pub struct PageTablesData {
 /// boxes are in (and so how they map forward), or that the page's inputs
 /// are frame-INCOHERENT and the surface refuses. computable from public
 /// API only: the page's rotation, whether any path is a table primitive
-/// (`has_rulings`), and the spans' `page_rotation_applied` flags
+/// (`has_rulings`), the spans' `page_rotation_applied` flags
 /// (`any_mapped`/`all_mapped` — the engine-mapping flag, NOT
-/// `rotation_degrees`, which is content rotation). Per the ruling's table,
+/// `rotation_degrees`, which is content rotation), and whether the path
+/// WALK itself failed (`paths_error` — A12's fail-closed: no decision
+/// from an input you couldn't read). Per the ruling's table,
 /// with the A12 fail-closed default: any combination NOT listed coherent
 /// is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1945,7 +1949,22 @@ enum Frame {
     Incoherent,
 }
 
-fn table_frame_gate(rotation: i32, has_rulings: bool, any_mapped: bool, all_mapped: bool) -> Frame {
+fn table_frame_gate(
+    rotation: i32,
+    has_rulings: bool,
+    any_mapped: bool,
+    all_mapped: bool,
+    paths_error: bool,
+) -> Frame {
+    // The unreadable-input refusal FIRST (A12's fail-closed): a failed
+    // path walk feeds the gate no ruling bit at all — pre-fix it
+    // collapsed into "no rulings" (`unwrap_or_default`) and a 90/270
+    // page with all-mapped spans was SERVED Mapped while the detector's
+    // path input may have been raw: the exact disagreement the gate
+    // exists to refuse. No decision from an input you couldn't read.
+    if paths_error {
+        return Frame::Incoherent;
+    }
     match rotation {
         // 0: the engine maps nothing and the forward rule is the identity;
         // every page at 0 is coherent by construction (the ruling table's
@@ -2013,7 +2032,10 @@ fn table_frame_gate(rotation: i32, has_rulings: bool, any_mapped: bool, all_mapp
 /// treatment) — every other combination refuses:
 /// `tables: []`, `tables_refused: true`, geometry intact. The docs' reading
 /// rule (A9): `tables_refused` with `geometry.rotation != 0` is frame
-/// incoherence; `tables_refused` at rotation 0 is the primitive cap.
+/// incoherence; `tables_refused` at rotation 0 is the primitive cap — or
+/// the unreadable path walk (A12's fail-closed: a failed `extract_paths`
+/// refuses the page rather than deciding "no rulings" from an input it
+/// couldn't read).
 ///
 /// The markdown divergence (A4, stated, not fixed in v1): this surface
 /// builds on the PUBLIC `extract_tables` — spatial-only, unconsolidated.
@@ -2115,11 +2137,15 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
 
     // ONE path walk for both gate inputs (A6/last ruling): the table
     // primitives' count IS the has_rulings bit (0 = none). A path-walk
-    // failure reads as zero primitives (and starves extract_tables below
-    // into its own empty answer — the content-failure class, refused:
-    // false).
-    let paths = doc.extract_paths(page).unwrap_or_default();
-    let primitives = paths.iter().filter(|p| p.is_table_primitive()).count();
+    // FAILURE is tracked (the Err): the gate refuses the page
+    // fail-closed (A12 — no decision from an input you couldn't read;
+    // pre-fix the failure read as "no rulings" via unwrap_or_default
+    // and could serve a Mapped page whose path input was unread).
+    // `tables_refused: true` — the input-unreadable refusal rides the
+    // A9 marker (see the field's reading rule).
+    let paths = doc.extract_paths(page);
+    let paths_error = paths.is_err();
+    let primitives = paths.unwrap_or_default().iter().filter(|p| p.is_table_primitive()).count();
     let has_rulings = primitives > 0;
 
     // The A6 cap: above the markdown lane's MAX_TABLE_EDGES the surface
@@ -2150,7 +2176,7 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
     }
 
     // The A1 frame-coherence gate (A12's fail-closed default).
-    let frame = table_frame_gate(rotation, has_rulings, any_mapped, all_mapped);
+    let frame = table_frame_gate(rotation, has_rulings, any_mapped, all_mapped, paths_error);
     if frame == Frame::Incoherent {
         return PageTablesData {
             page_index: page,
@@ -2991,7 +3017,13 @@ fn page_images_one(
 ) -> PageImagesData {
     // The frame: any error here (the page's own get_page walk included)
     // is a `None` — and [R11] the enumeration continues, the entries'
-    // bbox `None` (no frame to map into; the bytes are still served).
+    // bbox `None` (no frame to map into; the bytes are still served). A
+    // DEGENERATE box (zero/non-finite extent) is the same None-frame
+    // answer — geometry `None` AND the entries' bbox `None`: a
+    // zero-extent frame maps boxes into invented coordinates (measured:
+    // ((-50, 500, 100, 100)) out of a 0×0 page, every other surface
+    // serving nothing there); the bytes are frame-independent and stay
+    // enumerated.
     let media = doc.get_page_media_box(page).ok();
     let visible = doc.get_page_visible_box(page).ok();
     let rotation = doc.get_page_rotation(page).ok();
@@ -3010,9 +3042,18 @@ fn page_images_one(
         .iter()
         .map(|handle| {
             // Image handles are ALWAYS raw user space (the engine never
-            // /Rotate-maps them — probe P7): the forward rule directly.
-            let bbox = match (visible, rotation) {
-                (Some(visible), Some(rotation)) => Some(map_box_forward(
+            // /Rotate-maps them — probe P7): the forward rule directly —
+            // but only when the page has a USABLE frame to map into. A
+            // degenerate MediaBox (zero/non-finite extent) yields
+            // geometry None and NO transform frame: mapping the bbox
+            // through a zero-extent frame invents coordinates (measured:
+            // ((-50, 500, 100, 100)) out of a 0×0 page — every other
+            // surface serves nothing there). The BYTES are
+            // frame-independent and stay enumerated (R11's law: the
+            // enumeration never drops for a frame reason) — only the BOX
+            // is gated on the geometry.
+            let bbox = match (geometry, visible, rotation) {
+                (Some(_), Some(visible), Some(rotation)) => Some(map_box_forward(
                     (
                         handle.bbox.x,
                         handle.bbox.y,
@@ -6896,34 +6937,44 @@ mod tests {
 
     /// The A1 gate at unit level: the ruling table's every listed row
     /// (A12's fail-closed default covers the unlisted ones — asserted as
-    /// refusals too).
+    /// refusals too), plus the unreadable-path-input row: a failed path
+    /// walk refuses from ANY rotation (no decision from an input you
+    /// couldn't read — pre-fix the failure read as "no rulings" and a
+    /// 90/270 all-mapped page was served Mapped with an unread path
+    /// input).
     #[test]
     fn the_frame_gate_matches_the_ruling_table() {
         use Frame::{Incoherent, Mapped, Raw};
         // rotation 0: raw, always
-        assert_eq!(table_frame_gate(0, false, false, true), Raw);
-        assert_eq!(table_frame_gate(0, true, false, true), Raw);
+        assert_eq!(table_frame_gate(0, false, false, true, false), Raw);
+        assert_eq!(table_frame_gate(0, true, false, true, false), Raw);
         // 90/270 without rulings: none-mapped raw / all-mapped mapped / mixed refused
-        assert_eq!(table_frame_gate(90, false, false, false), Raw);
-        assert_eq!(table_frame_gate(270, false, false, false), Raw);
-        assert_eq!(table_frame_gate(90, false, true, true), Mapped);
-        assert_eq!(table_frame_gate(270, false, true, true), Mapped);
-        assert_eq!(table_frame_gate(90, false, true, false), Incoherent);
+        assert_eq!(table_frame_gate(90, false, false, false, false), Raw);
+        assert_eq!(table_frame_gate(270, false, false, false, false), Raw);
+        assert_eq!(table_frame_gate(90, false, true, true, false), Mapped);
+        assert_eq!(table_frame_gate(270, false, true, true, false), Mapped);
+        assert_eq!(table_frame_gate(90, false, true, false, false), Incoherent);
         // 90/270 with rulings: none-mapped raw / any-mapped refused
-        assert_eq!(table_frame_gate(90, true, false, false), Raw);
-        assert_eq!(table_frame_gate(270, true, false, false), Raw);
-        assert_eq!(table_frame_gate(90, true, true, true), Incoherent);
-        assert_eq!(table_frame_gate(270, true, true, false), Incoherent);
+        assert_eq!(table_frame_gate(90, true, false, false, false), Raw);
+        assert_eq!(table_frame_gate(270, true, false, false, false), Raw);
+        assert_eq!(table_frame_gate(90, true, true, true, false), Incoherent);
+        assert_eq!(table_frame_gate(270, true, true, false, false), Incoherent);
         // 180: all-mapped pathless serves; every rulings combination refuses
-        assert_eq!(table_frame_gate(180, false, true, true), Mapped);
-        assert_eq!(table_frame_gate(180, true, true, true), Incoherent);
-        assert_eq!(table_frame_gate(180, true, true, false), Incoherent);
-        assert_eq!(table_frame_gate(180, false, true, false), Incoherent);
+        assert_eq!(table_frame_gate(180, false, true, true, false), Mapped);
+        assert_eq!(table_frame_gate(180, true, true, true, false), Incoherent);
+        // The A12 unreadable-input row: a failed path walk refuses at
+        // every rotation and every span combination — including the
+        // mapped-class combination the failure used to fall into.
+        assert_eq!(table_frame_gate(90, false, true, true, true), Incoherent);
+        assert_eq!(table_frame_gate(180, false, true, true, true), Incoherent);
+        assert_eq!(table_frame_gate(0, false, false, true, true), Incoherent);
+        assert_eq!(table_frame_gate(180, true, true, false, false), Incoherent);
+        assert_eq!(table_frame_gate(180, false, true, false, false), Incoherent);
         // the (any=false, all=true) combination is the ZERO-SPAN vacuity
         // (all ⊆ any for any real span set): a spanless 180 page — no
         // table input at all — serves raw-empty, refused false.
-        assert_eq!(table_frame_gate(180, false, false, true), Raw);
-        assert_eq!(table_frame_gate(180, true, false, true), Raw);
+        assert_eq!(table_frame_gate(180, false, false, true, false), Raw);
+        assert_eq!(table_frame_gate(180, true, false, true, false), Raw);
     }
 
     /// The pdfium-hazard property, tables side: 8 threads opening their

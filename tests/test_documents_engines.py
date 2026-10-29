@@ -1148,6 +1148,29 @@ def test_page_geometry_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
 
 
 @pytest.mark.timing
+def test_document_structures_probe_sniffs_a_prefix_not_the_whole_blob() -> None:
+    """The pre-detach probe's GIL band (the finding: the probe received
+    the FULL data= buffer — looks_like_html lossy-walked all of it under
+    the GIL; measured 356.5 ms max gap on a 128 MiB blob, against the
+    crate's own whole-native-pass-under-detach GIL contract). Green: the
+    probe hands the GIL-side sniff only the bounded 64 KiB prefix the
+    path lane reads, so the worst gap stays at the ping floor through a
+    call over the same blob (the call itself refuses post-detach:
+    unknown content, no name to consult)."""
+    from test_gil_release import _assert_loop_stays_responsive
+
+    blob = b"\xff" * (128 * 1024 * 1024)  # invalid UTF-8, every byte
+
+    def op() -> None:
+        try:
+            document_structure(data=blob)
+        except ValueError:
+            pass  # the unknown-format refusal IS the expected answer
+
+    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
+
+
+@pytest.mark.timing
 def test_to_text_on_a_big_csv_keeps_the_event_loop_at_heartbeat_granularity(
     tmp_path: Path,
 ) -> None:
@@ -4671,6 +4694,37 @@ class TestPageImages:
         served = page_images(data=giant_dct, decode="pixels")[0].images[0]
         assert served.data.kind == "container", served.data.error_kind
 
+    def test_a_degenerate_frame_gates_the_bbox_never_the_bytes(self) -> None:
+        """The frame-gate law (the finding: a degenerate MediaBox yielded
+        geometry=None but bbox=Some mapped through the zero-extent frame
+        — measured: page_images served ((-50, 500, 100, 100)) where
+        every other surface serves nothing). Green: the bbox is gated on
+        the usable frame (geometry.is_some()) across the surfaces, while
+        the BYTES stay enumerated — frame-independent (R11's enumeration
+        law preserved: the enumeration never drops for a frame reason;
+        only the BOX is gated)."""
+        from documents import generate_pdf_layout_zero_mediabox
+
+        data = generate_pdf_layout_zero_mediabox()
+        # geometry: None on both
+        assert page_geometry(data=data) == [None]
+        layout = page_layout(data=data)[0]
+        assert layout.geometry is None
+        images = page_images(data=data, decode="pixels")[0]
+        assert images.geometry is None
+        chars = page_text_chars(data=data)[0]
+        assert chars.geometry is None
+        assert chars.chars == []
+        # the image: enumerated with bytes, box None
+        (entry,) = images.images
+        assert entry.bbox is None, entry.bbox
+        assert entry.data.kind == "raw"
+        assert len(entry.data.pixels) == 3
+        # page_layout's own walk answers empty here (the engine's
+        # empty-on-error law on the degenerate page — "every other
+        # surface serves nothing", the measured probe3 note)
+        assert layout.images == []
+
     def test_the_caps_bind_on_actual_bytes_not_the_estimate(self) -> None:
         """The Flate→DCT under-estimate (measured: 3,898 stored bytes →
         4,000,000 container bytes — the engine applies the filters
@@ -5892,6 +5946,44 @@ class TestDocumentStructure:
             assert message.startswith("document_structure cannot serve xls"), message
             assert "legacy xls workbook" in message, message
             assert "encrypted xlsx package" in message, message
+
+    def test_the_name_decided_refusal_never_touches_the_filesystem(self, tmp_path: Path) -> None:
+        """The name-decided refusal opens NOTHING (the finding: the
+        probe's path branch always File::open + 64 KiB read before
+        format= could short-circuit — a chmod-000 file with format=pdf
+        raised PermissionError INSTEAD of the "cannot serve pdf"
+        refusal, a directory IsADirectoryError, a missing path
+        FileNotFoundError: the filesystem error burying the refusal the
+        call was going to raise anyway). Green: with an explicit
+        format= naming a non-Excel kind, the refusal decides from the
+        name alone on all three unreadable-path shapes; without
+        format=, the OSError keeps its place (the read is then the
+        call's next step, and the error is the true one)."""
+        # the unreadable trio
+        unreadable = tmp_path / "unreadable.pdf"
+        unreadable.write_bytes(b"%PDF-1.4\n")
+        unreadable.chmod(0o000)
+        directory = tmp_path / "a-directory"  # no suffix: not a pdf name
+        directory.mkdir()
+        missing = tmp_path / "no-such-file.pdf"
+        try:
+            for path, format_name in (
+                (unreadable, "pdf"),
+                (directory, "pdf"),
+                (missing, "pdf"),
+            ):
+                with pytest.raises(ValueError) as raised:
+                    document_structure(str(path), format=format_name)
+                message = str(raised.value)
+                assert message.startswith("document_structure cannot serve pdf"), (
+                    f"{path}: the OSError buried the refusal: {message}"
+                )
+        finally:
+            unreadable.chmod(0o644)
+        # without format= the filesystem error keeps its place: the read
+        # is the call's next step, and OSError is its true answer
+        with pytest.raises(OSError):
+            document_structure(str(missing))
 
     def test_the_encrypted_cfb_without_a_format_is_unknown_format(self) -> None:
         """F9's qualifier: nothing resolves an encrypted CFB (anydoc's

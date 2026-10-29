@@ -2246,6 +2246,21 @@ def generate_pdf_layout_flate_dct_chain(
     )
 
 
+def generate_pdf_layout_zero_mediabox() -> bytes:
+    """A page whose MediaBox is degenerate (`[0 0 0 0]`) with one drawn
+    image: the frame-gate fixture. Every surface answers geometry `None`;
+    the image's bytes still enumerate (R11: the enumeration is
+    frame-independent) while its bbox is `None` — a zero-extent frame
+    maps boxes into invented coordinates (measured pre-fix:
+    `((-50, 500, 100, 100))` out of page_images where every other
+    surface served nothing)."""
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        mediabox="[0 0 0 0]",
+        images=[LAYOUT_RED_1X1],
+    )
+
+
 def generate_pdf_layout_gradient(size: int = 64) -> bytes:
     """The scanned-page fixture for the pixels decode: a `size`×`size`
     DeviceGray FlateDecode image whose samples are the row-major gradient

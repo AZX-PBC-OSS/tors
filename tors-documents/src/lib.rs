@@ -889,9 +889,18 @@ fn probe_capability_refusal(
 ) -> Option<DocumentError> {
     let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
         Source::Data(bytes) => {
-            documents_impl::probe_geometry_capability(bytes, None, format, backend)
+            documents_impl::probe_geometry_capability(probe_sniff_bytes(bytes, format), None, format, backend)
         }
         Source::Path(path) => {
+            // The name-decided answer touches nothing (the
+            // probe_sniff_bytes law, the path branch): an explicit
+            // format= that resolves to a non-Excel kind decides from the
+            // name alone — open(2) and the 64 KiB read have no business
+            // running, and their failures (a chmod-000 file, a
+            // directory, a missing path) must not bury the refusal.
+            if name_decides_probe(format) {
+                return documents_impl::probe_geometry_capability(&[], None, format, backend).err();
+            }
             let gated = std::fs::metadata(path)
                 .map_err(|_| ())
                 .and_then(|meta| refuse_non_regular(path, meta.file_type()).map_err(|_| ()));
@@ -905,6 +914,41 @@ fn probe_capability_refusal(
         }
     };
     probed.err()
+}
+
+/// The probe's own byte budget for a `data=` call: an explicit `format=`
+/// that resolves to a non-Excel kind consults NO bytes (the core's
+/// `resolve` short-circuits on the name; the probe's tables consult
+/// bytes for the Excel kind's OLE-container case only) — the full
+/// buffer is skipped entirely. Every other case hands the probe the
+/// bounded 64 KiB prefix the path lane reads — NEVER the full buffer:
+/// pre-fix the probe sniffed all of `data=` under the GIL
+/// (`looks_like_html` is a lossy-UTF-8 walk of the whole slice), and a
+/// 128 MiB blob held the GIL 356.5 ms max (measured), against the
+/// crate's own GIL contract — the whole native pass runs under
+/// `py.detach`.
+///
+/// The Excel carve-out keeps the prefix so the OLE-container decision
+/// (a legacy xls workbook or an encrypted xlsx package — the union
+/// refusal) can fire pre-read exactly as before. A name that resolves
+/// to NOTHING (an unknown `format=`) falls through to the prefix path
+/// and defers, exactly as an unresolvable prefix does — the core's
+/// authoritative resolve post-read raises the unknown-name error.
+fn probe_sniff_bytes<'a>(bytes: &'a [u8], format: Option<&str>) -> &'a [u8] {
+    if name_decides_probe(format) {
+        return &[];
+    }
+    &bytes[..bytes.len().min(SNIFF_PREFIX)]
+}
+
+/// Whether an explicit `format=` alone decides this probe: the name
+/// resolves to a kind, and that kind is not Excel (the one kind whose
+/// probe consults bytes — the OLE-container decision).
+fn name_decides_probe(format: Option<&str>) -> bool {
+    matches!(
+        format.map(documents_impl::Kind::from_name),
+        Some(Some(kind)) if kind != documents_impl::Kind::Excel
+    )
 }
 
 /// `tors.documents.page_geometry(path, data=None, format=None,
@@ -2813,9 +2857,10 @@ pub struct PageImageEntry {
 impl PageImageEntry {
     /// The image's axis-aligned box, `(x, y, w, h)`: points, bottom-left
     /// origin of the page's render space — the same mapped box
-    /// `page_layout`'s `ImageBox` carries. `None` when the page's box
-    /// cannot be read ([R11]: no frame to map into — the bytes are still
-    /// served).
+    /// `page_layout`'s `ImageBox` carries. `None` when the page has no
+    /// USABLE frame to map into — the box cannot be read, or it declares
+    /// a degenerate (zero/non-finite) extent ([R11]: the bytes are still
+    /// served either way; only the BOX is frame-gated).
     #[getter]
     fn bbox(&self) -> Option<(f32, f32, f32, f32)> {
         self.inner.bbox
@@ -3593,9 +3638,25 @@ fn probe_structure_refusal(
 ) -> Option<DocumentError> {
     let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
         Source::Data(bytes) => {
-            documents_impl::probe_structure_capability(bytes, None, format, backend)
+            documents_impl::probe_structure_capability(probe_sniff_bytes(bytes, format), None, format, backend)
         }
         Source::Path(path) => {
+            // The name-decided refusal opens NOTHING (the claim at the
+            // docstring above — "resolved from format=… no body read" —
+            // is now true of the path lane too): an explicit format=
+            // that resolves to a non-Excel kind decides from the name
+            // alone, so a chmod-000 file with format=pdf answers the
+            // "cannot serve pdf" refusal (measured pre-fix:
+            // PermissionError INSTEAD of the refusal — the probe
+            // opened and read the file it was about to refuse), a
+            // directory answers it (pre-fix IsADirectoryError), a
+            // missing path answers it (pre-fix FileNotFoundError).
+            // Excel keeps the prefix read: the OLE-container union
+            // decision is bytes'.
+            if name_decides_probe(format) {
+                return documents_impl::probe_structure_capability(&[], None, format, backend)
+                    .err();
+            }
             let gated = std::fs::metadata(path)
                 .map_err(|_| ())
                 .and_then(|meta| refuse_non_regular(path, meta.file_type()).map_err(|_| ()));

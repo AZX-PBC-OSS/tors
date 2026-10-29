@@ -8756,7 +8756,9 @@ against rulings in another — a ruled table vanishes there, a 180-symmetric one
 comes back with every cell's text 180°-swapped), this surface reports no tables
 rather than wrong ones; `true` at rotation 0 → **the edge cap** (a page with
 more table primitives than the markdown lane's own 1500-edge bail-out;
-detection skipped). FALSE for no-tables pages, for content-stream failures
+detection skipped) or **the unreadable path walk** (fail-closed: a failed
+`extract_paths` refuses the page rather than deciding "no rulings" from an
+input it couldn't read). FALSE for no-tables pages, for content-stream failures
 (unknowable — `tables: []` stays indistinguishable from a no-tables page, like
 `page_layout`'s empty lists), and on office rows (there `tables: []` is the
 per-format capability statement and the entry's `format` field is the marker).
@@ -8957,8 +8959,10 @@ page = tors.documents.page_text_chars(data=generate_pdf_layout_baseline())[0]
 The `page_images` classes, exposed directly (the `PageGeometry` deviation note
 applies); `==` is structural. `PageImagesData`: `page_index`, `format` (the
 provenance marker), `geometry` (the `page_geometry` entry — the images are STILL
-enumerated when it is `None`, their `bbox` `None`), `images` (paint order).
-`PageImageEntry`: `bbox` (`None` when no frame), `width_px`/`height_px` (the
+enumerated when it is `None`, their `bbox` `None`; a DEGENERATE
+zero/non-finite-extent box is the same None-frame answer — the bytes are
+frame-independent, only the box is gated), `images` (paint order).
+`PageImageEntry`: `bbox` (`None` when no usable frame), `width_px`/`height_px` (the
 DICTIONARY's), `rotation_degrees`, `paint_order`, `color_space` (spelled:
 `"DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "Indexed" | "CalGray" | "CalRGB" |
 "Lab" | "ICCBased(n)" | "Separation" | "DeviceN" | "Pattern"`),
