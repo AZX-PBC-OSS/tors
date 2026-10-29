@@ -479,8 +479,9 @@ values, sheet bounds) as their own engines see it.
 The refusal families, in order: every refused format refuses on EVERY
 backend with a format-level `ValueError` ("document_structure cannot serve
 …") fired before the backend check, resolved from `format=`/the 64 KiB
-prefix alone — a `path=` + `format="pdf"` call on a 40 MiB file answers the
-refusal, never a ceiling error, because no byte is read. The served office
+prefix alone — a `path=` + `format="pdf"` call on a 40 MiB file answers
+the refusal, never a ceiling error: no body read (the 64 KiB format probe
+runs only when the name alone cannot decide). The served office
 rows refuse `backend="anydoc"` as a capability (its office lane is
 whole-document markdown; the raw layers are office_oxide's). html's forced
 backends are conversion's own `UnsupportedBackend` pair, byte-identical. An

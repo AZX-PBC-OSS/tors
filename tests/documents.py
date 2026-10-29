@@ -1395,6 +1395,63 @@ def generate_xlsx_structure() -> bytes:
     )
 
 
+# What marks a macro sheet (office_oxide's SheetKind::Macro): the
+# `<sheet>` entry's relationship type — Microsoft's xlMacrosheet pair
+# ([MS-XLSX] §2.2.2.1), not the worksheet rel.
+_MACROSHEET_REL_TYPE = (
+    "http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet"
+)
+
+
+def generate_xlsx_macro() -> bytes:
+    """A workbook with a real macro sheet: the second `<sheet>` entry's
+    relationship type is the Microsoft xlMacrosheet one and its part is
+    a root-`xne:macrosheet` CT_Worksheet at xl/macrosheets/ — the raw
+    layer's own macro-sheet shape, real cells included (an inline label
+    and a formula with a cached value). SheetKind::Macro is served among
+    the sheets with the worksheet cell model."""
+    main = _MAIN_NS
+    r = _DOC_NS
+    xne = "http://schemas.microsoft.com/office/excel/2006/main"
+    data_sheet = _XML_DECL + (
+        f'<worksheet xmlns="{main}"><sheetData>'
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>kept cell</t></is></c></row>'
+        "</sheetData></worksheet>"
+    )
+    macro_sheet = _XML_DECL + (
+        f'<xne:macrosheet xmlns="{main}" xmlns:xne="{xne}"><sheetData>'
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>Auto_Open</t></is></c></row>'
+        '<row r="2"><c r="A2" t="b"><f>ISNUMBER(1)</f><v>1</v></c></row>'
+        "</sheetData></xne:macrosheet>"
+    )
+    workbook = _XML_DECL + f"""<workbook xmlns="{main}" xmlns:r="{r}"><sheets>
+<sheet name="Data" sheetId="1" r:id="rId1"/>
+<sheet name="Macro1" sheetId="2" state="veryHidden" r:id="rId2"/>
+</sheets></workbook>"""
+    workbook_rels = _XML_DECL + f"""<Relationships xmlns="{_REL_NS}">
+<Relationship Id="rId1" Type="{r}/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="{_MACROSHEET_REL_TYPE}" Target="macrosheets/sheet1.xml"/>
+</Relationships>"""
+    content_types = (
+        _XML_DECL
+        + f"""<Types xmlns="{_CT_NS}">"""
+        + _CT_RELS
+        + _CT_XML
+        + _CT_XLSX_MAIN
+        + "</Types>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", content_types.encode("utf-8")),
+            ("_rels/.rels", _root_rels("xl/workbook.xml").encode("utf-8")),
+            ("xl/workbook.xml", workbook.encode("utf-8")),
+            ("xl/_rels/workbook.xml.rels", workbook_rels.encode("utf-8")),
+            ("xl/worksheets/sheet1.xml", data_sheet.encode("utf-8")),
+            ("xl/macrosheets/sheet1.xml", macro_sheet.encode("utf-8")),
+        ]
+    )
+
+
 HTML_STRUCTURE_DOCUMENT = (
     "<!DOCTYPE html>\n"
     "<html><head><title>Structure Page</title><style>body { color: junk; }</style>"
@@ -1504,6 +1561,39 @@ def generate_xlsx_cells(count: int) -> bytes:
             ("xl/worksheets/sheet1.xml", sheet.encode("utf-8")),
         ]
     )
+
+
+def generate_docx_blocks(count: int) -> bytes:
+    """A document with `count` empty `w:p` blocks: the entry cap's docx
+    boundary fixture (one block per w:p)."""
+    document = (
+        _XML_DECL
+        + f'<w:document xmlns:w="{_W_NS}"><w:body>'
+        # the open/close pair, not `<w:p/>`: a self-closing tag is an
+        # Empty event, which the raw layer's body loop skips
+        + "<w:p></w:p>" * count
+        + "</w:body></w:document>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", DOCX_CONTENT_TYPES.encode("utf-8")),
+            ("_rels/.rels", DOCX_RELS.encode("utf-8")),
+            ("word/document.xml", document.encode("utf-8")),
+        ]
+    )
+
+
+def generate_html_nodes(count: int) -> bytes:
+    """A document with `count` `<p>` nodes: the entry cap's html
+    boundary fixture (one node per paragraph, no headings so no
+    Groups)."""
+    document = (
+        "<!DOCTYPE html>\n"
+        "<html><head><title>Big</title></head><body>"
+        + "<p>x</p>" * count
+        + "</body></html>\n"
+    )
+    return document.encode("utf-8")
 
 
 # --- pdf structural variants (hand-built object graphs, the same

@@ -63,11 +63,15 @@ from documents import (
     SLIDE1_BODY,
     SLIDE1_TITLE,
     SLIDE2_TITLE,
+    STRUCTURE_H1,
+    STRUCTURE_H2,
     STRUCTURE_LINK_URL,
+    generate_docx_blocks,
     generate_docx_margins_only,
     generate_docx_pgsz,
     generate_docx_structure,
     generate_html_fragment,
+    generate_html_nodes,
     generate_html_structure,
     generate_pdf_big,
     generate_pdf_crop,
@@ -112,6 +116,7 @@ from documents import (
     generate_xlsx_cells,
     generate_xlsx_chart,
     generate_xlsx_damaged,
+    generate_xlsx_macro,
     generate_xlsx_structure,
 )
 
@@ -4973,19 +4978,32 @@ class TestDocumentStructure:
     def test_xlsx_macro_sheet_is_served_and_the_chart_fixture_pins_the_kind_filter(
         self,
     ) -> None:
-        """The kind filter's two faces: a macro sheet (SheetKind::Macro)
+        """The kind filter's two faces: a real macro sheet (generate_xlsx_macro:
+        a sheets.xml entry whose relationship type is the Microsoft
+        xlMacrosheet one, its part a root-xne:macrosheet CT_Worksheet)
         is served with its cells (the worksheet cell model), and the
         chart fixture's workbook (generate_xlsx_chart) answers its chart
         text in the raw layer's own slot — with the chartsheet
         classification still exact when a chartsheet REL is present (the
         main fixture's ChartTab)."""
-        xlsx = document_structure(data=generate_xlsx_structure()).payload
-        assert [sheet.name for sheet in xlsx.sheets] == [
-            "Visible",
-            "Hidden",
-            "VeryHidden",
-        ]
-        assert xlsx.chartsheets == ["ChartTab"]
+        xlsx = document_structure(data=generate_xlsx_macro()).payload
+        assert [sheet.name for sheet in xlsx.sheets] == ["Data", "Macro1"]
+        assert xlsx.chartsheets == []
+        macro = xlsx.sheets[1]
+        assert macro.state == "veryHidden"
+        by_ref = {cell.ref: cell for cell in macro.cells}
+        assert (by_ref["A1"].type, by_ref["A1"].value) == ("string", "Auto_Open")
+        assert (by_ref["A2"].type, by_ref["A2"].value) == ("boolean", True)
+        assert by_ref["A2"].formula == "ISNUMBER(1)"
+        charted = document_structure(data=generate_xlsx_chart()).payload
+        assert charted.chartsheets == []
+        assert [sheet.name for sheet in charted.sheets] == ["Samples"]
+        # the chartsheet-REL face: the main fixture's ChartTab is named,
+        # never mislabeled a sheet
+        assert (
+            document_structure(data=generate_xlsx_structure()).payload.chartsheets
+            == ["ChartTab"]
+        )
 
     def test_xlsx_chart_fixture_serves_the_worksheet(self) -> None:
         """generate_xlsx_chart (the corpus's worksheet-vs-IR fixture): the
@@ -5002,7 +5020,8 @@ class TestDocumentStructure:
         """The cap boundary, measured through the real reader:
         199_999 cells fit, exactly 200_000 fit, 200_001 truncates to
         200_000 with the marker and the metadata complete — a marshalling
-        bound, never a refusal (F6/R10)."""
+        bound, never a refusal (F6/R10). The docx blocks' cell pins the
+        same cap on that payload (one w:p is one block)."""
         for count, expected, truncated in (
             (199_999, 199_999, False),
             (200_000, 200_000, False),
@@ -5017,6 +5036,15 @@ class TestDocumentStructure:
             # range, the sheet name, the bounds
             assert xlsx.sheets[0].used_range == f"A1:A{count}", count
             assert xlsx.sheets[0].name == "Big"
+        # the docx blocks' cell: 200_001 w:p blocks truncate to the kept
+        # prefix, indexes still dense, the partition complete (no sectPr:
+        # one section over the WHOLE body)
+        report = document_structure(data=generate_docx_blocks(200_001))
+        docx = report.payload
+        assert len(docx.blocks) == 200_000
+        assert docx.entries_truncated is True
+        assert docx.blocks[-1].index == 199_999
+        assert docx.sections == 1
 
     # --- the html payload -------------------------------------------------
 
@@ -5043,6 +5071,14 @@ class TestDocumentStructure:
         # the headings carry their id attributes
         headings = [node for node in nodes if node.kind == "heading"]
         assert [node.attributes.get("id") for node in headings] == ["top", "sub"]
+        # the groups the headings create: the creating heading's level
+        # rides in `level` and its text is the label (a group carries no
+        # text of its own)
+        groups = [node for node in nodes if node.kind == "group"]
+        by_label = {node.label: node for node in groups}
+        assert by_label[STRUCTURE_H1].level == 1
+        assert by_label[STRUCTURE_H2].level == 2
+        assert all(node.text is None for node in groups)
         # the link annotation: byte range into the node's text
         paragraph = next(node for node in nodes if node.kind == "paragraph")
         (link,) = [a for a in paragraph.annotations if a.kind == "link"]
@@ -5110,30 +5146,42 @@ class TestDocumentStructure:
             document_structure(data=b"PK\x03\x04junkjunkjunk", format="html")
 
     def test_html_truncation_keeps_the_indices_sound(self) -> None:
-        """The cap on html nodes: the kept prefix stays index-sound
-        (parents precede children), children filtered to kept indices,
-        and the marker set. Built from a generated document with more
-        than 200_000 nodes is not practical here; the rule is pinned
-        through the payload's own cap helper on a synthetic report
-        instead — the boundary numbers themselves are pinned on the xlsx
-        cap (the same constant, one test each side)."""
-        report = document_structure(data=generate_html_structure())
+        """The cap on html nodes, measured on the real fixture:
+        200_001 `<p>` nodes truncate to the 200_000-node kept prefix
+        with the marker set, and the prefix stays index-sound — parents
+        precede children, children filtered to kept indices, no parent
+        past the array (parents are always earlier, so the prefix is
+        closed under `parent`). The boundary numbers themselves are
+        pinned on the xlsx cap (the same constant, one test each
+        side)."""
+        report = document_structure(data=generate_html_nodes(200_001))
         html = report.payload
-        assert html.entries_truncated is False
+        assert html.entries_truncated is True
+        assert len(html.nodes) == 200_000
         indices = {node_index for node_index, _ in enumerate(html.nodes)}
         for node in html.nodes:
+            assert node.parent is None or node.parent in indices
+            assert all(child in indices for child in node.children)
+        # the untruncated face: the structure fixture fits, all markers down
+        report = document_structure(data=generate_html_structure())
+        assert report.payload.entries_truncated is False
+        indices = {node_index for node_index, _ in enumerate(report.payload.nodes)}
+        for node in report.payload.nodes:
             assert node.parent is None or node.parent in indices
             assert all(child in indices for child in node.children)
 
     # --- the refusals ------------------------------------------------------
 
-    def test_every_refused_format_refuses_gil_side_before_any_read(self, tmp_path: Path) -> None:
+    def test_every_refused_format_refuses_gil_side_without_a_body_read(
+        self, tmp_path: Path
+    ) -> None:
         """The R7 observable: path= + format="pdf" on a >32 MiB pdf
         answers the capability refusal, NOT a ceiling refusal — the probe
-        resolves the refusal from the format name alone and no byte is
-        read (a 33 MiB read would refuse with the ceiling message
-        instead). Every other refused kind refuses GIL-side from the name
-        too; the messages carry the format and never claim
+        resolves the refusal from the format name alone and no body is
+        read (the 64 KiB format probe runs only when the name alone
+        cannot decide; a 33 MiB read would refuse with the ceiling
+        message instead). Every other refused kind refuses GIL-side from
+        the name too; the messages carry the format and never claim
         impossibility."""
         fat_pdf = tmp_path / "fat.pdf"
         with open(fat_pdf, "wb") as handle:

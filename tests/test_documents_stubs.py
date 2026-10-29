@@ -520,10 +520,11 @@ def test_document_structure_classes_carry_exactly_the_field_lists() -> None:
     """The structure payload's frozen-shape contract, stub side (the
     PageTables getter pin's pattern): each payload class declares EXACTLY
     its field list as read-only properties in BOTH package stubs, and the
-    live classes agree — the one-of payload narrowing
-    (``isinstance(report.payload, ...)``) included. The renamed getters
-    (``ref``/``type`` on XlsxCell) are the fields the Python surface
-    spells, not the Rust field names."""
+    live classes agree — one live representative per payload family (the
+    docx block, the xlsx sheet, the html node), the one-of payload
+    narrowing (``isinstance(report.payload, ...)``) included. The renamed
+    getters (``ref``/``type`` on XlsxCell) are the fields the Python
+    surface spells, not the Rust field names."""
     field_lists = {
         "DocumentStructure": ["format", "payload"],
         "DocxStructure": [
@@ -638,26 +639,36 @@ def test_document_structure_classes_carry_exactly_the_field_lists() -> None:
             assert properties == set(fields), f"{stub}: {name} property set drifted: {properties}"
             assert not setters, f"{stub}: {name} grew a setter: {setters}"
             assert not assignments, f"{stub}: {name} has a writable attribute: {assignments}"
-    # the live classes agree (the renamed getters are the Python names)
+    # the live classes agree (the renamed getters are the Python names):
+    # one live representative per payload family, resolved through a live
+    # report — the docx block, the xlsx sheet, the html node. The
+    # deeper-nested entries (DocxTable, DocxCell, XlsxCell, HtmlGrid, …)
+    # are the stub-side pin's weight: their field lists above are held in
+    # BOTH package stubs, and each family representative pins the live
+    # getter mechanics the nested classes share.
+    from documents import (
+        generate_docx_structure,
+        generate_html_structure,
+        generate_xlsx_structure,
+    )
+
+    docx = document_structure(data=generate_docx_structure()).payload
+    xlsx = document_structure(data=generate_xlsx_structure()).payload
+    html = document_structure(data=generate_html_structure()).payload
     live_classes = {
         "DocumentStructure": DocumentStructure,
         "DocxStructure": DocxStructure,
         "XlsxStructure": XlsxStructure,
         "HtmlStructure": HtmlStructure,
+        "DocxBlock": type(docx.blocks[0]),
+        "XlsxSheet": type(xlsx.sheets[0]),
+        "HtmlNode": type(html.nodes[0]),
     }
     for name, fields in field_lists.items():
         live_class = live_classes.get(name)
         if live_class is None:
-            # the nested entry classes: resolve through a live report
-            from documents import generate_docx_structure
-
-            report = document_structure(data=generate_docx_structure())
-            payload = report.payload
-            for entry in payload.blocks:
-                if type(entry).__name__ == name:
-                    live_class = type(entry)
-                    break
-            if live_class is None:
-                continue
+            # the deeper-nested entries: the stub-side pin above carries
+            # them (see the comment block)
+            continue
         live = {n for n in vars(live_class) if not n.startswith("_")}
         assert live == set(fields), f"{name}: the live getter set drifted: {live}"

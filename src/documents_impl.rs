@@ -3077,8 +3077,10 @@ pub struct HtmlNode {
     /// Image: the alt text.
     pub alt: Option<String>,
     /// Table: the grid (rows/cols + sparse origin cells with
-    /// row/col/row_span/col_span/is_header). Nested tables appear as the
-    /// cell's flattened text (the collector flattens), not sub-grids.
+    /// row/col/row_span/col_span/is_header). Nested tables: the inner
+    /// grid is ALSO collected (its own Table node, the inner table
+    /// closing first) while the outer cell carries the flattened text —
+    /// the observed collector behavior, disclosed.
     pub grid: Option<HtmlGrid>,
     /// Inline annotations, byte offsets into `text` — links carry
     /// url+title. The link-context rule: a link's enclosing section is
@@ -3149,10 +3151,10 @@ pub struct HtmlAnnotation {
 ///
 /// 1. `resolve` — the explicit `format=` is trusted and NEVER re-sniffed
 ///    (the conversion lane's own precedence): `format="html"` on docx
-///    bytes is an honest HtmlStructure of html5ever-recovered garbage,
-///    `format="docx"` on pdf bytes the office leg's typed parse error;
-///    the fix-it is `sniff()`. The one container-dependent name is the
-///    Excel OLE case (`resolved_name`).
+///    bytes is the html lane's own binary-input refusal, `format="docx"`
+///    on pdf bytes the office leg's typed parse error; the fix-it is
+///    `sniff()`. The one container-dependent name is the Excel OLE case
+///    (`resolved_name`).
 /// 2. `structure_engine` — the format-level refusals (every refused kind
 ///    on every backend: pdf, the legacy trio, pptx, the anydoc-only
 ///    families, the Excel-OLE union), then html's forced-backend
@@ -3420,14 +3422,14 @@ fn html_node(node: &html_to_markdown_rs::DocumentNode) -> Result<HtmlNode, Docum
         }
         html_to_markdown_rs::NodeContent::Group {
             label,
+            heading_level,
             ..
-            // heading_level rides in `level`, heading_text duplicates
-            // `label` (the collector sets both to the creating heading's
-            // text): one field carried.
+            // heading_text duplicates `label` (the collector sets both
+            // to the creating heading's text): one field carried.
         } => (
             "group",
             None,
-            None,
+            *heading_level,
             None,
             None,
             label.clone(),
@@ -3443,7 +3445,7 @@ fn html_node(node: &html_to_markdown_rs::DocumentNode) -> Result<HtmlNode, Docum
         | html_to_markdown_rs::NodeContent::RawBlock { .. }
         | html_to_markdown_rs::NodeContent::MetadataBlock { .. }) => {
             return Err(Convert(format!(
-                "html-to-markdown-rs: the structure collector reported the node kind                  {other:?}, which this surface does not model"
+                "html-to-markdown-rs: the structure collector reported the node kind {other:?}, which this surface does not model"
             )));
         }
     };

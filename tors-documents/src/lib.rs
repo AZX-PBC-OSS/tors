@@ -38,6 +38,12 @@
 //!   boxes in the same render space (`pages=` subsets; office rows serve
 //!   geometry only — tables are PDF-only in v1), with the frame-coherence
 //!   gate's refused marker (`tables_refused`) on every entry
+//! - [`document_structure`]: the multi-format structure probe — one
+//!   report whose resolved `format` discriminates and whose payload is
+//!   exactly one of the three per-format structures (the docx
+//!   heading/list/table/link surface, the xlsx sheets/cells/types
+//!   surface, the html node surface; the refused rows answer the
+//!   format-level table's own ValueError)
 //!
 //! GIL model (the crate-wide discipline, applied per function): the
 //! argument borrow of the path string plus argument validation happen
@@ -2323,16 +2329,16 @@ impl PageTables {
 /// — the conversion lane's ~23× measured amplification is a LOWER bound
 /// for the structure lane, which also holds the node array). Zero is
 /// refused core-side, sequenced after the capability refusal. The entry
-/// cap is separate and honest: [`MAX_STRUCTURE_ENTRIES`]
-/// (`tors.documents.MAX_STRUCTURE_ENTRIES`) bounds the PAYLOAD's entry
-/// lists at 200,000 in document order, with `entries_truncated` on the
-/// affected payload and all sheet/range/merge/name metadata complete — a
-/// marshalling bound, never a refusal.
+/// cap is separate and honest: [`MAX_STRUCTURE_ENTRIES`] — 200,000 —
+/// bounds the PAYLOAD's entry lists in document order, with
+/// `entries_truncated` on the affected payload and all sheet/range/merge/name
+/// metadata complete — a marshalling bound, never a refusal.
 ///
 /// Errors: `OSError` for a missing/unreadable file; `ValueError` for
 /// bytes that resolve to no format (`sniff()` is the fix-it), an unknown
 /// `format=` name, a bad backend name, every refused format row (GIL-side,
-/// resolved from `format=`/the 64 KiB prefix alone, before any read — a
+/// resolved from `format=`/the 64 KiB prefix alone, no body read — the 64
+/// KiB format probe runs only when the name alone cannot decide; a
 /// positive content-resolve to a refused kind stops at the prefix and
 /// refuses), the Excel-OLE union, `backend="anydoc"` on a served office
 /// row, an over-budget input, `max_bytes=0`, a malformed/encrypted
