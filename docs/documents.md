@@ -96,6 +96,11 @@ page_layout(path=None, data=None, format=None, password=None, backend="auto",
             pages=None, max_bytes=None) -> list[PageLayout]
 page_tables(path=None, data=None, format=None, password=None, backend="auto",
             pages=None, max_bytes=None) -> list[PageTables]
+page_images(path=None, data=None, format=None, password=None, backend="auto",
+            pages=None, max_bytes=None, decode=None,
+            max_image_bytes=None) -> list[PageImagesData]
+page_text_chars(path=None, data=None, format=None, password=None,
+                backend="auto", pages=None, max_bytes=None) -> list[PageCharsData]
 document_structure(path=None, data=None, format=None, backend="auto",
                    max_bytes=None) -> DocumentStructure
 ```
@@ -290,8 +295,12 @@ the resolved format's geometry lane, the unit's declared render box — and,
 PDF pages only for `page_layout`, the page's text spans, text lines (words
 nested), and image boxes, all in the page's declared render space, from one
 open. (`page_tables` is the third probe on the same lane: per-cell table
-boxes, PDF pages only — see [below](#per-cell-table-boxes).) The same
-source spine, refusal order, and `format=`/`password=`/
+boxes, PDF pages only — see [below](#per-cell-table-boxes); and the two
+content probes [`page_images`](#page-image-bytes) and
+[`page_text_chars`](#char-level-boxes) ride the same lane: the bytes behind
+the image handles, and per-character boxes from the cached span parse.) The
+same
+source spine, refusal order, and `format=`/`password=/
 `max_bytes=` contracts as the probes above; `auto` and `oxide` are identical
 on these surfaces for every format (the geometry lane is a property of the
 format, not a choice), and `pages=` is PDF-only — a page index cannot name a
@@ -455,6 +464,120 @@ Three honesty laws ride on the boxes, and one flag:
   identity join. Use `page_tables` for the grid and cell text, `page_layout`
   for everything else, and accept the overlap; do not subtract cell bboxes.
 
+## Page image bytes
+
+`page_images` is the content seam behind `page_layout`'s image handles
+([#205]): per PDF page, the page's image handles — the **unfiltered** walk
+(no 8×8 gate, no max-pixels filter, paint order; never `extract_images`,
+which silently drops sub-8×8 images and swallows per-image decode errors) —
+with each image's evidence in the page's declared render space (the same
+mapped boxes `page_layout`'s `images` carry), and — only under `decode` —
+the bytes behind the handles. `pages=`/`backend=`/`password=`/`max_bytes=`
+and the refusal order are `page_layout`'s exactly; office rows carry
+`images: []` with `format` provenance (a DOCX's images are real and are not
+served — the per-format capability statement, not a content judgment).
+
+The decode knob (two modes, R3): `decode=None` (the default) decodes nothing
+— metadata only, every `data.kind == "not_requested"`, the cheap law.
+`decode="container"` serves the CONTAINER bytes: a DCT filter anywhere →
+the JPEG passthrough with **decryption included** (the raw stream bytes are
+ciphertext on an unlocked encrypted PDF and are never served); a bare
+`/JPXDecode` stream → its container sniffed from the stream's own bytes
+(`"jp2"` for the 12-byte signature box, `"j2k_codestream"` for the SOC
+marker), served only when the image is inline or the document is unencrypted,
+else the typed `unsupported` error naming both causes; anything else stays
+`not_requested`. `decode="pixels"` decodes to the engine's own classification
+(raw samples, or the typed errors — the shipped wheel's JBIG2/JPX pixel
+decode is the engine's `Unsupported` verbatim, feature-gated).
+
+`data` is the **always-present four-way sum**
+(`"not_requested" | "container" | "raw" | "error"`); every arm getter is
+`None` unless `kind` names it — "no bytes" is never two different things.
+A decode failure is a **visible typed entry**, siblings intact. Caps: 256
+MiB per image (the chain-aware pre-decode estimate), 512 MiB per call
+cumulative, the over-cap image a typed `size_cap` entry
+(`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated (a
+truncated image is a wrong image with no marker); `max_image_bytes=`
+overrides the per-image ceiling (raising it past the engine's env-read
+`PDF_OXIDE_MAX_DECOMPRESS_MB` cannot make the ENGINE decode more). The
+payload describes itself (`components`/`bpc` are the buffer's stride;
+`pixel_format` is a display tag that can lie; `samples_are_raw` TRUE is the
+common case — "nothing transformed this buffer", never "undecoded"; `ccitt`
+carries all seven CCITT params, without which the packed stream cannot be
+decoded at all; ICC profiles are named, not carried).
+
+Three residual gaps the engine leaves, stated so a consumer never mistakes
+a shape for completeness: an image XObject with a missing or non-positive
+`/Width`·`/Height` yields NO handle at all (this surface cannot see it); a
+Form-XObject subtree's error is dropped by the engine's own `if let Ok`; a
+missing/unparseable `/ColorSpace` reports `DeviceRGB` with
+`color_space_declared: false`. A caller who needs certainty about the paint
+count must compare `len(images)` with the render's. Identity:
+`(page_index, paint_order)` pairs with `page_layout`'s `images` — the two
+surfaces are separate opens over the bytes (nothing cached across them), so
+a changed file between the calls breaks the pairing; and bytes decode EVERY
+selected image of every selected page (no per-image selection in v1).
+
+Two recipes the seam exists for:
+
+- **Content hash** (dedup/evidence): `page_images(data=pdf, decode="container")`,
+  then hash each container entry's `data.bytes` with `hashlib.sha256` — the
+  bytes are the file's own JPEG (no re-encode), decryption included, so the
+  same scan always hashes equal across copies that re-encode nothing.
+- **VLM labeling**: `page_images(data=pdf, decode="pixels")` — each raw
+  entry names its own stride (`components`/`bpc`/`pixel_format`) and its
+  space (`color_space`/`indexed_base`/`samples_are_raw`); a CMYK JPEG stays
+  a CMYK JPEG container (the `color_space` names it — convert downstream or
+  at decode time is the caller's plan, never the seam's).
+
+## Char-level boxes
+
+`page_text_chars` is the char-level seam behind `page_layout`'s spans
+([#206]): per PDF page, the page's per-character boxes from the **cached
+span parse** (`extract_spans` → `TextSpan::to_chars()` per span — never
+`extract_chars`, which is raw-only and includes content the span path drops
+at the crop), a flat list in reading order. The three laws that make it
+trustworthy:
+
+- **The join law:** `"".join(c.char for c in chars if c.span_index == s)`
+  == `page_layout(p).spans[s].text` **exactly** (both sides iterate the
+  same deterministic parse) — `span_index` + `index_in_span` is a complete
+  addressing scheme: the chars with `span_index == s` and
+  `index_in_span ∈ [i, j)` ground the substring `spans[s].text[i:j]`
+  (code points — Python string slicing aligns). The WHOLE-span box is the
+  span's own mapped box, never the char union.
+- **The anchor law:** the char box is the **advance box from the
+  baseline** — `y` is the baseline (the em-box law, the span surface's
+  own), `h` is the font size, `w` the char's advance; descenders hang
+  BELOW the box's bottom edge.
+- **The honesty flags** (span-constant, pinned): `wmode` — a WMode-1
+  (vertical-writing) run's char boxes are the engine's flattened fiction,
+  displaced one advance LEFT of their origins and stacked along x
+  (measured: the span box `(300, 700, -48, 24)` for a column of true ink
+  at `(300, 652, 24, 72)`); never pretend `wmode == 1` chars are
+  highlight-able. `x_measured` — `True` = the engine's measured origins
+  (drift ≈ the 0.5 pt tolerance + sub-point interpolation); `False` = the
+  prefix-sum/uniform arm — the TJ-kerning drift class, bounded only by
+  measurement (the engine folds Tc/Tw/Tz/TJ into the widths, so measured
+  drift on every probe fixture is 0.000; the analytic bound is
+  `|Σ TJ adjustments before i| × font_size/1000` pt). A highlight box
+  built from `x_measured: false` chars is APPROXIMATE — tighten only via
+  the span box (whose own box is engine-built and kerning-correct).
+
+On a page whose rotation the engine applied to a span, the chars are
+derived from the span's unmapped box and mapped forward — the mapped
+frame's glyph order runs right-to-left while `to_chars` prefix-sums
+left-to-right, so the unmapped derivation is the only one that lands the
+boxes where the render draws the ink (pre-fix, measured: ~35 pt displaced,
+the 'e' box sitting on the 'W').
+
+The substring-highlight recipe: `spans = page_layout(data=pdf)[p].spans`,
+`chars = page_text_chars(data=pdf)[p].chars`; find `i = spans[s].text.find(needle)`,
+then the highlight box is the union of the char boxes with
+`span_index == s` and `index_in_span ∈ [i, i + len(needle))` — exact on the
+measured arm, approximate (per the bound above) on `x_measured: false`
+chars; the whole-span box is the span's own, never the union.
+
 ## Document structure
 
 `document_structure` is the third capability table's surface: one report
@@ -565,10 +688,10 @@ Per-format disclosures a consumer should read before relying on the fields:
 
 ## Async and the GIL
 
-`tors.documents.aio` gives the twelve input-scaling functions (`to_markdown`,
+`tors.documents.aio` gives the fourteen input-scaling functions (`to_markdown`,
 `to_text`, `pdf_extract`, `pdf_page_count`, `pdf_page_labels`, `pdf_security`,
 `pdf_classify`, `pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`,
-`document_structure`)
+`page_images`, `page_text_chars`, `document_structure`)
 their `asyncio.to_thread` twins: same signatures, same discipline as
 [`tors.aio`](async.md) (an unconditional thread hop, never a size-based
 branch). `sniff` stays sync-only: its cost is a container parse, but it

@@ -7859,7 +7859,9 @@ ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv), and HTML, converted to GitHub-Flavor
 Markdown or plain text, one GIL-released native pass per call, the same discipline as
 every function above. Beyond conversion, the [`document_structure`](#torsdocumentsdocument_structure)
 probe serves the office/html families' parse trees — the structure surface for
-docx/xlsx/html; PDF's structure answer is `page_geometry`/`page_layout`/`page_tables`.
+docx/xlsx/html; PDF's structure answer is `page_geometry`/`page_layout`/`page_tables`,
+and its per-page content surfaces are [`page_images`](#torsdocumentspage_images) and
+[`page_text_chars`](#torsdocumentspage_text_chars).
 
 This surface ships in a second wheel: `pip install tors[documents]`. The base `tors`
 wheel re-exports it as `tors.documents` (an `ImportError` with the install hint fires
@@ -7918,7 +7920,7 @@ heartbeat-granularity and 8-thread byte-identical concurrency gates).
 |---|---|
 | `OSError` | the file is missing or unreadable (IO): a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
 | `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the type only, never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes: `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float; a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=`; all argument-contract failures, raised under the GIL before any work runs |
-| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, and on `page_geometry`/`page_layout`/`page_tables` for pdf and the office families, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; on `page_layout`/`page_tables`, a `pages=` selection on a non-PDF (PDF-only: a page index cannot name a section); an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open — the one documented carve-out is `pdf_security`, which REPORTS the locked state instead of raising, per its own section below); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB ceiling, and the pdf lane reads under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, and on `page_geometry`/`page_layout`/`page_tables`/`page_images`/`page_text_chars` for pdf and the office families, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; on `page_layout`/`page_tables`/`page_images`/`page_text_chars`, a `pages=` selection on a non-PDF (PDF-only: a page index cannot name a section); an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open — the one documented carve-out is `pdf_security`, which REPORTS the locked state instead of raising, per its own section below); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB ceiling, and the pdf lane reads under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
 | `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages: route the document to an OCR stage |
 
 **Format resolution order**: a mislabeled or extensionless file (a temp-file download,
@@ -8785,6 +8787,175 @@ entry.tables_refused
 **Async**: `await tors.documents.aio.page_tables(...)` runs this under
 `asyncio.to_thread` so the event loop stays responsive across the call.
 
+## `tors.documents.page_images`
+
+```python
+def page_images(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+    decode: str | None = None,
+    max_image_bytes: int | None = None,
+) -> list[PageImagesData]: ...
+```
+
+The image-bytes probe ([#205](https://github.com/…/issues/205)): per PDF page, the
+page's image handles — the **unfiltered** walk (no 8×8 gate, no max-pixels filter,
+paint order; never `extract_images`, which silently drops sub-8×8 images and
+swallows per-image decode errors) — with each image's evidence in the page's
+declared render space (the same mapped boxes `page_layout`'s `images` carry), and —
+only under `decode` — the bytes behind the handles. One open per call.
+
+`decode=None` (the default) decodes nothing: metadata only, every entry's
+`data.kind == "not_requested"`. `decode="container"` serves the CONTAINER bytes: a
+DCT filter anywhere in the chain → the JPEG passthrough **with decryption included**
+(the raw stream bytes are ciphertext on an unlocked encrypted PDF and are never
+served); a bare `/JPXDecode` stream → its container sniffed from the stream's own
+bytes (`"jp2"` for the 12-byte signature box, `"j2k_codestream"` for the SOC marker)
+— served only when the image is inline or the document is unencrypted, else the
+typed `unsupported` error naming both the feature gate and the encrypted cause;
+anything else stays `not_requested` (the `filters` list says why).
+`decode="pixels"` decodes every image to the engine's own classification: raw
+samples, or the typed errors — on the shipped wheel a JBIG2/JPX pixel decode is the
+engine's `Unsupported` verbatim (feature-gated).
+
+`data` is the **always-present four-way sum** (`"not_requested" | "container" |
+"raw" | "error"`); every arm getter is `None` unless `kind` names it — "no bytes" is
+never two different things. A decode failure is a **visible typed entry**
+(`error_kind: "decode" | "unsupported" | "size_cap"`), siblings intact. Caps: 256
+MiB per image (the chain-aware pre-decode estimate: the container's own size for a
+DCT chain, the packed bits for CCITT, the unpacked one-byte-per-component arithmetic
+otherwise), 512 MiB per call cumulative, the over-cap image a typed `size_cap` entry
+(`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated;
+`max_image_bytes=` overrides the per-image ceiling (raising it past the engine's
+env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` cannot make the ENGINE decode more).
+
+The honesty flags, stated where the engine leaves them: an image XObject with a
+missing or non-positive `/Width`·`/Height` yields NO handle at all (this surface
+cannot see it); a missing/unparseable `/ColorSpace` reports `DeviceRGB` with
+`color_space_declared == False`; a Form-subtree error is dropped by the engine
+itself. A caller who needs certainty about the paint count must compare
+`len(images)` with the render's. Identity: `(page_index, paint_order)` pairs with
+`page_layout`'s `images` — the two surfaces are separate opens, so a changed file
+between the calls breaks the pairing. Office rows carry `images: []` with `format`
+provenance (a DOCX's images are real and are not served).
+
+```python
+import sys
+sys.path.insert(0, "tests")
+import tors.documents
+
+from documents import generate_pdf_layout_dct, generate_pdf_layout_gradient
+
+# the container passthrough: hash the JPEG the file itself carries
+entry = tors.documents.page_images(data=generate_pdf_layout_dct(), decode="container")[0]
+img = entry.images[0]
+(img.color_space, img.data.kind, img.data.container, len(img.data.bytes))
+# ("DeviceRGB", "container", "jpeg", 301)
+
+# the pixel decode: the gradient's own bytes
+entry = tors.documents.page_images(data=generate_pdf_layout_gradient(), decode="pixels")[0]
+img = entry.images[0]
+(img.data.kind, img.data.pixel_format, len(img.data.pixels), img.data.bpc)
+# ("raw", "grayscale", 4096, 8)
+```
+
+**Async**: `await tors.documents.aio.page_images(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
+## `tors.documents.page_text_chars`
+
+```python
+def page_text_chars(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+) -> list[PageCharsData]: ...
+```
+
+The char-boxes probe ([#206](https://github.com/…/issues/206)): per PDF page, the
+page's per-character boxes from the **cached span parse** (`extract_spans` →
+`TextSpan::to_chars()` per span — never `extract_chars`, which is raw-only and
+includes content the span path drops at the crop), a flat list in reading order.
+The join law: `"".join(c.char for c in chars if c.span_index == s)` ==
+`page_layout(p).spans[s].text` **exactly** (both sides iterate the same parse).
+
+The char box is the **advance box from the baseline**: `y` is the baseline (the
+em-box law — the box extends one font-size upward; descenders hang BELOW the box's
+bottom edge), `h` is the span's font size, `w` the char's advance. The honesty
+fields: `wmode` (a vertical run's char boxes are the engine's flattened fiction —
+displaced one advance LEFT of their origins, stacked along x; measured — never
+pretend `wmode == 1` chars are highlight-able) and `x_measured` (span-constant:
+`True` = the engine's measured origins — drift ≈ the 0.5 pt tolerance + sub-point
+interpolation; `False` = the prefix-sum/uniform arm — the TJ-kerning drift class,
+bounded only by measurement; a highlight box built from `x_measured == False` chars
+is APPROXIMATE). On a page whose rotation the engine applied to a span, the chars
+are derived from the span's unmapped box and mapped forward (the mapped frame's
+glyph order runs right-to-left; the derivation otherwise lands every box mirrored —
+~35 pt off, measured).
+
+Substring highlight: ground `spans[s].text[i:j]` by the chars with
+`span_index == s` and `index_in_span ∈ [i, j)` (code points — Python string
+slicing aligns); the union of their boxes is the highlight box, and the WHOLE-span
+box is the span's own mapped box, never the char union.
+
+```python
+import sys
+sys.path.insert(0, "tests")
+import tors.documents
+
+from documents import generate_pdf_layout_baseline
+
+page = tors.documents.page_text_chars(data=generate_pdf_layout_baseline())[0]
+"".join(c.char for c in page.chars[:5]), page.chars[0].bbox[:2]
+# ("Hello", (72.0, 700.0))  — y is the baseline; descenders hang below
+```
+
+**Async**: `await tors.documents.aio.page_text_chars(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
+## `tors.documents.PageImagesData` / `PageImageEntry` / `ImageBytes`
+
+The `page_images` classes, exposed directly (the `PageGeometry` deviation note
+applies); `==` is structural. `PageImagesData`: `page_index`, `format` (the
+provenance marker), `geometry` (the `page_geometry` entry — the images are STILL
+enumerated when it is `None`, their `bbox` `None`), `images` (paint order).
+`PageImageEntry`: `bbox` (`None` when no frame), `width_px`/`height_px` (the
+DICTIONARY's), `rotation_degrees`, `paint_order`, `color_space` (spelled:
+`"DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "Indexed" | "CalGray" | "CalRGB" |
+"Lab" | "ICCBased(n)" | "Separation" | "DeviceN" | "Pattern"`),
+`color_space_declared`, `indexed_base`, `bits_per_component` (the DICTIONARY's),
+`byte_size_compressed`, `filters` (spelled, outermost first, an unlisted filter
+keeping its raw name), `is_inline`, `data`.
+
+`ImageBytes` (`PageImageEntry.data`): `kind` (`"not_requested" | "container" |
+"raw" | "error"`), then the arm getters — `bytes`/`container` (`"jpeg" | "jp2" |
+"j2k_codestream"`), `pixels`/`width_px`/`height_px`/`components`/`bpc`/
+`pixel_format` (`"rgb" | "grayscale" | "cmyk"` — a display tag that can lie about
+the stride: `components`/`bpc` are the honest one)/`samples_are_raw` (TRUE is the
+common case: "nothing transformed this buffer", never "undecoded")/
+`decode_folded_in` (the narrower `/Decode` fact plate routing reads)/`icc`
+(name-only: the profile's bytes are not carried)/`ccitt` (the seven CCITT params
+`(k, columns, rows, black_is_1, end_of_line, encoded_byte_align, end_of_block)` —
+the packed stream is served verbatim, so without them the payload cannot be
+decoded at all), and `error_kind`/`message`/`scope`/`limit_bytes`/`needed_bytes`.
+
+## `tors.documents.PageCharsData` / `TextChar`
+
+The `page_text_chars` classes, exposed directly; `==` is structural.
+`PageCharsData`: `page_index`, `format`, `geometry`, `chars` (reading order).
+`TextChar`: `char` (one Unicode scalar — code-point indexing),
+`bbox` (`(x, y, w, h)`, y the baseline), `span_index`, `index_in_span`, `wmode`,
+`x_measured`.
+
 ## `tors.documents.PdfClassification`
 
 The `pdf_classify` result: the preflight's answer with the routing rules derived
@@ -9366,9 +9537,10 @@ never disagree.
 
 ## `tors.documents.aio`
 
-The awaitable spellings of the twelve path functions (`to_markdown`, `to_text`,
+The awaitable spellings of the fourteen path functions (`to_markdown`, `to_text`,
 `pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_page_labels`, `pdf_security`,
-`pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`, `document_structure`), each an
+`pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`, `page_images`,
+`page_text_chars`, `document_structure`), each an
 unconditional `asyncio.to_thread` dispatch, signatures identical to the sync
 spellings, `path`/`data=` flowing through unchanged (pinned by the suite). The same doctrine as `tors.aio`: every one of these calls is a single
 native pass whose cost scales with the document (a small one is milliseconds, a large

@@ -1201,3 +1201,57 @@ class TestDocumentStructureExamples:
         assert payload.chartsheets == ["ChartTab"]
         cell = payload.sheets[0].cells[0]
         assert (cell.ref, cell.type, cell.value) == ("A1", "string", "unit label")
+
+
+class TestPageContentExamples:
+    """docs/api.md's page_images / page_text_chars section examples (the
+    #205/#206 content surfaces' worked examples), re-derived against the
+    built extension."""
+
+    def test_page_images_container_and_pixel_examples(self) -> None:
+        import sys
+
+        import tors.documents
+
+        sys.path.insert(0, "tests")
+        from documents import (
+            generate_pdf_layout_dct,
+            generate_pdf_layout_gradient,
+        )
+
+        # the container passthrough: the JPEG the file itself carries
+        entry = tors.documents.page_images(
+            data=generate_pdf_layout_dct(), decode="container"
+        )[0]
+        img = entry.images[0]
+        assert (img.color_space, img.data.kind, img.data.container, len(img.data.bytes)) == (
+            "DeviceRGB",
+            "container",
+            "jpeg",
+            301,
+        )
+
+        # the pixel decode: the gradient's own bytes
+        entry = tors.documents.page_images(
+            data=generate_pdf_layout_gradient(), decode="pixels"
+        )[0]
+        img = entry.images[0]
+        assert (img.data.kind, img.data.pixel_format, len(img.data.pixels), img.data.bpc) == (
+            "raw",
+            "grayscale",
+            4096,
+            8,
+        )
+
+    def test_page_text_chars_join_example(self) -> None:
+        import sys
+
+        import tors.documents
+
+        sys.path.insert(0, "tests")
+        from documents import generate_pdf_layout_baseline
+
+        page = tors.documents.page_text_chars(data=generate_pdf_layout_baseline())[0]
+        assert "".join(c.char for c in page.chars[:5]) == "Hello"
+        # y is the baseline; descenders hang below the box's bottom edge
+        assert page.chars[0].bbox[:2] == (72.0, 700.0)
