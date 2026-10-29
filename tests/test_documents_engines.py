@@ -4517,6 +4517,26 @@ class TestLayoutClassContracts:
         assert perms_repr.startswith("PdfPermissions(")
         assert "print_low_res=" in perms_repr and "raw_p=" in perms_repr
 
+    def test_the_page_reprs_are_capped(self) -> None:
+        """Finding 14's pin: `PageLayout.__repr__`/`PageCharsData.__repr__`
+        print the CAPPED list preview (structure_list_repr's 3 entries +
+        the ellipsis count) — pre-fix they printed EVERY element (measured:
+        a 4,288-char page repr'd 511,468 chars; a repr is a shape preview,
+        not a serialization)."""
+        from documents import generate_pdf_big
+
+        page = page_layout(data=generate_pdf_big(300))[0]
+        assert len(page.spans) > 3
+        layout_repr = repr(page)
+        assert "more" in layout_repr, layout_repr[:200]
+        assert len(layout_repr) < 5_000, len(layout_repr)
+
+        chars = page_text_chars(data=generate_pdf_big(300))[0]
+        assert len(chars.chars) > 3
+        chars_repr = repr(chars)
+        assert "more" in chars_repr, chars_repr[:200]
+        assert len(chars_repr) < 5_000, len(chars_repr)
+
 
 # --- the page_images and page_text_chars surfaces (issues #205/#206) -----------
 

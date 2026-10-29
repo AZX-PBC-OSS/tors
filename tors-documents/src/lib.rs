@@ -184,7 +184,7 @@ pub fn pdf_classify(
 /// seam: `has_text` and the scanned match call the core's own rule, never
 /// a re-derived string match here: stringified only at the `page_kinds`
 /// getter.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PdfClassification {
     page_count: usize,
     page_kinds: Vec<tors::pdf_impl::PageKind>,
@@ -696,7 +696,7 @@ fn pdf_security_inner(security: tors::pdf_impl::PdfSecurity) -> PdfSecurity {
 /// deviation note applies: the fields are bools and an optional
 /// [`PdfPermissions`], exactly as returned, nothing to re-type; `==` is
 /// structural (the four fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PdfSecurity {
     inner: tors::pdf_impl::PdfSecurity,
 }
@@ -772,7 +772,7 @@ fn security_repr(security: &tors::pdf_impl::PdfSecurity) -> String {
 ///
 /// Exposed DIRECTLY (no Python wrapper view) — the `PageGeometry`
 /// deviation note applies; `==` is structural (the nine fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PdfPermissions {
     inner: tors::pdf_impl::PdfPermissions,
 }
@@ -1125,7 +1125,7 @@ pub fn page_geometry(
 /// elementwise), so `page_geometry(path) == page_geometry(path,
 /// backend="oxide")` is a plain list equality — the property the tests
 /// pin.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageGeometry {
     inner: documents_impl::PageGeometry,
 }
@@ -1468,7 +1468,7 @@ pub fn page_layout(
 /// from the `PdfClassification` wrapper precedent, `PageGeometry`'s
 /// stated rationale: the fields are exactly as returned, nothing to
 /// re-type; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct TextSpan {
     inner: tors::pdf_impl::LayoutSpan,
 }
@@ -1555,7 +1555,7 @@ impl TextSpan {
 /// One word inside a [`TextLine`] (`PageLayout.lines[].words`): the
 /// text and its box — the engine's own gap-clustered word box, never
 /// re-derived downstream.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Word {
     inner: tors::pdf_impl::LayoutWord,
 }
@@ -1596,7 +1596,7 @@ impl Word {
 /// re-implemented downstream). The join law: this line's text is its
 /// words' texts joined with single spaces, and every word's box is
 /// inside this line's box (both pinned in the tests).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct TextLine {
     inner: tors::pdf_impl::LayoutLine,
 }
@@ -1643,7 +1643,7 @@ impl TextLine {
 /// placement — from the engine's image HANDLES (no decode, no silent
 /// small-image filter, no swallowed errors; `extract_images` is
 /// disqualified for an evidence surface).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct ImageBox {
     inner: tors::pdf_impl::LayoutImage,
 }
@@ -1720,7 +1720,7 @@ impl ImageBox {
 /// Exposed DIRECTLY (no Python wrapper view) — the same deliberate
 /// deviation from the `PdfClassification` wrapper precedent `PageGeometry`
 /// states; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageLayout {
     inner: tors::pdf_impl::PageLayoutData,
 }
@@ -1803,30 +1803,12 @@ impl PageLayout {
     fn __repr__(&self) -> String {
         // each list formatted via its class's own Python shape — never the
         // Rust Debug of the inner structs (`LayoutSpan { … }` is not a
-        // shape a Python consumer recognizes)
-        let spans = self
-            .inner
-            .spans
-            .iter()
-            .map(text_span_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let lines = self
-            .inner
-            .lines
-            .iter()
-            .map(text_line_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let images = self
-            .inner
-            .images
-            .iter()
-            .map(image_box_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
+        // shape a Python consumer recognizes) — through the ONE capped
+        // list renderer (finding 14: an uncapped repr printed every
+        // element; a 4,288-char page's repr was 511,468 chars — the repr
+        // of a container is a shape preview, not a serialization).
         format!(
-            "PageLayout(page_index={}, format={:?}, geometry={}, spans=[{}], lines=[{}], images=[{}])",
+            "PageLayout(page_index={}, format={:?}, geometry={}, spans={}, lines={}, images={})",
             self.inner.page_index,
             self.inner.format,
             match &self.inner.geometry {
@@ -1834,9 +1816,9 @@ impl PageLayout {
                     page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
                 None => "None".to_string(),
             },
-            spans,
-            lines,
-            images
+            structure_list_repr(&self.inner.spans, text_span_repr),
+            structure_list_repr(&self.inner.lines, text_line_repr),
+            structure_list_repr(&self.inner.images, image_box_repr),
         )
     }
 }
@@ -2056,7 +2038,7 @@ fn tables_table_repr(table: &tors::pdf_impl::TableEntry) -> String {
 ///
 /// Exposed DIRECTLY (no Python wrapper view) — the `PageGeometry`
 /// deviation note applies to all four tables classes; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Cell {
     inner: tors::pdf_impl::Cell,
 }
@@ -2112,7 +2094,7 @@ impl Cell {
 
 /// One row in a [`Table`]: the row's cells and the engine's own header
 /// verdict.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Row {
     inner: tors::pdf_impl::Row,
 }
@@ -2151,7 +2133,7 @@ impl Row {
 }
 
 /// One detected table in a [`PageTables`] entry: the engine's grid.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Table {
     inner: tors::pdf_impl::TableEntry,
 }
@@ -2226,7 +2208,7 @@ impl Table {
 ///
 /// Exposed DIRECTLY (the `PageGeometry` deviation note applies); `==` is
 /// structural (the five fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageTables {
     inner: tors::pdf_impl::PageTablesData,
 }
@@ -2692,7 +2674,7 @@ pub fn page_text_chars(
 ///
 /// Exposed DIRECTLY (the `PageGeometry` deviation note applies); `==` is
 /// structural (the four fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageImagesData {
     inner: tors::pdf_impl::PageImagesData,
 }
@@ -2727,7 +2709,14 @@ impl PageImagesData {
     }
 
     /// The page's images, paint order — the same order `page_layout`'s
-    /// `images` lists (same enumeration, same transform).
+    /// `images` lists (same enumeration, same transform). Each access
+    /// materializes a fresh list of fresh entries (a clone per element —
+    /// the `geometry` getter's fresh-object law, the deliberate shape of
+    /// these pyclasses: thin getters over plain core structs, no shared
+    /// mutable state, `==` stays structural). The bytes the entries
+    /// carry are COPIED, not aliased: on `decode=` payloads that is
+    /// O(decode-output) transient per access, by construction — the
+    /// caller holding the entry list owns its bytes outright.
     #[getter]
     fn images(&self) -> Vec<PageImageEntry> {
         self.inner
@@ -2880,7 +2869,7 @@ fn image_bytes_repr(data: &tors::pdf_impl::ImageBytes) -> String {
 /// the bytes only under opt-in decode.
 ///
 /// Exposed DIRECTLY; `==` is structural (all thirteen fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageImageEntry {
     inner: tors::pdf_impl::PageImageEntry,
 }
@@ -2984,7 +2973,10 @@ impl PageImageEntry {
 
     /// The decode result — the ALWAYS-PRESENT four-arm sum (R6/F9):
     /// `kind` is `"not_requested" | "container" | "raw" | "error"` and
-    /// every other getter is None unless `kind` names it.
+    /// every other getter is None unless `kind` names it. A fresh native
+    /// object per access — a clone of the entry's own arm (the
+    /// `geometry` getter's fresh-object law): the byte getters below
+    /// copy, they do not alias.
     #[getter]
     fn data(&self) -> ImageBytes {
         ImageBytes {
@@ -3008,7 +3000,7 @@ impl PageImageEntry {
 /// `kind` names it (F9) — "no bytes" is never two different things.
 ///
 /// Exposed DIRECTLY; `==` is structural (the whole arm).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct ImageBytes {
     inner: tors::pdf_impl::ImageBytes,
 }
@@ -3034,6 +3026,11 @@ impl ImageBytes {
     }
 
     /// The container bytes — None unless `kind == "container"` (F9).
+    /// Each access COPIES the bytes into a fresh Python object (no
+    /// aliasing, no caching: the getters are pure functions of the arm,
+    /// and a caller mutating the returned `bytes` can never reach the
+    /// entry). The copy is O(container) transient per access, by
+    /// construction.
     #[getter]
     fn bytes(&self) -> Option<Vec<u8>> {
         use tors::pdf_impl::ImageBytes as IB;
@@ -3065,7 +3062,9 @@ impl ImageBytes {
         }
     }
 
-    /// The sample bytes — None unless `kind == "raw"` (F9).
+    /// The sample bytes — None unless `kind == "raw"` (F9). Each access
+    /// COPIES the pixels into a fresh Python object (no aliasing, no
+    /// caching: the `bytes` getter's copy law).
     #[getter]
     fn pixels(&self) -> Option<Vec<u8>> {
         use tors::pdf_impl::ImageBytes as IB;
@@ -3335,7 +3334,7 @@ impl ImageBytes {
 /// parse, reading order.
 ///
 /// Exposed DIRECTLY; `==` is structural (the four fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageCharsData {
     inner: tors::pdf_impl::PageCharsData,
 }
@@ -3384,15 +3383,10 @@ impl PageCharsData {
     }
 
     fn __repr__(&self) -> String {
-        let chars = self
-            .inner
-            .chars
-            .iter()
-            .map(text_char_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
+        // the capped list renderer (finding 14: an uncapped repr printed
+        // every char of the page — a 4,288-char page repr'd 511,468 chars)
         format!(
-            "PageCharsData(page_index={}, format={:?}, geometry={}, chars=[{}])",
+            "PageCharsData(page_index={}, format={:?}, geometry={}, chars={})",
             self.inner.page_index,
             self.inner.format,
             match &self.inner.geometry {
@@ -3400,7 +3394,7 @@ impl PageCharsData {
                     page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
                 None => "None".to_string(),
             },
-            chars,
+            structure_list_repr(&self.inner.chars, text_char_repr),
         )
     }
 }
@@ -3418,7 +3412,7 @@ fn text_char_repr(ch: &tors::pdf_impl::TextCharBox) -> String {
 /// span surface's em-box law.
 ///
 /// Exposed DIRECTLY; `==` is structural (all six fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct TextChar {
     inner: tors::pdf_impl::TextCharBox,
 }
@@ -3708,7 +3702,7 @@ fn probe_structure_refusal(
 /// and exactly one per-format payload. The payload getter is the ONE
 /// discriminating accessor (`isinstance(report.payload, DocxStructure)`
 /// narrows); `==` is structural (the whole report).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocumentStructure {
     inner: documents_impl::StructureReport,
 }
@@ -4039,7 +4033,7 @@ fn html_structure_repr(html: &documents_impl::HtmlStructure) -> String {
 
 /// The DOCX payload (the `document_structure` report's `payload` for a
 /// docx): thin getters over the core's plain struct; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxStructure {
     inner: documents_impl::DocxStructure,
 }
@@ -4113,7 +4107,7 @@ impl DocxStructure {
 }
 
 /// One DOCX body block.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxBlock {
     inner: documents_impl::DocxBlock,
 }
@@ -4234,7 +4228,7 @@ impl DocxBlock {
 }
 
 /// One DOCX table's grid.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxTable {
     inner: documents_impl::DocxTable,
 }
@@ -4289,7 +4283,7 @@ impl DocxTable {
 }
 
 /// One DOCX table cell.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxCell {
     inner: documents_impl::DocxCell,
 }
@@ -4337,7 +4331,7 @@ impl DocxCell {
 }
 
 /// One DOCX hyperlink.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxLink {
     inner: documents_impl::DocxLink,
 }
@@ -4385,7 +4379,7 @@ impl DocxLink {
 }
 
 /// One DOCX picture.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxImage {
     inner: documents_impl::DocxImage,
 }
@@ -4448,7 +4442,7 @@ impl DocxImage {
 
 /// The XLSX payload (the `document_structure` report's `payload` for an
 /// xlsx): thin getters over the core's plain struct; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxStructure {
     inner: documents_impl::XlsxStructure,
 }
@@ -4515,7 +4509,7 @@ impl XlsxStructure {
 }
 
 /// One XLSX worksheet.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxSheet {
     inner: documents_impl::XlsxSheet,
 }
@@ -4616,7 +4610,7 @@ impl XlsxSheet {
 
 /// One XLSX cell: the value as the file states it, discriminated by
 /// `type`, never coerced.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxCell {
     inner: documents_impl::XlsxCell,
 }
@@ -4705,7 +4699,7 @@ impl XlsxCell {
 }
 
 /// One defined name.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxDefinedName {
     inner: documents_impl::XlsxDefinedName,
 }
@@ -4756,7 +4750,7 @@ impl XlsxDefinedName {
 }
 
 /// One XLSX sheet hyperlink.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxHyperlink {
     inner: documents_impl::XlsxHyperlink,
 }
@@ -4798,7 +4792,7 @@ impl XlsxHyperlink {
 }
 
 /// One XLSX cell comment.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxComment {
     inner: documents_impl::XlsxComment,
 }
@@ -4835,7 +4829,7 @@ impl XlsxComment {
 
 /// The HTML payload (the `document_structure` report's `payload` for
 /// html): thin getters over the core's plain struct; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlStructure {
     inner: documents_impl::HtmlStructure,
 }
@@ -4872,7 +4866,7 @@ impl HtmlStructure {
 }
 
 /// One HTML node (the nine reachable kinds).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlNode {
     inner: documents_impl::HtmlNode,
 }
@@ -4987,7 +4981,7 @@ impl HtmlNode {
 }
 
 /// One HTML table grid.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlGrid {
     inner: documents_impl::HtmlGrid,
 }
@@ -5029,7 +5023,7 @@ impl HtmlGrid {
 }
 
 /// One HTML grid cell.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlGridCell {
     inner: documents_impl::HtmlGridCell,
 }
@@ -5083,7 +5077,7 @@ impl HtmlGridCell {
 }
 
 /// One inline annotation on an HTML node's text.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlAnnotation {
     inner: documents_impl::HtmlAnnotation,
 }

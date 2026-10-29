@@ -509,6 +509,23 @@ class TestPathCoercionNamesTheArgument:
         path.write_bytes(_PDF_BYTES)
         assert to_markdown(path) == to_markdown(str(path))
 
+    def test_a_bytes_fspath_pathlike_path_works(self, tmp_path: Path) -> None:
+        """Finding 13's pin: a PathLike whose ``__fspath__`` returns BYTES
+        is a legal path — ``open()`` accepts bytes paths, and
+        ``os.fspath`` yields the bytes faithfully. Pre-fix the typed
+        wrappers refused it (``path must be a str or os.PathLike, not
+        <class 'bytes'>`` — the message blamed the bytes for a thing
+        they can do). Green: the coercion fsdecode's the fspath result
+        and the call works, identical to the str spelling."""
+        path = tmp_path / "two.pdf"
+        path.write_bytes(_PDF_BYTES)
+
+        class BytesPath:
+            def __fspath__(self) -> bytes:
+                return os.fsencode(str(path))
+
+        assert to_markdown(BytesPath()) == to_markdown(str(path))
+
 
 # --- fix 5: the data= copy runs inside the detach ---------------------------
 
