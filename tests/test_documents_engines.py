@@ -2350,6 +2350,37 @@ class TestPdfPageLabels:
         labels = pdf_page_labels(data=out.getvalue())
         assert labels == ["iii", "iv", "v", "A-1", "A-2", "cover"]
 
+    def test_the_bounded_label_law(self) -> None:
+        """A roman render past the 4 KiB label bound bounds OUT to None
+        per page — never a truncated numeral (a truncated roman numeral
+        is a wrong label), never the multi-million-char build. The
+        pre-fix render was linear in the value (one 'm' per thousand):
+        this same legal /St 4294967294 materialized 4,294,967 chars PER
+        PAGE, for every page (858,994,700 total chars, 1.67 GiB RSS at
+        200 pages — the VmHWM-guarded subprocess cell in
+        test_documents_hardening.py pins the resource half; this pin is
+        the output half). Decimal and alpha at the same value render
+        fine (O(log n) — never reach the bound); a roman value whose
+        run fits the bound renders in full (4000 is 'mmmm')."""
+        from documents import generate_pdf_page_labels_value
+
+        hostile = generate_pdf_page_labels_value(3, "<< /S /r /St 4294967294 >>")
+        assert pdf_page_labels(data=hostile) == [None, None, None]
+        # the same value under decimal: 10 chars, exact through u32::MAX
+        decimal = generate_pdf_page_labels_value(3, "<< /S /D /St 4294967294 >>")
+        assert pdf_page_labels(data=decimal) == [
+            "4294967294",
+            "4294967295",
+            "4294967296",
+        ]
+        # /St 20000000 under roman: a 20,000-char run per page, the
+        # timing/space cell's value — bounded out.
+        mid = generate_pdf_page_labels_value(2, "<< /S /r /St 20000000 >>")
+        assert pdf_page_labels(data=mid) == [None, None]
+        # under the bound: exact
+        small = generate_pdf_page_labels_value(1, "<< /S /r /St 4000 >>")
+        assert pdf_page_labels(data=small) == ["mmmm"]
+
 
 # --- the page-geometry probe (the geometry lane's contract) -----------------------
 

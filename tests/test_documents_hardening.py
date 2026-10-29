@@ -613,6 +613,65 @@ def test_a_400mb_data_call_keeps_the_gil_at_heartbeat_granularity() -> None:
     )
 
 
+# --- the page-label bound: the render's memory, guarded ---------------------
+
+
+_ROMAN_OVERFLOW_PROBE = r"""
+import os, time
+from documents import generate_pdf_page_labels_value
+from tors_documents import pdf_page_labels
+
+# The hostile-but-legal /St values under a roman style: the subtractive
+# render is one char per thousand of the value, so pre-fix each page's
+# label was `value / 1000` chars, materialized for EVERY page
+# (4294967294 at 200 pages: 858,994,700 chars, 1.67 GiB RSS, measured).
+# Post-fix: bounded out to None above the 4 KiB label bound, nothing
+# built.
+for st, pages in ((4294967294, 200), (20000000, 50)):
+    data = generate_pdf_page_labels_value(pages, f"<< /S /r /St {st} >>")
+    t0 = time.perf_counter()
+    labels = pdf_page_labels(data=data)
+    wall = time.perf_counter() - t0
+    assert labels == [None] * pages, f"St {st}: the bounded-out law, all None"
+    print(f"St={st} pages={pages} wall={wall:.2f}s")
+if os.path.exists("/proc/self/status"):
+    hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
+    print(hwm.strip())
+"""
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/status").exists(), reason="the VmHWM half of the probe is Linux-shaped"
+)
+def test_the_page_label_render_is_bounded_in_time_and_space() -> None:
+    """The bounded-label law's resource cell (the finding's measured
+    before: 858,994,700 total chars, 1.67 GiB RSS at 200 pages for a
+    20 KB PDF — the docstring BLESSED that render pre-fix). Green: the
+    two hostile-but-legal roman values bound out to None per page (the
+    output half is pinned in test_documents_engines.py), the calls stay
+    in the sub-second band the O(1) bound-check buys, and the child's
+    peak RSS stays orders of magnitude under the pre-fix 1.67 GiB."""
+    def check(report: str) -> None:
+        walls = re.findall(r"wall=(\d+(?:\.\d+)?)s", report)
+        assert len(walls) == 2, f"the probe did not report both calls:\n{report}"
+        assert all(float(w) < 5.0 for w in walls), (
+            f"the label render laboured past the bound (walls {walls}) — "
+            "the render must refuse on the run's length before building"
+        )
+
+    report = first_clean(
+        lambda: _run_or_fail(_ROMAN_OVERFLOW_PROBE, timeout=120),
+        check,
+        samples=2,
+        label="the page-label bound probe",
+    )
+    peak = _hwm_kb(report)
+    assert peak < 300_000, (
+        f"peak RSS reached {peak} kB — the bounded-out render must cost "
+        f"O(1) per page, not the pre-fix 1.67 GiB:\n{report}"
+    )
+
+
 # --- fixes 6/7: docstring honesty -------------------------------------------
 
 

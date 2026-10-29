@@ -151,10 +151,15 @@ The rules in brief:
   the page declares no label (no tree, or before the tree's first range) — the
   caller's fabricate-an-ordinal signal, never fabricated here; a declared label
   is always a string, including the empty one (a styleless, prefixless range
-  declares it). Labels render on u64 arithmetic (a legal `/St 4294967294` never
-  panics or wraps); rotation and crop are irrelevant (tree data); a corrupt
-  tree is presented as "no labels" (the documented masking). The encrypted door
-  governs unchanged: a locked document raises, never ciphertext labels.
+  declares it). Labels render on u64 arithmetic under the bounded-label law:
+  a label whose render exceeds 4 KiB bounds out to `None` for that page, never
+  truncated — the subtractive Roman render is one char per thousand of the
+  value, so a legal `/St 4294967294` renders 4,294,967 chars per page, a value
+  display-prohibitive by construction (decimal and alpha renders are O(log n)
+  and never reach the bound); the arithmetic itself never panics or wraps.
+  Rotation and crop are irrelevant (tree data); a corrupt tree is presented as
+  "no labels" (the documented masking). The encrypted door governs unchanged:
+  a locked document raises, never ciphertext labels.
 - `pdf_security` is the typed encryption/permissions probe — the door's one
   documented carve-out: it REPORTS the locked state (`ValueError`-free) instead
   of failing closed. `PdfSecurity` carries `.encrypted`,

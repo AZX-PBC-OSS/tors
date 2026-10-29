@@ -8353,17 +8353,25 @@ number (a style present).
 The covering rule is the engine's minus its ordinal fallback: the last range
 in the stable-sorted tree with `start_page ≤ i` covers page `i`; two ranges
 sharing a start page resolve to the last in traversal order (root `/Nums`
-before `/Kids`, kids in array order). Labels render on u64 arithmetic (a
-legal `/St 4294967294` renders through `4294967296` without panic or wrap;
-an over-u32 `/St` carries the engine's own parse-time truncation, e.g.
-`/St 5000000000` reads back as `705032704`). Rotation and crop are irrelevant
+before `/Kids`, kids in array order). Labels render on u64 arithmetic under
+the bounded-label law: a label the render builds past 4 KiB bounds OUT to
+`None` for that page, never a truncated numeral — the subtractive Roman
+render is one char per thousand of the value, so a legal `/St 4294967294`
+renders 4,294,967 chars per page (858,994,700 total chars and 1.67 GiB RSS
+at 200 pages, measured before the bound), a value display-prohibitive by
+construction; decimal and alpha renders are O(log n) and never reach the
+bound. The arithmetic itself never panics or wraps; an over-u32 `/St`
+carries the engine's own parse-time truncation, e.g. `/St 5000000000` reads
+back as `705032704`. Rotation and crop are irrelevant
 (tree data). A corrupt tree (a non-dict `/PageLabels`, tree node, `/Kids`
 member, or label entry) is presented as "no labels" — every page `None`, the
 content-read-failure law, the same list a tree-less document answers; that is
 a deliberate masking, stated here the way `tables_refused: false` is.
 
-The styles: decimal (`D`), uppercase/lowercase Roman (`R`/`r`, unbounded —
-4000 is `MMMM`), uppercase/lowercase alpha (`A`/`a`, bijective base-26 — Z
+The styles: decimal (`D`), uppercase/lowercase Roman (`R`/`r`, the
+subtractive table under the 4 KiB label bound — 4000 is `MMMM`; a value
+whose render passes the bound answers `None`, never a truncated numeral),
+uppercase/lowercase alpha (`A`/`a`, bijective base-26 — Z
 wraps to AA), and the styleless label-only form. `/St` offsets where the
 range's numbering starts (positive; `/St 0`/`-3` read as the default 1);
 `/P` prefixes as UTF-16BE (with BOM) or PDFDocEncoding text strings.

@@ -440,15 +440,22 @@ pub fn pdf_page_count(
 /// last range in the stable-sorted tree with `start_page ≤ i` covers
 /// page `i`; two ranges sharing a start page resolve to the last in
 /// traversal order (root `/Nums` before `/Kids`, kids in array order).
-/// Labels render on u64 arithmetic (a legal `/St 4294967294` renders
-/// through `4294967296` without panic or wrap — never the engine
-/// formatter's `u32 + u32`; an over-u32 `/St` carries the engine's own
-/// parse-time truncation, e.g. 5000000000 reads back as 705032704).
-/// Rotation and crop are irrelevant (tree data). A corrupt tree (a
-/// non-dict `/PageLabels`, tree node, `/Kids` member, or label entry) is
-/// presented as "no labels" — every page `None`, the content-read-
-/// failure law, the same list a tree-less document answers; that is a
-/// deliberate masking, stated here the way `tables_refused: false` is.
+/// Labels render on u64 arithmetic under the bounded-label law: a label
+/// the render builds past 4 KiB (`pdf_impl::MAX_LABEL_CHARS`) bounds OUT
+/// to `None` for that page, never a truncated numeral — the subtractive
+/// Roman render is one char per thousand of the value, so a legal
+/// `/St 4294967294` renders 4,294,967 chars per page (measured 858,994,700
+/// total chars, 1.67 GiB RSS at 200 pages before the bound), a value
+/// display-prohibitive by construction. Decimal and alpha renders are
+/// O(log n) and can never reach the bound. The arithmetic itself never
+/// panics or wraps (never the engine formatter's `u32 + u32`; an
+/// over-u32 `/St` carries the engine's own parse-time truncation, e.g.
+/// 5000000000 reads back as 705032704). Rotation and crop are irrelevant
+/// (tree data). A corrupt tree (a non-dict `/PageLabels`, tree node,
+/// `/Kids` member, or label entry) is presented as "no labels" — every
+/// page `None`, the content-read-failure law, the same list a tree-less
+/// document answers; that is a deliberate masking, stated here the way
+/// `tables_refused: false` is.
 ///
 /// `backend` names the engine lane, the same vocabulary the conversion
 /// pair takes: `"auto"` (the default; the native layer takes `None` as

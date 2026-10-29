@@ -1900,6 +1900,29 @@ LAYOUT_RED_1X1 = (
 )
 
 
+def generate_pdf_page_labels_value(count: int, fragment: str) -> bytes:
+    """A `count`-page PDF whose catalog carries ONE `/PageLabels` range
+    declared as `fragment` (the `/Nums` entry: e.g. `<< /S /r /St
+    4294967294 >>`): the bounded-label probes' fixture. The tree is
+    catalog data, so no page needs content — a 200-page hostile-label
+    document is a few KB, and the label render (not the parse) is what
+    the probe measures."""
+    kids = " ".join(f"{3 + page} 0 R" for page in range(count))
+    return _pdf_from_objects(
+        [
+            (
+                f"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums "
+                f"[0 {fragment}] >> >>"
+            ).encode("ascii"),
+            f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
+            *(
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+                for _ in range(count)
+            ),
+        ]
+    )
+
+
 def generate_pdf_layout(
     content: bytes,
     *,

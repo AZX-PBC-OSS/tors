@@ -791,11 +791,25 @@ pub fn page_count(bytes: Vec<u8>, password: Option<&str>) -> Result<usize, PdfEr
 /// `"0"` in release two pages later) and truncates the `/St` integer to
 /// u32 first (`/St 5000000000` reads back as 705032704). The u64 render
 /// keeps the engine's per-style spellings — decimal, subtractive Roman
-/// (unbounded: 4000 is "MMMM"), bijective base-26 alpha (Z wraps to AA) —
-/// so a legal `/St` renders without panic or wrap, while an over-u32 `/St`
-/// carries the engine's own truncation into the visible label (the value
-/// the PDF's /St literally names is not representable; the first
-/// rendered number is still the truncated one).
+/// (the "m"-per-thousand run), bijective base-26 alpha (Z wraps to AA) —
+/// under the BOUNDED-LABEL LAW: a label the render builds past
+/// [`MAX_LABEL_CHARS`] is bounded OUT to `None`, never truncated (a
+/// truncated roman numeral is a wrong label). The bound exists because
+/// the subtractive Roman render is LINEAR in the value — one char per
+/// thousand — so the same legal-but-hostile `/St 4294967294` that made
+/// the engine's arithmetic wrap makes an unbounded u64 render a memory
+/// amplifier: 4,294,967 chars PER PAGE, materialized for every page
+/// (measured: 858,994,700 total chars, 1.67 GiB RSS at 200 pages). The
+/// bound is checked on the run's length BEFORE any building, so a
+/// bounded-out label costs O(1). The value is display-prohibitive — no
+/// reader renders a four-million-character label — and `None` (the
+/// page's declared label is unusable as a display string) is the honest
+/// answer above it. Decimal and alpha renders are O(log n) (at most 20
+/// and ~13 chars on u64) and can never reach the bound. An over-u32
+/// `/St` still carries the engine's own truncation into the visible
+/// label (the value the PDF's /St literally names is not representable;
+/// the first rendered number is still the truncated one) — bounded or
+/// not.
 ///
 /// The None ladder (failures raise; the per-page None is the only soft
 /// answer): door/parse/page-count failures raise — document-level;
@@ -812,7 +826,12 @@ pub fn page_count(bytes: Vec<u8>, password: Option<&str>) -> Result<usize, PdfEr
 /// prefix that fails to decode (unmapped PDFDocEncoding bytes are
 /// dropped; invalid UTF-16 decodes to nothing) is silently lost: with
 /// `/S` absent the page still answers `Some("")` (styleless +
-/// no-prefix), with a style it answers the bare number.
+/// no-prefix), with a style it answers the bare number. And the newest
+/// rung, the bound: a page whose covering range's render exceeds
+/// [`MAX_LABEL_CHARS`] answers `None` for that page (the
+/// bounded-out-label law, [`render_roman`]) — the same soft answer, a
+/// different reason, named here so a consumer can tell them apart only
+/// by the value that produced them.
 ///
 /// The door: page labels are read from ENCRYPTED string objects, and the
 /// extractor is NOT auth-gated engine-side — on a locked document it
@@ -849,47 +868,74 @@ pub fn page_labels(
 /// One page's label: the covering range's render, or `None` where no
 /// range covers (the engine's covering rule replicated — see
 /// [`page_labels`]; never [`PageLabelExtractor::get_label`], which
-/// fabricates an ordinal fallback).
+/// fabricates an ordinal fallback) and `None` where the render bounds
+/// out ([`MAX_LABEL_CHARS`] — the bounded-label law).
 fn render_page_label(ranges: &[PageLabelRange], page: usize) -> Option<String> {
     let range = ranges.iter().rev().find(|r| r.start_page <= page)?;
     // start_value is the engine's u32 (an over-u32 /St is the engine's
     // own truncation, already applied at parse); the render arithmetic is
     // u64, so no legal value panics or wraps (format_label's u32 + u32
-    // does both — page_labels's docstring).
+    // does both — page_labels's docstring). The BOUND above it is the
+    // render's own law: a value whose render is display-prohibitive
+    // bounds out to None, never a truncated string.
     let number = range.start_value as u64 + (page - range.start_page) as u64;
-    Some(render_label_number(
-        range.style,
-        number,
-        range.prefix.as_deref(),
-    ))
+    render_label_number(range.style, number, range.prefix.as_deref())
 }
 
 /// The per-style render, the engine's spellings on u64 arithmetic
-/// ([`render_page_label`]): decimal; subtractive Roman, unbounded (no
-/// u32 ceiling: 4000 is "MMMM"); bijective base-26 alpha (1=A … 26=Z,
-/// 27=AA — no zero glyph, so Z wraps to AA); styleless renders the empty
-/// string (the prefix, alone, if any).
-fn render_label_number(style: PageLabelStyle, number: u64, prefix: Option<&str>) -> String {
+/// ([`render_page_label`]): decimal; subtractive Roman, bounded
+/// ([`MAX_LABEL_CHARS`] — the one style whose length is linear in the
+/// value); bijective base-26 alpha (1=A … 26=Z, 27=AA — no zero glyph,
+/// so Z wraps to AA; O(log₂₆ n), never bounded); styleless renders the
+/// empty string (the prefix, alone, if any). `None` = the bounded-out
+/// label.
+fn render_label_number(style: PageLabelStyle, number: u64, prefix: Option<&str>) -> Option<String> {
     let rendered = match style {
         PageLabelStyle::Decimal => number.to_string(),
-        PageLabelStyle::RomanUpper => render_roman(number, true),
-        PageLabelStyle::RomanLower => render_roman(number, false),
+        PageLabelStyle::RomanUpper => render_roman(number, true)?,
+        PageLabelStyle::RomanLower => render_roman(number, false)?,
         PageLabelStyle::AlphaUpper => render_alpha(number, true),
         PageLabelStyle::AlphaLower => render_alpha(number, false),
         // The engine's own render: an empty string, prefix included.
         PageLabelStyle::None => String::new(),
     };
-    match prefix {
+    Some(match prefix {
         Some(prefix) => format!("{prefix}{rendered}"),
         None => rendered,
-    }
+    })
 }
 
-/// Subtractive Roman numerals, the engine's table on u64 (unbounded: one
-/// "m" pair per thousand, no ceiling — [`page_labels`]'s docstring).
-fn render_roman(mut n: u64, uppercase: bool) -> String {
+/// The bounded-label law's own constant: 4 KiB per label. A display label
+/// has no use past a few hundred chars; the bound exists because the
+/// subtractive Roman render is linear in the value (one char per
+/// thousand), so a hostile-but-legal `/St` (4294967294) renders 4.29
+/// million chars per page — measured 858,994,700 total chars, 1.67 GiB
+/// RSS at 200 pages before the bound. Above it the label is bounded OUT
+/// (None), never truncated.
+pub(crate) const MAX_LABEL_CHARS: usize = 4 * 1024;
+
+/// The longest a sub-1000 roman tail can render: 12 (`DCCCLXXXVIII` —
+/// 888; the subtractive pairs only shorten a render). The bound's head
+/// room, so a render the check admits can never pass [`MAX_LABEL_CHARS`]
+/// at build time.
+const ROMAN_TAIL_MAX: u64 = 16;
+
+/// Subtractive Roman numerals, the engine's table on u64, BOUNDED
+/// ([`MAX_LABEL_CHARS`]): the "m"-per-thousand run is checked on its
+/// LENGTH before anything is built (the tail renders at most
+/// [`ROMAN_TAIL_MAX`] chars, so the check is conservative), and a run the
+/// bound refuses returns `None` — never a truncated numeral, never the
+/// 4.29M-char build (page_labels's docstring carries the measured
+/// before).
+fn render_roman(n: u64, uppercase: bool) -> Option<String> {
     if n == 0 {
-        return String::new();
+        return Some(String::new());
+    }
+    // The bound, BEFORE the build: run + tail_max over MAX_LABEL_CHARS
+    // is bounded out. (u64 arithmetic: `(n / 1000) as usize` could wrap
+    // on a 32-bit usize.)
+    if n / 1000 > (MAX_LABEL_CHARS as u64 - ROMAN_TAIL_MAX) {
+        return None;
     }
     let numerals = [
         (1000, "m"),
@@ -906,6 +952,7 @@ fn render_roman(mut n: u64, uppercase: bool) -> String {
         (4, "iv"),
         (1, "i"),
     ];
+    let mut n = n;
     let mut result = String::new();
     for (value, numeral) in numerals.iter() {
         while n >= *value {
@@ -913,11 +960,12 @@ fn render_roman(mut n: u64, uppercase: bool) -> String {
             n -= *value;
         }
     }
-    if uppercase {
+    debug_assert!(result.len() <= MAX_LABEL_CHARS, "the bound check is the law");
+    Some(if uppercase {
         result.to_uppercase()
     } else {
         result
-    }
+    })
 }
 
 /// Bijective base-26 (1=A, 26=Z, 27=AA), the engine's algorithm on u64.
@@ -6928,6 +6976,14 @@ mod tests {
     /// that truncated value (the ceiling comment: /St above u32::MAX is
     /// not representable in the engine's range struct, and the label the
     /// reader displays is the truncated one).
+    ///
+    /// The BOUNDED-LABEL LAW, restated over the old blessing: the u64
+    /// render is unbounded only in ARITHMETIC — the STRING render is
+    /// bounded at [`MAX_LABEL_CHARS`], and the decimal labels below are
+    /// 10-char strings that sail under it. The SAME value under a roman
+    /// style is exactly what the bound refuses (4,294,967 chars per page
+    /// — the 1.67 GiB-at-200-pages measurement): every page answers
+    /// `None`, nothing is built.
     #[test]
     fn page_labels_render_in_u64_no_panic_no_wrap() {
         // /St 4294967294 + 2 pages: u64 render crosses u32::MAX exactly
@@ -6961,12 +7017,72 @@ mod tests {
         );
     }
 
-    /// The alpha style is bijective base-26 (no zero glyph): 26 is "Z",
-    /// 27 wraps to "AA" — pinned (R14), and Roman is unbounded on the u64
-    /// render: 4000 is "mmmm" (the engine's subtractive table, one "m"
-    /// per thousand, no u32 ceiling).
+    /// The bounded-label law, pinned on the render the bound exists for:
+    /// a roman render past [`MAX_LABEL_CHARS`] (4 KiB) bounds OUT to
+    /// `None` for the page — never a truncated numeral, never the build
+    /// (the pre-fix render built one "m" per thousand of the value: a
+    /// legal /St 4294967294 materialized 4,294,967 chars PER PAGE, and
+    /// page_labels for EVERY page — 858,994,700 total chars, 1.67 GiB RSS
+    /// at 200 pages, measured). The boundary is exact: the largest value
+    /// the check admits renders in full (the m-run + a ≤12-char tail ≤
+    /// the 4 KiB bound), the first refused value above it answers None;
+    /// decimal/alpha (O(log n)) can never reach the bound.
     #[test]
-    fn page_labels_alpha_wraps_z_to_aa_and_roman_is_unbounded() {
+    fn page_labels_roman_bounds_out_above_max_label_chars() {
+        // The refused value: the same legal /St the old docstring blessed.
+        let labels = page_labels(
+            labeled_pdf(3, " /PageLabels << /Nums [0 << /S /r /St 4294967294 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![None, None, None]);
+
+        // The boundary: run ≤ 4080 (MAX_LABEL_CHARS - ROMAN_TAIL_MAX)
+        // renders in full; run 4081 is the first bounded out. 4_080_567:
+        // run 4080, tail 567 ("dlxvii", 6 chars) → 4086 chars ≤ 4096.
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /r /St 4080567 >>] >>"),
+            None,
+        )
+        .unwrap();
+        let Some(label) = labels[0].as_deref() else {
+            panic!("the admitted boundary value must render in full")
+        };
+        assert_eq!(label.len(), 4080 + 6);
+        assert!(label.starts_with('m') && label.ends_with("dlxvii"));
+        // the m-run is exactly the admitted run: all 'm' until the tail
+        assert!(label[..4080].chars().all(|c| c == 'm'));
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /r /St 4081000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![None], "run 4081: the first bounded-out value");
+
+        // Decimal at the same value: 7 chars, never bounded.
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /D /St 4081000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![Some("4081000".to_string())]);
+        // Alpha at the same value: O(log26 n), a handful of chars.
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /a /St 4081000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert!(labels[0].as_deref().is_some_and(|l| l.len() < 20));
+    }
+
+    /// The alpha style is bijective base-26 (no zero glyph): 26 is "Z",
+    /// 27 wraps to "AA" — pinned (R14). Roman is bounded at
+    /// [`MAX_LABEL_CHARS`] on the u64 render: 4000 is "mmmm" (the
+    /// engine's subtractive table, one "m" per thousand — values whose
+    /// run fits the bound render in full; see the bound's own test),
+    /// values past it bound out to None.
+    #[test]
+    fn page_labels_alpha_wraps_z_to_aa_and_roman_fits_the_bound() {
         let labels = page_labels(
             labeled_pdf(3, " /PageLabels << /Nums [0 << /S /A /St 26 >>] >>"),
             None,
