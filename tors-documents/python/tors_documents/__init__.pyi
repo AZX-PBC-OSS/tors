@@ -436,6 +436,281 @@ class Cell:
         """The row span (the engine's; 1 unless a merge covers this
         cell)."""
 
+class PageImagesData:
+    """One ``page_images`` entry: the page's image metadata, and — only
+    where ``decode`` asked and the decode succeeded — the bytes; ``==``
+    is structural (the four fields). Provenance rides on the entry:
+    ``format`` is the resolved format's vocabulary name, and on an OFFICE
+    row ``images: []`` is the per-format capability statement (images are
+    PDF-only in v1 — a DOCX's images are real and are not served), the
+    ``format`` field the marker."""
+    @property
+    def page_index(self) -> int:
+        """The 0-based page this entry describes — mandatory on every
+        entry: the ``pages=`` normalization reorders."""
+    @property
+    def format(self) -> str:
+        """The resolved format's vocabulary name: the entry's provenance
+        marker."""
+    @property
+    def geometry(self) -> PageGeometry | None:
+        """The page's declared render box (the ``page_geometry``
+        entry): ``None`` where the page's box cannot be read or declares
+        no positive extent — the images are STILL enumerated (the bytes
+        must not drop for a frame reason), their ``bbox`` None."""
+    @property
+    def images(self) -> list[PageImageEntry]:
+        """The page's images, paint order — the same order
+        ``page_layout``'s ``images`` lists (same enumeration, same
+        transform)."""
+
+class PageImageEntry:
+    """One image (``PageImagesData.images[]``): the handle's evidence
+    always, the bytes only under opt-in decode; ``==`` is structural
+    (all thirteen fields)."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float] | None:
+        """The image's axis-aligned box, ``(x, y, w, h)``: points,
+        bottom-left origin of the page's render space — the same mapped
+        box ``page_layout``'s ``ImageBox`` carries. ``None`` when the
+        page's box cannot be read (no frame to map into — the bytes are
+        still served)."""
+    @property
+    def width_px(self) -> int:
+        """The image's pixel width (the DICTIONARY's /Width — the
+        decoded buffer's own dims ride ``data``)."""
+    @property
+    def height_px(self) -> int:
+        """The image's pixel height (the dictionary's)."""
+    @property
+    def rotation_degrees(self) -> float:
+        """The CTM's rotation angle in degrees, ``atan2``-normalized to
+        ``[0, 360)`` — evidence, not an instruction."""
+    @property
+    def paint_order(self) -> int:
+        """Page-local identity/z-order, in content-stream order — pairs
+        with ``page_layout``'s ``images[paint_order]`` (the two surfaces
+        are separate opens: a changed file between the calls breaks the
+        pairing)."""
+    @property
+    def color_space(self) -> str:
+        """The resolved color space, spelled: ``"DeviceGray" |
+        "DeviceRGB" | "DeviceCMYK" | "Indexed" | "CalGray" | "CalRGB" |
+        "Lab" | "ICCBased(n)" | "Separation" | "DeviceN" | "Pattern"``."""
+    @property
+    def color_space_declared(self) -> bool:
+        """Whether the resolved color space is engine-verified: the
+        engine falls back to ``DeviceRGB`` when a dictionary's
+        /ColorSpace is absent or unparseable (and decode() then fails on
+        that same dictionary), so a ``DeviceRGB`` entry whose decode was
+        not attempted and successful reads ``False`` (the guess,
+        marked); ``True`` for any space the fallback cannot produce, and
+        for a decode that succeeded."""
+    @property
+    def indexed_base(self) -> str | None:
+        """For an Indexed image, the de-indexed base space's name; None
+        otherwise."""
+    @property
+    def bits_per_component(self) -> int:
+        """/BitsPerComponent — the DICTIONARY's value; the decoded
+        buffer's own depth rides ``data`` (a consumer computing a stride
+        from this field's 16 would read an 8-bit buffer)."""
+    @property
+    def byte_size_compressed(self) -> int:
+        """/Length — the compressed stream's size in bytes (an inline
+        image's: the stored bytes between ID/EI)."""
+    @property
+    def filters(self) -> list[str]:
+        """The filter chain, outermost first, spelled
+        (``"FlateDecode"``, …); an unlisted filter keeps its raw PDF
+        name."""
+    @property
+    def is_inline(self) -> bool:
+        """Inline (BI/ID/EI) vs an XObject Do."""
+    @property
+    def data(self) -> ImageBytes:
+        """The decode result — the ALWAYS-PRESENT four-arm sum:
+        ``kind`` is ``"not_requested" | "container" | "raw" | "error"``
+        and every other getter is None unless ``kind`` names it."""
+
+class ImageBytes:
+    """The opt-in decode result (``PageImageEntry.data``): the
+    always-present four-arm sum; ``==`` is structural (the whole arm).
+    Every arm getter is None unless ``kind`` names it — "no bytes" is
+    never two different things."""
+    @property
+    def kind(self) -> str:
+        """``"not_requested"`` (no decode asked, or a containers-only
+        selection left this image out — the entry's ``filters`` say
+        which), ``"container"`` (the container bytes: the engine's
+        decode() passthrough — decryption included), ``"raw"``
+        (decoded samples that describe themselves), or ``"error"`` (a
+        typed refusal: decode, unsupported, or size cap)."""
+    @property
+    def bytes(self) -> bytes | None:
+        """The container bytes — None unless ``kind == "container"``."""
+    @property
+    def container(self) -> str | None:
+        """What the container bytes are: ``"jpeg" | "jp2" |
+        "j2k_codestream"`` — None unless ``kind == "container"``."""
+    @property
+    def pixels(self) -> bytes | None:
+        """The sample bytes — None unless ``kind == "raw"``."""
+    @property
+    def width_px(self) -> int | None:
+        """The decoded buffer's width — None unless ``kind == "raw"``."""
+    @property
+    def height_px(self) -> int | None:
+        """The decoded buffer's height — None unless ``kind == "raw"``."""
+    @property
+    def components(self) -> int | None:
+        """The decoded buffer's component count (the Indexed case names
+        the base's — the expansion's stride; the engine's ``DeviceN``
+        answer is its parser's flat 4 even when the real ink count
+        differs — the buffer LENGTH is the truth there) — None unless
+        ``kind == "raw"``."""
+    @property
+    def bpc(self) -> int | None:
+        """The decoded buffer's bits per component (8 whenever a
+        transform rewrote the samples; the dictionary's own value when
+        the buffer stayed packed — CCITT, Lab, a non-1/3/4-component
+        space) — None unless ``kind == "raw"``."""
+    @property
+    def pixel_format(self) -> str | None:
+        """The engine's display tag for the buffer: ``"rgb" |
+        "grayscale" | "cmyk"`` — a tag that can LIE about the stride
+        (Lab → ``"rgb"`` over Lab samples; an ``ICCBased(2)`` →
+        ``"rgb"`` over a packed 2-component buffer): ``components``/
+        ``bpc`` are the honest stride. None unless ``kind == "raw"``."""
+    @property
+    def samples_are_raw(self) -> bool | None:
+        """Whether the samples are still the values the image
+        dictionary's own entries are expressed in — ``True`` is the
+        COMMON case (an 8-bpc image with no non-default /Decode in a
+        1/3/4-component space keeps it; it means "nothing transformed
+        this buffer", never "undecoded"). None unless ``kind ==
+        "raw"``."""
+    @property
+    def decode_folded_in(self) -> bool | None:
+        """Whether a non-default ``/Decode`` array is already mapped
+        into the samples — strictly narrower than ``not
+        samples_are_raw``: a consumer that applies ``/Decode`` itself
+        (separation-plate routing) must read this one. None unless
+        ``kind == "raw"``."""
+    @property
+    def icc(self) -> bool | None:
+        """Whether an ICC profile rode the decode — NAME-ONLY: the
+        profile's bytes are deliberately not carried (they can be
+        hundreds of KiB and are shared per document); the space is named
+        by the entry's ``color_space``/``indexed_base``. None unless
+        ``kind == "raw"``."""
+    @property
+    def ccitt(self) -> tuple[int, int, int | None, bool, bool, bool, bool] | None:
+        """The CCITT parameters the packed codestream cannot be decoded
+        without (the packed stream is served VERBATIM — the consumer has
+        no PDF to read /DecodeParms from): the tuple ``(k, columns,
+        rows, black_is_1, end_of_line, encoded_byte_align,
+        end_of_block)`` — all seven fields the engine carries; ``rows``
+        is None when undeclared. None for every non-CCITT image and
+        unless ``kind == "raw"``."""
+    @property
+    def error_kind(self) -> str | None:
+        """Why the decode failed: ``"decode"`` (the engine's decode()
+        failed — the message is its Display), ``"unsupported"`` (a
+        filter this build cannot decode — retrying cannot fix it; the
+        message is the engine's feature-naming string verbatim on the
+        shipped build), or ``"size_cap"`` (this seam's ceiling refused
+        BEFORE decoding — see ``scope``). None unless ``kind ==
+        "error"``."""
+    @property
+    def message(self) -> str | None:
+        """The failure's message — None unless ``kind == "error"``."""
+    @property
+    def scope(self) -> str | None:
+        """Which ceiling fired: ``"image"`` (the image's own estimate
+        over the per-image cap) or ``"call"`` (the cumulative budget the
+        image would push past) — None unless ``error_kind ==
+        "size_cap"``."""
+    @property
+    def limit_bytes(self) -> int | None:
+        """The ceiling that fired, in bytes — None unless ``error_kind
+        == "size_cap"``."""
+    @property
+    def needed_bytes(self) -> int | None:
+        """The bytes the work needed (the image's own estimate; the
+        call's cumulative total had the image been served) — None unless
+        ``error_kind == "size_cap"``."""
+
+class PageCharsData:
+    """One ``page_text_chars`` entry: the page's chars from the cached
+    span parse, reading order; ``==`` is structural (the four fields)."""
+    @property
+    def page_index(self) -> int:
+        """The 0-based page this entry describes — mandatory on every
+        entry: the ``pages=`` normalization reorders."""
+    @property
+    def format(self) -> str:
+        """The resolved format's vocabulary name: the entry's provenance
+        marker — on an office row ``chars: []`` is the per-format
+        capability statement (chars are PDF-only in v1), not "no
+        text"."""
+    @property
+    def geometry(self) -> PageGeometry | None:
+        """The page's declared render box (the ``page_geometry``
+        entry): ``None`` where the page's box cannot be read or declares
+        no positive extent — then ``chars`` is empty too (no frame to
+        map into)."""
+    @property
+    def chars(self) -> list[TextChar]:
+        """The page's chars, reading order (span order × in-span
+        order)."""
+
+class TextChar:
+    """One character (``PageCharsData.chars[]``): the advance box from
+    the baseline, in the page's render space — the per-char extension of
+    the span surface's em-box law; ``==`` is structural (all six
+    fields)."""
+    @property
+    def char(self) -> str:
+        """The character (one Unicode scalar — Python string indices are
+        code points, so ``spans[s].text[i:j]`` slicing aligns with
+        ``index_in_span``)."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        """``(x, y, w, h)``: points, bottom-left origin of the page's
+        render space; **y is the BASELINE** — the box extends one
+        font-size upward (the em-box law; descenders hang BELOW the
+        box's bottom edge), h is the span's font size, w the char's
+        advance. Boxes are unclipped; the page box is the consumer's
+        clip."""
+    @property
+    def span_index(self) -> int:
+        """The owning span's index in ``page_layout``'s ``spans`` list
+        for this page — the join law makes ``"".join(chars' char) ==
+        spans[span_index].text`` EXACTLY."""
+    @property
+    def index_in_span(self) -> int:
+        """The char's index WITHIN its span, in code points — chars
+        ``[i, j)`` of span s ground the substring ``spans[s].text[i:j]``
+        (their union box). The WHOLE-span box is the span's own mapped
+        box, never the char union."""
+    @property
+    def wmode(self) -> int:
+        """The span's writing mode: 0 horizontal, 1 vertical. The
+        WMode-1 honesty field — a vertical run's char boxes are the
+        engine's flattened fiction (displaced one advance LEFT of their
+        origins, stacked along x, measured): a consumer may not pretend
+        ``wmode == 1`` chars are highlight-able."""
+    @property
+    def x_measured(self) -> bool:
+        """How the char's x was derived — SPAN-CONSTANT: ``True`` = the
+        engine's measured origins (drift ≈ the 0.5 pt tolerance +
+        sub-point interpolation); ``False`` = the prefix-sum/uniform arm
+        (the TJ-kerning drift class, bounded only by measurement; the
+        analytic bound is ``|Σ TJ adjustments before i| ×
+        font_size/1000`` pt). A highlight box built from
+        ``x_measured: False`` chars is APPROXIMATE."""
+
 class PdfSecurity:
     """The ``pdf_security`` answer: the four security fields the reading
     rule composes (``readable = !encrypted ||
@@ -801,6 +1076,97 @@ def page_tables(
     precedes the ``pages=`` validation). Runs GIL-free. ⚠ A malformed
     PDF can crash the process (uncatchable native stack exhaustion in
     the pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
+    SECURITY.md)."""
+
+def page_images(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = None,
+    decode: str | None = None,
+    max_image_bytes: int | None = None,
+) -> list[PageImagesData]:
+    """The image-bytes probe: per PDF page, the page's image handles —
+    the UNFILTERED walk (no 8x8 gate, no max-pixels filter, paint order;
+    never ``extract_images``, which silently drops sub-8x8 images and
+    swallows decode errors) — with each image's evidence in the page's
+    declared render space, and — only under ``decode`` — the bytes
+    behind the handles. ``decode=None`` decodes nothing (metadata
+    only); ``decode="container"`` serves the container bytes (a DCT
+    filter anywhere -> the JPEG passthrough with DECRYPTION included —
+    the raw stream bytes are ciphertext on an unlocked encrypted PDF
+    and are never served; a bare ``/JPXDecode`` stream -> its container
+    sniffed from the signature box, ``"jp2"`` or ``"j2k_codestream"``,
+    served only when the image is inline or the document is
+    unencrypted, else a typed ``unsupported`` error naming the cause);
+    ``decode="pixels"`` decodes to the engine's own classification (Raw,
+    or the typed ``unsupported`` error for JBIG2/JPX on the shipped
+    build — feature-gated). The bytes arm ``data`` is an ALWAYS-PRESENT
+    four-way sum: ``kind`` in
+    ``"not_requested"|"container"|"raw"|"error"``; every arm getter is
+    None unless ``kind`` names it. Caps: 256 MiB per image (chain-aware
+    pre-decode estimate), 512 MiB per call cumulative, the over-cap
+    image a typed ``size_cap`` entry (``scope``/``limit_bytes``/
+    ``needed_bytes``) — refused, never truncated; ``max_image_bytes=``
+    overrides the per-image ceiling (raising it past the engine's
+    env-read ``PDF_OXIDE_MAX_DECOMPRESS_MB`` cannot make the ENGINE
+    decode more). Honesty: an image with missing/non-positive
+    /Width-/Height yields NO handle (this surface cannot see it); a
+    missing/unparseable /ColorSpace reports ``DeviceRGB`` with
+    ``color_space_declared`` False; a decode failure is a visible typed
+    entry, siblings intact; office rows carry ``images: []`` with
+    ``format`` provenance (a DOCX's images are real and are not
+    served). Identity: ``(page_index, paint_order)`` pairs with
+    ``page_layout``'s ``images`` — the two surfaces are separate opens,
+    so a changed file between the calls breaks the pairing.
+    ``pages=``/``backend=``/``password=``/``max_bytes=`` and the
+    refusal order are ``page_layout``'s exactly. Runs GIL-free. A
+    malformed PDF can crash the process: sandbox untrusted PDFs
+    (docs/documents.md, SECURITY.md)."""
+
+def page_text_chars(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = None,
+) -> list[PageCharsData]:
+    """The char-boxes probe: per PDF page, the page's per-character
+    boxes from the cached SPAN parse (``extract_spans`` ->
+    ``TextSpan::to_chars()`` per span — never ``extract_chars``, which
+    is raw-only and includes content the span path drops at the crop),
+    a flat list in reading order. Each char: ``char`` (one Unicode
+    scalar — code-point indexing), ``bbox`` — ``(x, y, w, h)`` points,
+    bottom-left origin, **y is the BASELINE** (the em-box law; descenders
+    hang BELOW the box's bottom edge), ``span_index`` (into
+    ``page_layout``'s ``spans`` — the join law: the chars of span s join
+    to ``spans[s].text`` EXACTLY), ``index_in_span`` (code points:
+    chars ``[i, j)`` of span s ground the substring
+    ``spans[s].text[i:j]``; the whole-span box is the SPAN's own mapped
+    box, never the char union), ``wmode`` (0 horizontal, 1 vertical — a
+    vertical run's char boxes are the engine's flattened fiction,
+    displaced one advance LEFT of their origins and stacked along x:
+    measured; never pretend they are highlight-able), and
+    ``x_measured`` (span-constant: ``True`` = the engine's measured
+    origins — drift = the 0.5 pt tolerance + sub-point interpolation;
+    ``False`` = the prefix-sum/uniform arm — the TJ-kerning drift class,
+    bounded only by measurement; a highlight box built from
+    ``x_measured=False`` chars is APPROXIMATE). On a page whose
+    rotation the engine applied to a span, the chars are derived from
+    the span's unmapped box and mapped forward (the mapped frame's
+    glyph order runs right-to-left — the derivation otherwise lands
+    every box mirrored, ~35 pt off, measured). A page whose box read
+    fails is ``geometry=None`` + ``chars: []``; a content failure is
+    ``chars: []`` with the geometry intact; office rows carry
+    ``chars: []`` with ``format`` provenance. ``pages=``/``backend=``/
+    ``password=``/``max_bytes=`` and the refusal order are
+    ``page_layout``'s exactly. Runs GIL-free. A malformed PDF can crash
+    the process: sandbox untrusted PDFs (docs/documents.md,
     SECURITY.md)."""
 
 class DocumentStructure:

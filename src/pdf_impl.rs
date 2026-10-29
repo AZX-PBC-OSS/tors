@@ -143,10 +143,15 @@
 //! upstream defect and stays out of every run list until 0.3.79 publishes.
 
 use pdf_oxide::converters::ConversionOptions;
+use pdf_oxide::decoders::CcittParams;
 use pdf_oxide::document::PdfDocument;
 // Public: the payload crate's error mapping and `documents_impl`'s
 // `PagesError` both name this type through `pdf_impl`.
 pub use pdf_oxide::Error as PdfError;
+// Public: `ImageBytes::Raw`'s `pixel_format` field names this type, so
+// the payload crate's binding needs it reachable through `pdf_impl`.
+pub use pdf_oxide::extractors::images::PixelFormat;
+use pdf_oxide::extractors::images::{ColorSpace, ImageData, PdfFilter, PdfImageHandle};
 use pdf_oxide::extractors::{PageLabelExtractor, PageLabelRange, PageLabelStyle};
 use pdf_oxide::{AnnotationSubtype, LinkAction};
 
@@ -2162,6 +2167,1053 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
         geometry,
         tables,
         tables_refused: false,
+    }
+}
+
+// --- the page_images probe (spec: issue #205; the bytes behind the
+// --- handles, with the F1 byte-source ruling) --------------------------------
+
+/// The per-image decode ceiling (R7): 256 MiB, the engine's own
+/// flate/unpack/Indexed per-stream ceiling — the cap the engine would
+/// enforce, enforced here as ARITHMETIC before the labour, as a typed
+/// entry instead of an error string. Overridable per call
+/// ([`page_images`]'s `max_image_bytes=`); a caller raising it past the
+/// engine's env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` knob (flate/unpack/
+/// Indexed) merely moves the refusal into the engine's own error — the
+/// docstring says so.
+pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The per-call cumulative decode ceiling (R7): 512 MiB, the family's
+/// `OXIDE_MAX_TOTAL_DECOMPRESSED` / `MAX_INPUT_READ` number. The budget
+/// checks each image's ESTIMATE before its decode and accumulates the
+/// ACTUALS after; the refusal is the typed SizeCap, never a truncation
+/// (a truncated image is a wrong image with no marker).
+pub const MAX_CALL_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The container byte's format (R5): a `Container` arm names what a
+/// downstream tool receives. `Jpeg` — the DCT passthrough (a real JPEG
+/// file, decryption applied); `Jp2` — a bare JPX stream whose bytes open
+/// with the 12-byte JP2 signature box; `J2kCodestream` — a bare JPX
+/// stream that opens with the SOC marker instead (a raw codestream, no
+/// JP2 container boxes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerFormat {
+    /// The DCT container passthrough (the engine's `ImageData::Jpeg`).
+    Jpeg,
+    /// A bare JPX stream that begins with the JP2 signature box
+    /// (`00 00 00 0C 6A 50 20 20 0D 0A 87 0A`) — a JP2 file.
+    Jp2,
+    /// A bare JPX stream that begins with the SOC marker (`FF 4F`) — a
+    /// bare JPEG 2000 codestream.
+    J2kCodestream,
+}
+
+/// Which side refused: the one image (its own chain's estimate over the
+/// per-image cap) or the call (the cumulative budget the image would
+/// push past) (R7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapScope {
+    /// The image's own estimate exceeds the per-image ceiling.
+    Image,
+    /// Serving this image would push the call's cumulative total past
+    /// the per-call budget.
+    Call,
+}
+
+/// The typed decode failure (`ImageBytes::Error`'s payload): the engine's
+/// decode() failure (`Decode`), a filter this build cannot decode
+/// (`Unsupported` — retrying cannot fix it; R2), or this seam's own
+/// ceiling refusing BEFORE the labour (`SizeCap` — with the numbers a
+/// bare limit cannot be acted on; R7).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImageDataError {
+    /// The engine's decode() failed. The payload is the error's Display —
+    /// the same string a `PagesError::Pdf` would carry.
+    Decode(String),
+    /// A filter this build cannot decode (the shipped wheel: JBIG2/JPX,
+    /// feature-gated — R2). The payload is the engine's own
+    /// feature-naming string verbatim, or the composed refusal F1 rules
+    /// for an encrypted image whose container cannot be served.
+    Unsupported(String),
+    /// The seam's ceiling refused before decoding. `limit_bytes` is the
+    /// ceiling that fired (`Image`: the per-image cap — the default
+    /// [`DEFAULT_MAX_IMAGE_BYTES`] or the `max_image_bytes=` override;
+    /// `Call`: [`MAX_CALL_IMAGE_BYTES`]); `needed_bytes` is the estimate
+    /// that exceeds it (`Image`), or the call's cumulative total had the
+    /// image been served (`Call`).
+    SizeCap {
+        /// Which ceiling fired.
+        scope: CapScope,
+        /// The ceiling, in bytes.
+        limit_bytes: u64,
+        /// The bytes the work needed (`Image`: this image's estimate;
+        /// `Call`: the spent total plus this image's estimate).
+        needed_bytes: u64,
+    },
+}
+
+/// One `page_images` entry's opt-in decode result — the ALWAYS-PRESENT
+/// four-arm sum (R6): `NotRequested` (no decode asked, or a
+/// containers-only selection that this image's filter chain does not
+/// end in — the entry's `filters` say which), `Container` (the engine's
+/// container passthrough, decryption included), `Raw` (decoded samples
+/// that describe themselves), or `Error` (a typed refusal: decode,
+/// unsupported, or size cap). Replaces `Option<Result<..>>`, whose
+/// `None` would mean both "not requested" and "requested but not a
+/// container" — two different facts, one value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImageBytes {
+    /// No bytes: no decode was requested, or a containers-only selection
+    /// left this image out (its `filters` do not end in a standalone
+    /// container format). Nothing was decoded for this entry.
+    NotRequested,
+    /// The container bytes: the engine's decode() passthrough — the
+    /// file's bytes after the other filters are removed and DECRYPTION
+    /// is applied (the engine's `ImageData::Jpeg` for any chain with a
+    /// DCT filter; the F1-sniffed stream bytes for a bare JPX chain).
+    /// [R1] NEVER `raw_compressed_bytes()` for a DCT image: on an
+    /// unlocked encrypted PDF that returns CIPHERTEXT (measured: RC4-40,
+    /// 301 bytes `c6 da e1 b8 …` vs decode()'s `ff d8 ff e0 …`), and
+    /// there is no public per-stream decrypt entry point
+    /// (`decode_stream_with_encryption` is `pub(crate)`). A bare JPX
+    /// chain is the one carve-out (F1): its container bytes come from
+    /// `raw_compressed_bytes()` ONLY when they cannot be ciphertext —
+    /// the image is inline (its bytes ride the already-decrypted content
+    /// stream) or the document is unencrypted.
+    Container {
+        /// The container file's bytes (a valid file for a downstream
+        /// tool; no re-encode, no pixel decode).
+        bytes: Vec<u8>,
+        /// What the bytes are ([`ContainerFormat`]).
+        container: ContainerFormat,
+    },
+    /// Decoded samples (the engine's `ImageData::Raw`). The payload
+    /// describes ITSELF (R6): the engine's JPX path (a `rendering`-build
+    /// arm) can return fewer samples than the dictionary advertises, and
+    /// the Indexed→RGB expansion, the 16→8 reduction and the sub-byte
+    /// unpack all rewrite the buffer — so `width_px`/`height_px` are the
+    /// DECODED image's own dims, `components`/`bits_per_component` the
+    /// buffer's true stride, and the entry's dictionary dims
+    /// (`width_px`/`height_px`/`bits_per_component` on the
+    /// [`PageImageEntry`]) stay the DICTIONARY's (R22) — a consumer
+    /// computing a stride reads the payload's fields, never the entry's.
+    Raw {
+        /// The sample bytes.
+        pixels: Vec<u8>,
+        /// The decoded image's width (the dictionary's on every
+        /// reachable path of this build).
+        width_px: u32,
+        /// The decoded image's height (as above).
+        height_px: u32,
+        /// The buffer's component count (the resolved color space's;
+        /// the Indexed case names the base's — the expansion's stride.
+        /// The engine's `DeviceN` answer is its parser's flat 4 even
+        /// when the real ink count differs — the buffer LENGTH is the
+        /// truth there).
+        components: u8,
+        /// The buffer's bits per component: 8 whenever a transform
+        /// (sub-byte unpack, /Decode fold, 16→8 reduction) rewrote the
+        /// samples; the dictionary's own value when the buffer stayed
+        /// packed (CCITT, Lab, a space whose component count is not
+        /// 1/3/4).
+        bits_per_component: u8,
+        /// The engine's display tag for the buffer (`RGB`/`Grayscale`/
+        /// `CMYK`) — a 1/3/4-byte tag that can LIE about the stride
+        /// (R16: Lab → `RGB` over Lab samples; an `ICCBased(2)` → `RGB`
+        /// over a packed 2-component buffer): `components` and
+        /// `bits_per_component` are the honest stride.
+        pixel_format: PixelFormat,
+        /// Whether the samples are still the values the image
+        /// dictionary's own entries are expressed in (R25: TRUE is the
+        /// COMMON case — an 8-bpc image with no non-default /Decode in a
+        /// 1/3/4-component space keeps it; it means "nothing transformed
+        /// this buffer", never "this is exotic"). The engine's Indexed
+        /// expansion, /Decode fold, 16→8 reduction and sub-byte unpack
+        /// each clear it.
+        samples_are_raw: bool,
+        /// Whether a non-default `/Decode` array is already mapped into
+        /// the samples — strictly narrower than `!samples_are_raw` (R6's
+        /// un-collapsed pair): a consumer that applies `/Decode` itself
+        /// (separation-plate routing) must read this one.
+        decode_folded_in: bool,
+        /// Whether an ICC profile rode the decode — NAME-ONLY (R23):
+        /// the profile's bytes are deliberately not carried (they can be
+        /// hundreds of KiB and are shared per document); the space is
+        /// named by the entry's `color_space`/`indexed_base`.
+        icc: bool,
+        /// The CCITT parameters the packed codestream cannot be decoded
+        /// without (R10/F6: decode() returns the packed stream VERBATIM
+        /// for a CCITT image — measured, in == out — so a consumer has
+        /// no PDF to read /DecodeParms from): all seven fields the
+        /// engine carries. `None` for every non-CCITT image.
+        ccitt: Option<CcittParams>,
+    },
+    /// The decode was asked and failed — a VISIBLE TYPED ENTRY (never a
+    /// silently missing image): every handle field stays intact, the
+    /// image's siblings stay intact.
+    Error(ImageDataError),
+}
+
+/// One `page_images` image: the handle's evidence always, the bytes only
+/// under opt-in decode. Identity is (page_index, paint_order) — the same
+/// key `page_layout`'s `images` list orders by (the same enumeration, the
+/// same transform; verified deterministic — the walk is content-stream
+/// order, the XObject dict is only looked up, never iterated).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageImageEntry {
+    /// The image's axis-aligned box in the page's DECLARED RENDER SPACE
+    /// ([`map_box_forward`], `(x, y, w, h)`, y-up) — the SAME call
+    /// `page_layout` gives `LayoutImage` (image handles are always raw
+    /// user space; the engine never /Rotate-maps them — probe P7), so
+    /// the forward rule applies directly. [R11] `Option`: a page whose
+    /// box cannot be read still paints its images, and the byte seam
+    /// must not drop bytes for a frame reason (T1) — `None` = no frame
+    /// to map into; the bytes (when decoded) are still served.
+    pub bbox: Option<(f32, f32, f32, f32)>,
+    /// XObject /Width (the dictionary's — see [`ImageBytes::Raw`] for
+    /// the payload's own dims).
+    pub width_px: u32,
+    /// XObject /Height (the dictionary's).
+    pub height_px: u32,
+    /// The CTM angle, `atan2`-normalized to [0, 360) — evidence, not an
+    /// instruction ([`LayoutImage::rotation_degrees`]' law, verbatim).
+    pub rotation_degrees: f32,
+    /// Page-local paint-order identity (u32, the [`page_layout`] clamp).
+    pub paint_order: u32,
+    /// The resolved color space, a stable spelled name: `"DeviceGray" |
+    /// "DeviceRGB" | "DeviceCMYK" | "Indexed" | "CalGray" | "CalRGB" |
+    /// "Lab" | "ICCBased(n)" | "Separation" | "DeviceN" | "Pattern"`.
+    /// For an Indexed image this names the INDEX space;
+    /// `indexed_base` names the base.
+    pub color_space: String,
+    /// Whether the resolved `color_space` is engine-verified (R8): the
+    /// engine falls back to `DeviceRGB` when a dictionary's /ColorSpace
+    /// is absent or unparseable (measured), and decode() then fails on
+    /// that same dictionary — a `DeviceRGB` entry whose decode was NOT
+    /// attempted and succeeded cannot be distinguished from the default,
+    /// so the flag reads false there (unverified), and true for any
+    /// space the fallback cannot produce or a decode that succeeded
+    /// (a decode re-parses /ColorSpace and cannot succeed on the
+    /// defaulted dictionary). A decode failure on a `DeviceRGB` entry
+    /// keeps the flag false — conservative: the space is unverified
+    /// whether the failure is the colorspace's or the stream's.
+    pub color_space_declared: bool,
+    /// For an Indexed image, the de-indexed base space's name; `None`
+    /// otherwise (and when the base itself could not be parsed).
+    pub indexed_base: Option<String>,
+    /// /BitsPerComponent — the DICTIONARY's value (R22), for
+    /// `page_layout` parity; the buffer's own depth rides
+    /// [`ImageBytes::Raw`].
+    pub bits_per_component: u8,
+    /// /Length — the compressed stream's size in bytes (an inline
+    /// image's: the stored bytes between ID/EI).
+    pub byte_size_compressed: u64,
+    /// The filter chain, outermost first, spelled (`"FlateDecode"`,
+    /// …) — `PdfFilter::Other(k)` keeps its raw PDF name (R20: spilling
+    /// "Other" would lose the filter that explains the bytes).
+    pub filters: Vec<String>,
+    /// Inline (BI/ID/EI) vs an XObject Do. Load-bearing beyond evidence:
+    /// F1's JPX container rule keys on it (an inline image's raw bytes
+    /// ride the already-decrypted content stream).
+    pub is_inline: bool,
+    /// The opt-in decode result — the always-present four-arm sum (R6).
+    pub data: ImageBytes,
+}
+
+/// One `page_images` entry: the page's image metadata and — only where
+/// `decode` asked and the decode succeeded — the bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageImagesData {
+    /// The 0-based page this entry describes (the pages= parallel-output
+    /// law).
+    pub page_index: usize,
+    /// The resolved format's vocabulary name (page_layout's provenance
+    /// law).
+    pub format: String,
+    /// The page's declared render box (page_layout's `geometry`, same
+    /// None law: no frame → no mapped boxes — but [R11] the images are
+    /// still enumerated, their `bbox` None where no frame exists).
+    pub geometry: Option<PageBox>,
+    /// The page's images, paint order — the same order `page_layout`'s
+    /// `images` lists (same enumeration, same transform).
+    pub images: Vec<PageImageEntry>,
+}
+
+/// The `decode=` mode (R3 as the prompt amends it): `None` = the
+/// handle-evidence-only mode (nothing decoded, `data`
+/// `NotRequested` everywhere); `Container` = decode, containers only —
+/// images whose chain the engine classifies as a container (a DCT
+/// filter anywhere, or a bare JPX stream) serve their container bytes,
+/// everything else stays `NotRequested`; `Pixels` = decode everything to
+/// the engine's own classification (`Raw`, or the typed errors).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageDecode {
+    /// Metadata only; decodes nothing.
+    None,
+    /// Decode, containers only (a SELECTION, not a post-filter).
+    Container,
+    /// Decode everything to the engine's classification.
+    Pixels,
+}
+
+/// The filter's stable spelled name ([`PageImageEntry::filters`]).
+/// `PdfFilter::Other(k)` keeps the raw PDF name (R20).
+fn filter_name(filter: &PdfFilter) -> String {
+    match filter {
+        PdfFilter::DCTDecode => "DCTDecode".to_string(),
+        PdfFilter::JPXDecode => "JPXDecode".to_string(),
+        PdfFilter::FlateDecode => "FlateDecode".to_string(),
+        PdfFilter::LZWDecode => "LZWDecode".to_string(),
+        PdfFilter::CCITTFaxDecode => "CCITTFaxDecode".to_string(),
+        PdfFilter::JBIG2Decode => "JBIG2Decode".to_string(),
+        PdfFilter::ASCIIHexDecode => "ASCIIHexDecode".to_string(),
+        PdfFilter::ASCII85Decode => "ASCII85Decode".to_string(),
+        PdfFilter::RunLengthDecode => "RunLengthDecode".to_string(),
+        PdfFilter::Crypt => "Crypt".to_string(),
+        PdfFilter::Other(name) => name.clone(),
+        // PdfFilter is #[non_exhaustive]: a future variant's Debug IS its
+        // name (every current variant's Debug spells the filter name).
+        other => format!("{other:?}"),
+    }
+}
+
+/// The resolved color space's stable spelled name
+/// ([`PageImageEntry::color_space`]).
+fn color_space_name(color_space: &ColorSpace) -> String {
+    match color_space {
+        ColorSpace::DeviceRGB => "DeviceRGB".to_string(),
+        ColorSpace::DeviceGray => "DeviceGray".to_string(),
+        ColorSpace::DeviceCMYK => "DeviceCMYK".to_string(),
+        ColorSpace::Indexed => "Indexed".to_string(),
+        ColorSpace::CalGray => "CalGray".to_string(),
+        ColorSpace::CalRGB => "CalRGB".to_string(),
+        ColorSpace::Lab => "Lab".to_string(),
+        ColorSpace::ICCBased(n) => format!("ICCBased({n})"),
+        ColorSpace::Separation => "Separation".to_string(),
+        ColorSpace::DeviceN => "DeviceN".to_string(),
+        ColorSpace::Pattern => "Pattern".to_string(),
+    }
+}
+
+/// The JP2 signature box (ISO/IEC 15944-1 / ITU-T T.805 §I.5.1): a
+/// 12-byte box, length 12 + type `jP  ` + the 0x0D0A870A break.
+const JP2_SIGNATURE_BOX: [u8; 12] = [
+    0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+];
+
+/// The JPEG 2000 SOC (Start Of Codestream) marker.
+const SOC_MARKER: [u8; 2] = [0xFF, 0x4F];
+
+/// F1's sniff: is a bare JPX stream's stored bytes a standalone FILE a
+/// downstream tool can open — the JP2 signature box (`Jp2`) or a bare
+/// SOC codestream (`J2kCodestream`)? `None` = neither (serve the typed
+/// error, never a file no tool can open).
+fn sniff_jpx_container(bytes: &[u8]) -> Option<ContainerFormat> {
+    if bytes.len() >= JP2_SIGNATURE_BOX.len()
+        && bytes[..JP2_SIGNATURE_BOX.len()] == JP2_SIGNATURE_BOX
+    {
+        Some(ContainerFormat::Jp2)
+    } else if bytes.len() >= SOC_MARKER.len() && bytes[..SOC_MARKER.len()] == SOC_MARKER {
+        Some(ContainerFormat::J2kCodestream)
+    } else {
+        None
+    }
+}
+
+/// The pre-decode byte estimate for one handle's decode — chain-aware
+/// (F7): the buffer the decode will produce (or the container it will
+/// pass through), computed from the handle's dictionary alone. The
+/// engine's own measured transforms, mirrored:
+///
+/// - **DCT anywhere** (the engine's `has_dct` rule): the decode returns
+///   the CONTAINER bytes — the estimate is the stream's own length.
+/// - **Bare JPX**: the reachable arm on this build is the container
+///   (the stream's own bytes — F1); a `jpeg2000`-feature build decodes
+///   to samples whose cost the engine's own ceilings govern
+///   (build-dependent, documented).
+/// - **CCITT** stays packed: the packed-bit estimate (1-bit fax).
+/// - **Lab / a space whose component count is not 1/3/4** stays packed
+///   at the dictionary depth (`ceil(bpc/8)` bytes per component).
+/// - **Indexed** expands to the BASE space's component count (measured:
+///   an 8×8 8-bit Indexed image → 192 RGB bytes from 64 index bytes).
+/// - **16-bit** reduces to one byte per component (measured: a 2×2
+///   16-bit image → 4 bytes, bpc 8).
+/// - **Sub-byte** unpacks to one byte per component.
+///
+/// The estimate feeds the caps BEFORE the labour (R7); the cumulative
+/// budget accumulates ACTUALS after each decode.
+fn decode_estimate(handle: &PdfImageHandle<'_>) -> u64 {
+    let filters: Vec<String> = handle.filter_chain.iter().map(filter_name).collect();
+    // DCT anywhere: the decode returns the container, never pixels.
+    if filters.iter().any(|name| name == "DCTDecode") {
+        return handle.byte_size_compressed;
+    }
+    // Bare JPX: the container path's cost is the stream itself (F1).
+    if filters.len() == 1 && filters[0] == "JPXDecode" {
+        return handle.byte_size_compressed;
+    }
+    let dims = u64::from(handle.width.max(1)) * u64::from(handle.height.max(1));
+    let is_ccitt = filters.iter().any(|name| name == "CCITTFaxDecode");
+    if is_ccitt {
+        // Stays packed: 1-bit fax samples, the packed-bit estimate.
+        return dims.div_ceil(8);
+    }
+    // The component count the decode's buffer carries: Indexed expands to
+    // the BASE's (an unparseable base cannot decode — the estimate floors
+    // at the index samples' own 1).
+    let components = if handle.color_space == ColorSpace::Indexed {
+        handle
+            .indexed_base()
+            .map(|base| base.components() as u64)
+            .unwrap_or(1)
+    } else {
+        handle.color_space.components() as u64
+    };
+    // The pixel-format stride the decode writes (the engine's
+    // color_space_to_pixel_format table): a space whose component count
+    // is not the stride's 1/3/4 stays packed (the engine's
+    // `representable` gate), as does Lab (samples not confined to [0,1]).
+    let stride = match handle.color_space {
+        ColorSpace::DeviceGray | ColorSpace::CalGray | ColorSpace::Separation => 1,
+        ColorSpace::DeviceRGB | ColorSpace::CalRGB | ColorSpace::Lab => 3,
+        ColorSpace::DeviceCMYK => 4,
+        ColorSpace::ICCBased(n) => match n {
+            1 => 1,
+            4 => 4,
+            // The engine's table: every other N maps RGB (3).
+            _ => 3,
+        },
+        ColorSpace::Indexed | ColorSpace::Pattern => 3,
+        ColorSpace::DeviceN => 4,
+    };
+    let representable = components == stride && !matches!(handle.color_space, ColorSpace::Lab);
+    if !representable {
+        // Packed at the dictionary depth.
+        return dims * components * u64::from(handle.bits_per_component.div_ceil(8));
+    }
+    // Unpacked/reduced to one byte per component (8 bpc unchanged, 16→8
+    // reduced, sub-byte unpacked, Indexed expanded).
+    dims * components
+}
+
+/// Map the engine's decode() error to the typed arm: a filter this build
+/// cannot decode is `Unsupported` (the engine's feature-naming string
+/// verbatim — R2's shipped-build pin), everything else is `Decode` (the
+/// error's Display).
+fn image_error(error: PdfError) -> ImageDataError {
+    match &error {
+        PdfError::UnsupportedFilter(payload) => ImageDataError::Unsupported(payload.clone()),
+        other => ImageDataError::Decode(other.to_string()),
+    }
+}
+
+/// One image's decode, under the caps (R7) and the F1 byte-source ruling:
+/// the containers-only selection first, then the chain-aware pre-decode
+/// estimate against the per-image cap and the call's cumulative budget,
+/// then the decode itself. `spent` accumulates the ACTUALS (container
+/// bytes or pixels) of every successful decode.
+fn image_bytes_for(
+    handle: &PdfImageHandle<'_>,
+    doc: &PdfDocument,
+    decode: ImageDecode,
+    max_image_bytes: u64,
+    spent: &mut u64,
+) -> ImageBytes {
+    let filters: Vec<String> = handle.filter_chain.iter().map(filter_name).collect();
+    let has_dct = filters.iter().any(|name| name == "DCTDecode");
+    let bare_jpx = filters.len() == 1 && filters[0] == "JPXDecode";
+    // The containers-only selection: images whose chain the engine
+    // classifies as a container (DCT anywhere — the engine's has_dct
+    // rule) or a bare JPX stream; the rest keep `NotRequested` (the
+    // `filters` list says why).
+    if decode == ImageDecode::Container && !has_dct && !bare_jpx {
+        return ImageBytes::NotRequested;
+    }
+
+    // The caps (R7): arithmetic BEFORE the labour, typed refusals, never
+    // truncation.
+    let estimate = decode_estimate(handle);
+    if estimate > max_image_bytes {
+        return ImageBytes::Error(ImageDataError::SizeCap {
+            scope: CapScope::Image,
+            limit_bytes: max_image_bytes,
+            needed_bytes: estimate,
+        });
+    }
+    if spent.saturating_add(estimate) > MAX_CALL_IMAGE_BYTES {
+        return ImageBytes::Error(ImageDataError::SizeCap {
+            scope: CapScope::Call,
+            limit_bytes: MAX_CALL_IMAGE_BYTES,
+            needed_bytes: spent.saturating_add(estimate),
+        });
+    }
+
+    match handle.decode() {
+        Ok(image) => match image.data() {
+            // The engine's container passthrough (DCT anywhere — the
+            // engine's own classification): decryption applied, no pixel
+            // decode, no re-encode (F1: NEVER raw_compressed_bytes).
+            ImageData::Jpeg(bytes) => {
+                *spent = spent.saturating_add(bytes.len() as u64);
+                ImageBytes::Container {
+                    bytes: bytes.clone(),
+                    container: ContainerFormat::Jpeg,
+                }
+            }
+            ImageData::Raw { pixels, format } => {
+                *spent = spent.saturating_add(pixels.len() as u64);
+                // The buffer's component count: the resolved space's —
+                // EXCEPT Indexed, whose expansion wrote the BASE space's
+                // samples while the image's own space field stays
+                // `Indexed` (components() == 1): the base's count is the
+                // buffer's stride.
+                let components = if image.color_space() == &ColorSpace::Indexed {
+                    handle
+                        .indexed_base()
+                        .map(|base| base.components())
+                        .unwrap_or(1)
+                } else {
+                    image.color_space().components()
+                };
+                ImageBytes::Raw {
+                    pixels: pixels.clone(),
+                    width_px: image.width(),
+                    height_px: image.height(),
+                    components: u8::try_from(components).unwrap_or(u8::MAX),
+                    bits_per_component: image.bits_per_component(),
+                    pixel_format: *format,
+                    samples_are_raw: image.samples_are_raw(),
+                    decode_folded_in: image.decode_folded_in(),
+                    icc: image.icc_profile().is_some(),
+                    ccitt: image.ccitt_params().cloned(),
+                }
+            }
+        },
+        Err(error) => {
+            // F1's bare-JPX container — the CONTAINER mode's path: the
+            // shipped build cannot decode JPX at all (R2 —
+            // feature-gated), so the container is the only JPX content
+            // this surface can ever serve — sniffed from the stream's
+            // stored bytes, which are only readable when they cannot be
+            // ciphertext: an inline image's bytes ride the
+            // already-decrypted content stream, and an unencrypted
+            // document has no ciphertext to serve (R1:
+            // `raw_compressed_bytes()` returns `Object::Stream.data`
+            // with NO decryption). Pixels mode does NOT sniff: it serves
+            // the engine's own classification verbatim (the shipped
+            // build's Unsupported; a `jpeg2000` build's Raw).
+            if decode == ImageDecode::Container && bare_jpx {
+                if handle.is_inline || !doc.is_encrypted() {
+                    return match handle.raw_compressed_bytes() {
+                        Ok(bytes) => match sniff_jpx_container(&bytes) {
+                            Some(container) => {
+                                *spent = spent.saturating_add(bytes.len() as u64);
+                                ImageBytes::Container { bytes, container }
+                            }
+                            None => ImageBytes::Error(ImageDataError::Decode(
+                                "the JPX stream is neither a JP2 file (signature box) nor a \
+                                 bare J2K codestream (SOC marker)"
+                                    .to_string(),
+                            )),
+                        },
+                        Err(error) => ImageBytes::Error(image_error(error)),
+                    };
+                }
+                // An encrypted, non-inline bare-JPX image: the container
+                // cannot be served (its raw stream bytes ARE ciphertext)
+                // and this build cannot decode the filter — the refusal
+                // carries the engine's feature-naming string verbatim
+                // AND names the encrypted-document cause (F1).
+                return ImageBytes::Error(ImageDataError::Unsupported(format!(
+                    "{error}; the JPX container cannot be served because the document \
+                     is encrypted (the raw stream bytes would be ciphertext — only a \
+                     pixel decode decrypts them)"
+                )));
+            }
+            ImageBytes::Error(image_error(error))
+        }
+    }
+}
+
+/// The image-bytes probe: one open, and per requested page the page's
+/// image handles ([`page_image_handles`] — the unfiltered Phase-1 walk:
+/// no 8×8 gate, no max-pixels filter, paint order; NEVER
+/// `extract_images`, which silently drops sub-8×8 images and swallows
+/// per-image decode errors) with each image's evidence, in the page's
+/// declared render space, plus — under `decode` — the bytes behind the
+/// handles ([`PageImageEntry::data`]).
+///
+/// `decode` (R3 as amended): [`ImageDecode::None`] decodes nothing (the
+/// cheap law); [`ImageDecode::Container`] decodes only the images whose
+/// chain the engine classifies as a container (a DCT filter anywhere →
+/// [`ContainerFormat::Jpeg`] via decode() — the F1 byte-source ruling;
+/// a bare JPX stream → the F1 sniff, [`ContainerFormat::Jp2`] /
+/// [`ContainerFormat::J2kCodestream`]); [`ImageDecode::Pixels`] decodes
+/// every image to the engine's own classification (Raw, or the typed
+/// errors — on the shipped build a JBIG2/JPX decode is the engine's
+/// `Unsupported` verbatim, feature-gated (R2); a `rendering`/`jpeg2000`
+/// build decodes them: build-dependent, documented).
+///
+/// Caps (R7): 256 MiB per image (chain-aware pre-decode estimate —
+/// [`decode_estimate`]), 512 MiB per call cumulative (estimates checked
+/// before each decode, actuals accumulated after), over-capped images
+/// typed `SizeCap{scope, limit, needed}` — refused, never truncated.
+/// `max_image_bytes` overrides the per-image ceiling; raising it past
+/// the engine's env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` (the flate/unpack/
+/// Indexed ceilings it governs) cannot make the ENGINE decode more — the
+/// over-ceiling refusal just moves into the engine's own error.
+///
+/// Honesty laws, stated where the engine leaves them (R8): an image
+/// XObject with a missing or non-positive /Width·/Height yields NO
+/// handle at all (measured: 0 handles — the surface cannot see it); a
+/// Form-XObject subtree's error is dropped by the engine's own
+/// `if let Ok` (document.rs:23828); a missing or unparseable
+/// /ColorSpace reports `DeviceRGB` with `color_space_declared: false`.
+/// A caller who needs certainty about the paint count must compare
+/// `images.len()` with the render's — this surface cannot prove
+/// completeness beyond the three gaps above.
+///
+/// Failure semantics: a page whose box read fails still enumerates
+/// ([R11] — the bytes must not drop for a frame reason), its entries'
+/// `bbox` `None`; a page whose CONTENT stream fails to parse is
+/// `images: []`, geometry intact (the engine's empty-on-error law,
+/// document.rs:23771); a decode failure is a VISIBLE TYPED ENTRY
+/// (`Error(…)`), siblings intact; `pages=` is page_layout's exact rule
+/// and error strings; encrypted documents fail closed at the [`open`]
+/// door check. The identity key (page_index, paint_order) pairs with
+/// `page_layout`'s `images` list — the two surfaces are separate opens
+/// over the bytes, so a changed file between the calls breaks the
+/// pairing (R12: nothing is cached across opens; say so when joining).
+///
+/// Runs under [`with_depth_headroom`], like every entry point.
+pub fn page_images(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+    format: &'static str,
+    decode: ImageDecode,
+    max_image_bytes: Option<u64>,
+) -> Result<Vec<PageImagesData>, PagesError> {
+    let selected = pages.map(<[usize]>::to_vec);
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            page_images_pass(
+                bytes,
+                selected.as_deref(),
+                password.as_deref(),
+                format,
+                decode,
+                max_image_bytes,
+            )
+        },
+        PagesError::Pdf,
+    )
+}
+
+/// The pass [`page_images`] runs under [`with_depth_headroom`] — the
+/// selection normalization shared with [`page_layout_pass`] (so the error
+/// strings are byte-identical), the per-page fold, and the ONE cumulative
+/// budget threaded through it (R7: 512 MiB per call, actuals).
+#[allow(clippy::too_many_arguments)]
+fn page_images_pass(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+    format: &'static str,
+    decode: ImageDecode,
+    max_image_bytes: Option<u64>,
+) -> Result<Vec<PageImagesData>, PagesError> {
+    let doc = open(bytes, password).map_err(PagesError::Pdf)?;
+    let count = doc.page_count().map_err(PagesError::Pdf)?;
+    let selected = match pages {
+        None => (0..count).collect::<Vec<usize>>(),
+        Some(pages) => {
+            let selected = normalize_selection(pages)?;
+            validate_selection_range(&selected, count)?;
+            selected
+        }
+    };
+    let max_image_bytes = max_image_bytes.unwrap_or(DEFAULT_MAX_IMAGE_BYTES);
+    let mut spent: u64 = 0;
+    Ok(selected
+        .iter()
+        .map(|&page| page_images_one(&doc, page, format, decode, max_image_bytes, &mut spent))
+        .collect())
+}
+
+/// One page's images ([`page_images_pass`]'s per-page step). The frame
+/// reads feed the `PageBox` build and the transform — and NEVER gate the
+/// enumeration (R11): a failed read leaves `geometry: None`/`bbox: None`
+/// and the handles still listed.
+fn page_images_one(
+    doc: &PdfDocument,
+    page: usize,
+    format: &str,
+    decode: ImageDecode,
+    max_image_bytes: u64,
+    spent: &mut u64,
+) -> PageImagesData {
+    // The frame: any error here (the page's own get_page walk included)
+    // is a `None` — and [R11] the enumeration continues, the entries'
+    // bbox `None` (no frame to map into; the bytes are still served).
+    let media = doc.get_page_media_box(page).ok();
+    let visible = doc.get_page_visible_box(page).ok();
+    let rotation = doc.get_page_rotation(page).ok();
+    let geometry = match (media, visible, rotation) {
+        (Some(media), Some(visible), Some(rotation)) => {
+            PageBox::from_visible_box(visible, rotation, media)
+        }
+        _ => None,
+    };
+
+    // The handles: the engine's unfiltered walk (T1). A content-stream
+    // failure is the engine's empty-on-error law: `images: []`, geometry
+    // intact — never an error.
+    let handles = doc.page_image_handles(page).unwrap_or_default();
+    let images = handles
+        .iter()
+        .map(|handle| {
+            // Image handles are ALWAYS raw user space (the engine never
+            // /Rotate-maps them — probe P7): the forward rule directly.
+            let bbox = match (visible, rotation) {
+                (Some(visible), Some(rotation)) => Some(map_box_forward(
+                    (
+                        handle.bbox.x,
+                        handle.bbox.y,
+                        handle.bbox.width,
+                        handle.bbox.height,
+                    ),
+                    visible,
+                    rotation,
+                )),
+                _ => None,
+            };
+            // The decode runs ONCE (when the mode asks): its arm feeds
+            // both the entry's data and the color-space verification
+            // (a decode re-parses /ColorSpace and cannot succeed on the
+            // defaulted dictionary).
+            let data = match decode {
+                ImageDecode::None => ImageBytes::NotRequested,
+                ImageDecode::Container | ImageDecode::Pixels => {
+                    image_bytes_for(handle, doc, decode, max_image_bytes, spent)
+                }
+            };
+            let color_space_declared = if handle.color_space != ColorSpace::DeviceRGB {
+                // The engine's fallback can produce nothing else: any
+                // other space came from a parsed declaration.
+                true
+            } else {
+                match &data {
+                    // A successful decode verifies the declaration. The
+                    // sniff path's Jp2/J2K container is read from the raw
+                    // stream bytes with the decode FAILED — the space is
+                    // unverified there; so is every NotRequested/Error
+                    // arm (conservative false — R8's guess, marked).
+                    ImageBytes::Container {
+                        container: ContainerFormat::Jpeg,
+                        ..
+                    }
+                    | ImageBytes::Raw { .. } => true,
+                    _ => false,
+                }
+            };
+            PageImageEntry {
+                bbox,
+                width_px: handle.width,
+                height_px: handle.height,
+                rotation_degrees: handle.rotation_degrees,
+                paint_order: u32::try_from(handle.paint_order).unwrap_or(u32::MAX),
+                color_space: color_space_name(&handle.color_space),
+                color_space_declared,
+                indexed_base: handle.indexed_base().map(|base| color_space_name(&base)),
+                bits_per_component: handle.bits_per_component,
+                byte_size_compressed: handle.byte_size_compressed,
+                filters: handle.filter_chain.iter().map(filter_name).collect(),
+                is_inline: handle.is_inline,
+                data,
+            }
+        })
+        .collect();
+
+    PageImagesData {
+        page_index: page,
+        format: format.to_string(),
+        geometry,
+        images,
+    }
+}
+
+// --- the page_text_chars probe (spec: issue #206; char-level boxes from
+// --- the cached spans, with the R4 mirror fix) ------------------------------
+
+/// One `page_text_chars` char: the advance box from the baseline, in the
+/// page's DECLARED RENDER SPACE, with the span back-ref that makes it
+/// addressable ([`PageCharsData`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextCharBox {
+    /// The character (one Unicode scalar — `span.text.chars()`, so the
+    /// Python-side indices are CODE-POINT indices: `text[i:j]` slicing
+    /// aligns; a caller slicing bytes or UTF-16 must convert).
+    pub ch: char,
+    /// `(x, y, w, h)`, y-up: y is the BASELINE (the em-box law, the span
+    /// surface's own: the box extends one font-size upward from it;
+    /// descenders extend BELOW the box's bottom edge), h = the span's
+    /// font size, w = the char's advance. The anchor law (§2.6): the
+    /// advance box from the baseline, the same convention as the span
+    /// surface's D2.
+    pub bbox: (f32, f32, f32, f32),
+    /// The owning span's index in `page_layout`'s `spans` list for this
+    /// page (the same `extract_spans` order — deterministic per content
+    /// stream; the pairing law is test-pinned: the join law holds
+    /// EXACTLY, both sides iterating `span.text.chars()` over the same
+    /// parse).
+    pub span_index: usize,
+    /// The char's index WITHIN its span, in code points — the sub-span
+    /// grounding key: chars `[i, j)` of span s occupy the union of the
+    /// boxes with `span_index == s` and `i <= index_in_span < j` (the
+    /// single-baseline LTR closed form `x = c[i0].x, w = Σ w` is exact on
+    /// the prefix-sum and uniform paths and on the measured path wherever
+    /// every width came from the next-origin gap; the WHOLE-span case is
+    /// the span's own mapped box, never the char union).
+    pub index_in_span: usize,
+    /// The span's writing mode (0 horizontal, 1 vertical) — the WMode-1
+    /// honesty field. Load-bearing (R4): the WMode-1 char boxes are
+    /// DISPLACED one advance LEFT of their origin and stacked on x, not
+    /// down y (measured: `to_chars` prefix-sums along the flattened
+    /// negative-x axis; `Rect::new` normalizes the negative widths, so
+    /// the boxes are positive-width and wrong — a consumer may not
+    /// pretend `wmode: 1` chars are highlight-able).
+    pub wmode: u8,
+    /// How the char's x was derived — SPAN-CONSTANT (to_chars branches
+    /// once per span; pinned): `true` = measured origins (the engine's
+    /// `char_x_offsets` path — drift ≈ the 0.5 pt tolerance + sub-point
+    /// interpolation), `false` = prefix-sum over `char_widths` or uniform
+    /// division (the TJ-kerning drift class — bounded only by
+    /// measurement; the engine folds Tc/Tw/Tz/TJ into the widths, so
+    /// measured drift on every probe fixture is 0.000, and the analytic
+    /// bound is `|Σ TJ adjustments before i| × font_size/1000` pt).
+    /// [R9] Mirrors to_chars' OWN predicate — `char_x_offsets.len() ==
+    /// char_count` AND every offset finite AND inside
+    /// `bbox.x - 0.5 … bbox.x + bbox.width + 0.5` (text_block.rs:326-331)
+    /// evaluated against the bbox to_chars sees — NOT
+    /// `!char_x_offsets.is_empty()`: a stamped span whose offsets fall
+    /// outside the box silently degrades to the prefix-sum path and
+    /// would otherwise be reported as measured.
+    pub x_measured: bool,
+}
+
+/// One `page_text_chars` entry: the page's chars from the cached span
+/// parse, reading order (span order × in-span order).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageCharsData {
+    /// The 0-based page this entry describes (the pages= parallel-output
+    /// law).
+    pub page_index: usize,
+    /// The resolved format's vocabulary name (provenance; PDF-only
+    /// content — office rows carry `chars: []`).
+    pub format: String,
+    /// The page's declared render box (page_layout's None law: no frame
+    /// → no mapped boxes → `chars: []`).
+    pub geometry: Option<PageBox>,
+    /// The page's chars, reading order (span order × in-span order).
+    pub chars: Vec<TextCharBox>,
+}
+
+/// [R9] The mirrored `to_chars` measured-path gate: the predicate
+/// `TextSpan::to_chars` itself branches on (layout/text_block.rs:325-331,
+/// `OFFSET_BBOX_TOLERANCE = 0.5`), evaluated against the bbox `to_chars`
+/// SEES (the unmapped clone's, for an engine-premapped span) — never
+/// `!char_x_offsets.is_empty()`.
+fn span_x_measured(span: &pdf_oxide::layout::TextSpan) -> bool {
+    const OFFSET_BBOX_TOLERANCE: f32 = 0.5;
+    let char_count = span.text.chars().count();
+    if span.char_x_offsets.len() != char_count {
+        return false;
+    }
+    span.char_x_offsets.iter().all(|&x| {
+        x.is_finite()
+            && x >= span.bbox.x - OFFSET_BBOX_TOLERANCE
+            && x <= span.bbox.x + span.bbox.width + OFFSET_BBOX_TOLERANCE
+    })
+}
+
+/// The char-boxes probe: one open, and per requested page the page's
+/// characters from the CACHED SPAN PARSE ONLY (`extract_spans` →
+/// `TextSpan::to_chars()` per span) — never `extract_chars` as the
+/// surface's source (raw-only; it includes content the span path drops
+/// at the form-/BBox clip — the measured 13-chars vs 6-spans divergence —
+/// and the chars must be the SAME parse the span surface serves or the
+/// join law is unsound; R13's correction: the span parse ALREADY runs
+/// `extract_chars` under the stamping, so this is the consistency choice,
+/// not a parse-independence one).
+///
+/// The char box is the ADVANCE box from the baseline (the anchor law):
+/// `y` is the baseline, height is the font size, descenders hang BELOW
+/// the box. `to_chars` puts every glyph at `span.bbox.y` and ignores
+/// `text_rise`, so a super/sub span's ink is NOT inside its char boxes —
+/// the render-anchored oracle pins plain fixtures only.
+///
+/// The R4 MIRROR FIX: on a page whose rotation the engine applied to a
+/// span (`page_rotation_applied == rotation`, non-zero — all spans at
+/// 180, rotated-content spans at 90/270), `to_chars` derives char x FROM
+/// THE SPAN'S bbox — the engine's MAPPED frame, whose glyph order runs
+/// right-to-left while the prefix sums left-to-right — so every char box
+/// would land mirrored (~35 pt off, measured: span (479.568, 68,
+/// 60.432, 24), 'W' box x 479.568, 'W' ink x 514.464). For such spans the
+/// pass runs `to_chars()` on a CLONE whose bbox is
+/// [`unmap_engine_box`]'s output (raw user space), then maps each char
+/// box forward through [`map_box_forward`] — exact for the prefix-sum
+/// chars (advance-based; the bbox only anchors the origin). The stamped
+/// path never sees a mapped span (the stamping skips 180° pages
+/// wholesale and `rotation_degrees != 0` spans everywhere — the skip set
+/// coincides with the mapped set), so a mapped span's chars are always
+/// the prefix-sum arm and `x_measured: false`.
+///
+/// The WMode-1 law (§2.4): a vertical run's chars report `wmode: 1` and
+/// carry the engine's flattened fiction UNCHANGED — prefix-summed along
+/// the negative-x axis, `Rect::new`-normalized to positive widths
+/// displaced one advance LEFT of their origins, stacked on x. The surface
+/// does not fix, skip, or re-derive any of it; it reports `wmode: 1` and
+/// `x_measured: false` (measured: `char_x_offsets` empty,
+/// `char_widths == [-24, -24]`) — never silently absent.
+///
+/// Failure semantics: a page whose box read fails is `geometry: None` +
+/// `chars: []` (no frame to map into — page_layout's law); a content
+/// parse failure is `chars: []`, geometry intact (the engine's
+/// empty-on-error law); `pages=` is page_layout's exact rule and error
+/// strings; encrypted documents fail closed at the [`open`] door check.
+/// [R13] The cost is ≈ page_layout's span leg (the span postprocess
+/// already runs the char extractor under the stamp).
+///
+/// Runs under [`with_depth_headroom`], like every entry point.
+pub fn page_text_chars(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+    format: &'static str,
+) -> Result<Vec<PageCharsData>, PagesError> {
+    let selected = pages.map(<[usize]>::to_vec);
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || page_text_chars_pass(bytes, selected.as_deref(), password.as_deref(), format),
+        PagesError::Pdf,
+    )
+}
+
+/// The pass [`page_text_chars`] runs under [`with_depth_headroom`] — the
+/// selection normalization shared with [`page_layout_pass`] (so the error
+/// strings are byte-identical) and the per-page fold.
+fn page_text_chars_pass(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+    format: &'static str,
+) -> Result<Vec<PageCharsData>, PagesError> {
+    let doc = open(bytes, password).map_err(PagesError::Pdf)?;
+    let count = doc.page_count().map_err(PagesError::Pdf)?;
+    let selected = match pages {
+        None => (0..count).collect::<Vec<usize>>(),
+        Some(pages) => {
+            let selected = normalize_selection(pages)?;
+            validate_selection_range(&selected, count)?;
+            selected
+        }
+    };
+    Ok(selected
+        .iter()
+        .map(|&page| page_text_chars_one(&doc, page, format))
+        .collect())
+}
+
+/// The per-entry None-geometry shape ([`empty_entry`]'s chars twin):
+/// geometry `None` (no frame — the D1 space is defined by the box) with
+/// no chars, the entry's `page_index` still carried.
+fn empty_chars_entry(page: usize, format: &str) -> PageCharsData {
+    PageCharsData {
+        page_index: page,
+        format: format.to_string(),
+        geometry: None,
+        chars: Vec::new(),
+    }
+}
+
+/// One page's chars ([`page_text_chars_pass`]'s per-page step): the same
+/// frame reads as [`page_layout_one`] (the D1 space is defined by the
+/// box), the same span parse (`extract_spans`), and per span the
+/// `to_chars()` decomposition — on the raw-space clone for an
+/// engine-premapped span (the R4 mirror fix), each char box mapped
+/// forward through the one rule.
+fn page_text_chars_one(doc: &PdfDocument, page: usize, format: &str) -> PageCharsData {
+    // The frame: any error here (the page's own get_page walk included)
+    // is the per-entry None rule — no frame, so the chars have no render
+    // space to be mapped into and stay empty.
+    let Ok(media) = doc.get_page_media_box(page) else {
+        return empty_chars_entry(page, format);
+    };
+    let Ok(visible) = doc.get_page_visible_box(page) else {
+        return empty_chars_entry(page, format);
+    };
+    let Ok(rotation) = doc.get_page_rotation(page) else {
+        return empty_chars_entry(page, format);
+    };
+    let geometry = PageBox::from_visible_box(visible, rotation, media);
+    if geometry.is_none() {
+        // A non-positive/non-finite extent: undeclarable — and the
+        // transform's frame with it.
+        return empty_chars_entry(page, format);
+    }
+
+    // The same span parse page_layout serves (the join law's basis). A
+    // content parse failure is the engine's empty-on-error law: `chars:
+    // []`, geometry intact, never an error.
+    let spans = doc.extract_spans(page).unwrap_or_default();
+    let mut chars = Vec::new();
+    for (span_index, span) in spans.iter().enumerate() {
+        // The R4 mirror fix: an engine-premapped span (page_rotation_applied
+        // == the page's rotation, non-zero) has to_chars derive its char
+        // x from the MAPPED bbox — unmap the clone's bbox back to raw user
+        // space first, then map each char box forward with the one rule.
+        let mapped = rotation != 0 && span.page_rotation_applied == rotation;
+        let mut char_source = span.clone();
+        if mapped {
+            let raw = unmap_engine_box(
+                (span.bbox.x, span.bbox.y, span.bbox.width, span.bbox.height),
+                media,
+                rotation,
+            );
+            char_source.bbox = pdf_oxide::geometry::Rect::new(raw.0, raw.1, raw.2, raw.3);
+        }
+        // [R9] The measured flag: to_chars' own gate, evaluated against
+        // the bbox to_chars sees (the clone's — unmapped where mapped).
+        let x_measured = span_x_measured(&char_source);
+        for (index_in_span, text_char) in char_source.to_chars().into_iter().enumerate() {
+            let bbox = map_box_forward(
+                (
+                    text_char.bbox.x,
+                    text_char.bbox.y,
+                    text_char.bbox.width,
+                    text_char.bbox.height,
+                ),
+                visible,
+                rotation,
+            );
+            chars.push(TextCharBox {
+                ch: text_char.char,
+                bbox,
+                span_index,
+                index_in_span,
+                wmode: span.wmode,
+                x_measured,
+            });
+        }
+    }
+
+    PageCharsData {
+        page_index: page,
+        format: format.to_string(),
+        geometry,
+        chars,
     }
 }
 
@@ -6536,5 +7588,1506 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- the page_images probe (issue #205; the F1 byte-source ruling,
+    // --- the R7 caps, the R8 honesty laws; measured against the
+    // --- preserved probe artifacts /tmp/opencode/probe-pc/) ---------------
+
+    /// An image XObject stream object: the caller's dict fragment after
+    /// /Length, and the payload bytes.
+    fn image_xobject(dict: &str, data: &[u8]) -> Vec<u8> {
+        let mut v = format!("<< /Length {} {dict} >>\nstream\n", data.len()).into_bytes();
+        v.extend_from_slice(data);
+        v.extend_from_slice(b"\nendstream");
+        v
+    }
+
+    /// An image-page PDF: `content` draws the images (it spells its own
+    /// /Im1, /Im2… references), the XObjects land in order. Object
+    /// numbering: catalog 1, pages 2, page 3, content 4, images 5…
+    fn images_pdf(content: &str, page_extras: &str, images: &[Vec<u8>]) -> Vec<u8> {
+        let stream = format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len() + 1,
+            content
+        );
+        let xobjects = if images.is_empty() {
+            String::new()
+        } else {
+            let entries: Vec<String> = (0..images.len())
+                .map(|i| format!("/Im{} {} 0 R", i + 1, 5 + i))
+                .collect();
+            format!(" /XObject << {} >>", entries.join(" "))
+        };
+        let mut objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /Resources <<{xobjects} >> \
+                 /MediaBox [0 0 612 792] {page_extras} /Contents 4 0 R >>"
+            )
+            .into_bytes(),
+            stream.into_bytes(),
+        ];
+        objects.extend(images.iter().cloned());
+        let refs: Vec<&[u8]> = objects.iter().map(|v| v.as_slice()).collect();
+        objects_pdf(&refs)
+    }
+
+    /// A 2×2 RGB FlateDecode fixture (all-black samples): the R25 pin's
+    /// "plain 8-bpc image" — `samples_are_raw` stays TRUE (nothing
+    /// transformed the buffer) and the decode yields 12 bytes.
+    fn flate_2x2_rgb() -> Vec<u8> {
+        images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+                &zlib_flow(&[0u8; 12]),
+            )],
+        )
+    }
+
+    /// The red 1×1 image drawn at CTM [100 0 0 100 200 200] — the probe's
+    /// P5 fixture shape (`image_pdf`, reused): sub-8px, so
+    /// `extract_images` would silently drop it.
+    fn red_1x1_pdf(page_extras: &str) -> Vec<u8> {
+        images_pdf(
+            "q 100 0 0 100 200 200 cm /Im1 Do Q",
+            page_extras,
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                b"FF0000>",
+            )],
+        )
+    }
+
+    /// The probe's fake JPEG 2000 codestream: the 12-byte JP2 signature
+    /// box plus junk (a "file" no tool can decode — the container bytes
+    /// are the point, not the pixels).
+    fn jp2_signature_bytes() -> Vec<u8> {
+        let mut v = JP2_SIGNATURE_BOX.to_vec();
+        v.extend_from_slice(b"junk-that-is-not-a-real-codestream");
+        v
+    }
+
+    /// An R2/V1-encrypted one-page PDF carrying an image XObject
+    /// (`image_dict` after /Length, `image_data` plaintext) and a content
+    /// stream that draws it. Both streams are RC4-encrypted with their
+    /// per-object keys (ISO 32000-1 §7.6.3.2's one-pass key derivation:
+    /// MD5(file_key ‖ obj# 3LE ‖ gen# 2LE), truncated to min(n+5, 16) =
+    /// 10 bytes at RC4-40's n=5) — the shape pdf_oxide's own decrypt
+    /// undoes (the probe's enc.pdf: decode() answered `ff d8 ff e0`
+    /// where raw_compressed_bytes answered ciphertext). Object
+    /// numbering: catalog 1, pages 2, page 3, image 4, content 5,
+    /// /Encrypt 6.
+    fn encrypted_image_pdf(
+        user_pw: &str,
+        owner_pw: &str,
+        image_dict: &str,
+        image_data: &[u8],
+    ) -> Vec<u8> {
+        const ID0: [u8; 16] = [0x71; 16];
+        let owner_value = r2_owner_value(owner_pw.as_bytes());
+        let user_value = r2_user_value(user_pw.as_bytes(), &owner_value, -4, &ID0);
+        let file_key = r2_file_key(user_pw.as_bytes(), &owner_value, -4, &ID0);
+        let object_key = |obj: u32| -> Vec<u8> {
+            use md5::Digest;
+            let mut hasher = md5::Md5::new();
+            let mut mixing = [0u8; 5];
+            mixing[..3].copy_from_slice(&obj.to_le_bytes()[..3]);
+            hasher.update(&file_key);
+            hasher.update(mixing);
+            hasher.finalize()[..10].to_vec()
+        };
+        let content = b"q 100 0 0 100 50 600 cm /Im1 Do Q";
+        let encrypted_content = rc4(&object_key(5), content);
+        let encrypted_image = rc4(&object_key(4), image_data);
+        let encrypt_dict = format!(
+            "<< /Filter /Standard /V 1 /R 2 /O <{}> /U <{}> /P -4 >>",
+            hex(&owner_value),
+            hex(&user_value)
+        );
+        let image_object = image_xobject(image_dict, &encrypted_image);
+        let mut content_object =
+            format!("<< /Length {} >>\nstream\n", encrypted_content.len()).into_bytes();
+        content_object.extend_from_slice(&encrypted_content);
+        content_object.extend_from_slice(b"\nendstream");
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 4 0 R >> >> \
+               /MediaBox [0 0 612 792] /Contents 5 0 R >>"
+                .to_vec(),
+            image_object,
+            content_object,
+            encrypt_dict.into_bytes(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+        for (number, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", number + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in &offsets[1..] {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R /Encrypt 6 0 R /ID [<{}> <{}>] >>\n\
+                 startxref\n{xref_at}\n%%EOF",
+                objects.len() + 1,
+                hex(&ID0),
+                hex(&ID0)
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// The one-image fixtures' accessor: the first (only) image entry.
+    fn first_image(bytes: Vec<u8>, decode: ImageDecode) -> PageImageEntry {
+        page_images(bytes, None, None, "pdf", decode, None)
+            .unwrap()
+            .remove(0)
+            .images
+            .remove(0)
+    }
+
+    /// T1 preserved for bytes (the anti-extract_images pin, R25's raw
+    /// flag included): the 1×1 red image the handle listed DECODES — in
+    /// both decode modes — to `Raw { pixels: [255, 0, 0], RGB,
+    /// samples_are_raw: true }` (true: nothing transformed this buffer —
+    /// 8 bpc, no /Decode, a representable space; the COMMON case, R25).
+    #[test]
+    fn images_the_one_by_one_image_decodes_in_both_modes() {
+        for decode in [ImageDecode::Container, ImageDecode::Pixels] {
+            let entry = first_image(red_1x1_pdf(""), decode);
+            assert_eq!(entry.width_px, 1);
+            assert_eq!(entry.height_px, 1);
+            assert_eq!(entry.filters, ["ASCIIHexDecode"]);
+            assert_eq!(entry.color_space, "DeviceRGB");
+            assert_eq!(entry.indexed_base, None);
+            assert_eq!(entry.byte_size_compressed, 7);
+            // container mode: ASCIIHex is not a standalone container
+            // format — NotRequested (the filters list says why); pixels
+            // mode: the 3 sample bytes.
+            match decode {
+                ImageDecode::Container => {
+                    assert_eq!(entry.data, ImageBytes::NotRequested);
+                }
+                ImageDecode::Pixels => match entry.data {
+                    ImageBytes::Raw {
+                        ref pixels,
+                        pixel_format,
+                        components,
+                        bits_per_component,
+                        samples_are_raw,
+                        decode_folded_in,
+                        ..
+                    } => {
+                        assert_eq!(pixels.as_slice(), [255, 0, 0]);
+                        assert_eq!(pixel_format, PixelFormat::RGB);
+                        assert_eq!((components, bits_per_component), (3, 8));
+                        assert!(samples_are_raw, "R25: nothing transformed this buffer");
+                        assert!(!decode_folded_in);
+                    }
+                    other => panic!("expected Raw, got {other:?}"),
+                },
+                ImageDecode::None => unreachable!(),
+            }
+        }
+    }
+
+    /// The identity pairing (the two-image pin): both images listed in
+    /// paint order with their mapped boxes — and the SAME enumeration
+    /// page_layout lists (same boxes, same rotations, elementwise).
+    #[test]
+    fn images_pair_with_page_layout_by_page_index_and_paint_order() {
+        let bytes = images_pdf(
+            "q 50 0 0 50 100 100 cm /Im1 Do Q\nq 60 0 0 60 300 400 cm /Im1 Do Q",
+            "",
+            &[red_1x1_image()],
+        );
+        let images = page_images(bytes.clone(), None, None, "pdf", ImageDecode::None, None)
+            .unwrap()
+            .remove(0);
+        let layout = page_layout(bytes, None, None, "pdf").unwrap().remove(0);
+        assert_eq!(images.images.len(), 2);
+        assert_eq!(layout.images.len(), 2);
+        for (entry, handle) in images.images.iter().zip(layout.images.iter()) {
+            assert_eq!(entry.paint_order, handle.paint_order);
+            assert_eq!(entry.bbox, Some(handle.bbox));
+            assert_eq!((entry.width_px, entry.height_px), (1, 1));
+            assert_eq!(entry.rotation_degrees, handle.rotation_degrees);
+            assert_eq!(entry.data, ImageBytes::NotRequested);
+        }
+        assert_eq!(images.images[0].paint_order, 0);
+        assert_eq!(images.images[1].paint_order, 1);
+    }
+
+    /// Paint-order stability across opens (R12's determinism pin): two
+    /// separate opens reproduce the same (page_index, paint_order)
+    /// sequence — the identity key is a function of (bytes, page).
+    #[test]
+    fn images_paint_order_is_stable_across_opens() {
+        let bytes = images_pdf(
+            "q 50 0 0 50 100 100 cm /Im1 Do Q\nq 60 0 0 60 300 400 cm /Im1 Do Q",
+            "",
+            &[red_1x1_image()],
+        );
+        let identity = |decode: ImageDecode| {
+            page_images(bytes.clone(), None, None, "pdf", decode, None)
+                .unwrap()
+                .remove(0)
+                .images
+                .iter()
+                .map(|entry| entry.paint_order)
+                .collect::<Vec<u32>>()
+        };
+        assert_eq!(identity(ImageDecode::None), [0, 1]);
+        assert_eq!(identity(ImageDecode::Pixels), [0, 1]);
+    }
+
+    /// The DCT container passthrough (F1's byte source): a garbage
+    /// /DCTDecode payload (R19 — byte identity cannot prove "never
+    /// parsed", but a PARSED one-byte JPEG would error) comes back as
+    /// `Container { Jpeg }` with the stream's own bytes, in both decode
+    /// modes; and for a bare DCT chain the container bytes are
+    /// byte-identical to raw_compressed_bytes() on an unencrypted file
+    /// (measured on the probe's 301-byte JPEG: 301 == 301, both
+    /// `FF D8 FF E0`, decode() never parsing the JPEG).
+    #[test]
+    fn images_dct_container_is_the_stream_bytes_verbatim() {
+        let payload: &[u8] = b"\xFF\xD8\xFF\xE0";
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode",
+                payload,
+            )],
+        );
+        for decode in [ImageDecode::Container, ImageDecode::Pixels] {
+            let entry = first_image(bytes.clone(), decode);
+            match &entry.data {
+                ImageBytes::Container { bytes, container } => {
+                    assert_eq!(
+                        bytes,
+                        &payload.to_vec(),
+                        "the container is the stream's own bytes"
+                    );
+                    assert_eq!(*container, ContainerFormat::Jpeg);
+                }
+                other => panic!("expected Container(Jpeg), got {other:?}"),
+            }
+            assert_eq!(entry.byte_size_compressed, payload.len() as u64);
+            assert_eq!(entry.filters, ["DCTDecode"]);
+        }
+        // Byte identity with raw_compressed_bytes at the same cost —
+        // unencrypted only (R1: on an encrypted PDF that path serves
+        // ciphertext; the encrypted pin below).
+        let doc = PdfDocument::from_bytes(bytes).unwrap();
+        let handle = &doc.page_image_handles(0).unwrap()[0];
+        assert_eq!(handle.raw_compressed_bytes().unwrap(), payload.to_vec());
+        let decoded = handle.decode().unwrap();
+        match decoded.data() {
+            ImageData::Jpeg(container) => assert_eq!(container, &payload.to_vec()),
+            other => panic!("expected Jpeg, got {other:?}"),
+        }
+    }
+
+    /// The encrypted DCT pin (R1, the draft's raw-bytes Container mode
+    /// fails exactly here): an unlocked RC4-40 PDF's DCT container comes
+    /// from decode() DECRYPTED — `ff d8`, the real JPEG's own bytes —
+    /// never the ciphertext raw_compressed_bytes() serves.
+    #[test]
+    fn images_encrypted_dct_container_is_decrypted() {
+        let jpeg: &[u8] = b"\xFF\xD8\xFF\xE0rest-of-a-notional-jpeg";
+        let bytes = encrypted_image_pdf(
+            "user",
+            "owner-pw",
+            "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode",
+            jpeg,
+        );
+        // the door: fail closed without the password, open with it
+        assert!(matches!(
+            page_images(bytes.clone(), None, None, "pdf", ImageDecode::None, None),
+            Err(PagesError::Pdf(PdfError::EncryptedPdf))
+        ));
+        let entry = page_images(
+            bytes,
+            None,
+            Some("user"),
+            "pdf",
+            ImageDecode::Container,
+            None,
+        )
+        .unwrap()
+        .remove(0)
+        .images
+        .remove(0);
+        match &entry.data {
+            ImageBytes::Container { bytes, container } => {
+                assert_eq!(bytes, &jpeg.to_vec(), "decode() decrypted the container");
+                assert_eq!(*container, ContainerFormat::Jpeg);
+                assert_eq!(&bytes[..2], b"\xFF\xD8");
+            }
+            other => panic!("expected the decrypted Container, got {other:?}"),
+        }
+    }
+
+    /// The F1 encrypted-JPX refusal: a bare [/JPXDecode] image in an
+    /// encrypted PDF — its container bytes would be CIPHERTEXT (R1) and
+    /// the shipped build cannot decode the filter (R2) — is refused with
+    /// the typed `Unsupported` arm that carries the engine's
+    /// feature-naming string verbatim AND names the encrypted-document
+    /// cause. The refusal IS the ciphertext pin: no raw bytes ride the
+    /// surface.
+    #[test]
+    fn images_encrypted_jpx_container_is_refused_naming_the_cause() {
+        let bytes = encrypted_image_pdf(
+            "user",
+            "owner-pw",
+            "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode",
+            &jp2_signature_bytes(),
+        );
+        let entry = page_images(
+            bytes,
+            None,
+            Some("user"),
+            "pdf",
+            ImageDecode::Container,
+            None,
+        )
+        .unwrap()
+        .remove(0)
+        .images
+        .remove(0);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::Unsupported(message)) => {
+                // Build-conditional, per R2: the SHIPPED build refuses
+                // with the engine's feature-naming string verbatim (the
+                // Python suite pins it against the built wheel); a
+                // feature build reaching this branch carries its own
+                // decode error. Either way the encrypted-document cause
+                // is named and the refusal is typed, never silent.
+                if !message.contains("rebuild with the `jpeg2000` feature to decode") {
+                    assert!(!message.is_empty(), "{message}");
+                }
+                assert!(
+                    message.contains("encrypted"),
+                    "the encrypted-document cause named: {message}"
+                );
+            }
+            other => panic!("expected the F1 refusal, got {other:?}"),
+        }
+    }
+
+    /// The JP2/J2K sniff discrimination (F1, R5): a bare [/JPXDecode]
+    /// stream on an UNENCRYPTED document serves its container — the
+    /// 12-byte JP2 signature box → `Jp2`, the SOC marker →
+    /// `J2kCodestream`, neither → the typed `Decode` error (never a file
+    /// no tool can open). In Pixels mode the same image is the engine's
+    /// own classification: the shipped build's `Unsupported` verbatim
+    /// (R2 — the sniff is the CONTAINER mode's path).
+    #[test]
+    fn images_bare_jpx_serves_its_container_by_sniff() {
+        let jpx_dict = "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+                        /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode";
+        // JP2 signature box → Jp2
+        let entry = first_image(
+            images_pdf(
+                "q 100 0 0 100 50 600 cm /Im1 Do Q",
+                "",
+                &[image_xobject(jpx_dict, &jp2_signature_bytes())],
+            ),
+            ImageDecode::Container,
+        );
+        match &entry.data {
+            ImageBytes::Container { bytes, container } => {
+                assert_eq!(*container, ContainerFormat::Jp2);
+                assert_eq!(bytes[..12], JP2_SIGNATURE_BOX);
+            }
+            other => panic!("expected Container(Jp2), got {other:?}"),
+        }
+        // SOC marker → J2kCodestream
+        let entry = first_image(
+            images_pdf(
+                "q 100 0 0 100 50 600 cm /Im1 Do Q",
+                "",
+                &[image_xobject(jpx_dict, b"\xFF\x4F\x00\x01\x02")],
+            ),
+            ImageDecode::Container,
+        );
+        match &entry.data {
+            ImageBytes::Container { container, .. } => {
+                assert_eq!(*container, ContainerFormat::J2kCodestream)
+            }
+            other => panic!("expected Container(J2kCodestream), got {other:?}"),
+        }
+        // Neither → the typed Decode error.
+        let entry = first_image(
+            images_pdf(
+                "q 100 0 0 100 50 600 cm /Im1 Do Q",
+                "",
+                &[image_xobject(jpx_dict, b"\x00\x01\x02\x03")],
+            ),
+            ImageDecode::Container,
+        );
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::Decode(message)) => {
+                assert!(message.contains("neither a JP2 file"), "{message}")
+            }
+            other => panic!("expected the sniff's Decode error, got {other:?}"),
+        }
+        // Pixels mode: the engine's own classification — on the SHIPPED
+        // build the Unsupported verbatim (R2's feature gate), on a
+        // `jpeg2000`-feature build the decode attempt's own answer (a
+        // valid codestream would be Raw; this fake's is the engine's
+        // decode error). Either way TYPED, never silent (R2's rule for
+        // the build-conditional arm).
+        let entry = first_image(
+            images_pdf(
+                "q 100 0 0 100 50 600 cm /Im1 Do Q",
+                "",
+                &[image_xobject(jpx_dict, &jp2_signature_bytes())],
+            ),
+            ImageDecode::Pixels,
+        );
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::Unsupported(message)) => assert!(
+                message.contains("JPEG 2000"),
+                "the shipped arm names the feature, the feature build its decode: {message}"
+            ),
+            ImageBytes::Error(ImageDataError::Decode(message)) => {
+                assert!(message.contains("JPEG 2000"), "{message}")
+            }
+            other => panic!("expected a typed decode error, got {other:?}"),
+        }
+    }
+
+    /// The caps (R7): the 20000×20000 estimate (1.2 GB RGB) refuses
+    /// BEFORE the decode with `SizeCap{scope: Image, …}` — the corrupt
+    /// deflate body is the discriminator that needs no timing (a fired
+    /// arithmetic check answers SizeCap; a labouring engine would answer
+    /// Decode); the per-image override lifts it (and the corrupt body's
+    /// own Decode error shows the labour was then spent); the CALL
+    /// budget refuses the second image after the first decoded (the
+    /// first stands, the second typed); and a 100 MP JPEG whose
+    /// container is small is SERVED (the draft formula's DCT blindness,
+    /// pinned).
+    #[test]
+    fn images_caps_refuse_as_typed_entries_before_the_labour() {
+        let huge = image_xobject(
+            "/Type /XObject /Subtype /Image /Width 20000 /Height 20000 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+            b"\x00\x01\x02", // a corrupt deflate body: the engine would answer Decode
+        );
+        let needed = 20_000u64 * 20_000 * 3;
+        assert!(needed > DEFAULT_MAX_IMAGE_BYTES);
+
+        // Per-image cap, before the labour.
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            std::slice::from_ref(&huge),
+        );
+        let entry = first_image(bytes.clone(), ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope,
+                limit_bytes,
+                needed_bytes,
+            }) => {
+                assert_eq!(*scope, CapScope::Image);
+                assert_eq!(*limit_bytes, DEFAULT_MAX_IMAGE_BYTES);
+                assert_eq!(*needed_bytes, needed);
+            }
+            other => panic!("expected the pre-decode SizeCap, got {other:?}"),
+        }
+        // The override lifts the per-image cap: the estimate sits between
+        // the default (256 MiB) and the call budget (512 MiB) — a 381 MiB
+        // gray stream — so the default refuses it per-image and the
+        // override lets the labour run (the corrupt body's own Decode
+        // error shows it was spent).
+        let huge_gray = image_xobject(
+            "/Type /XObject /Subtype /Image /Width 20000 /Height 20000 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+            b"\x00\x01\x02", // a corrupt deflate body: the engine would answer Decode
+        );
+        let gray_needed = 20_000u64 * 20_000;
+        assert!(gray_needed > DEFAULT_MAX_IMAGE_BYTES && gray_needed < MAX_CALL_IMAGE_BYTES);
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            std::slice::from_ref(&huge_gray),
+        );
+        let entry = first_image(bytes.clone(), ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope,
+                limit_bytes,
+                needed_bytes,
+            }) => {
+                assert_eq!(*scope, CapScope::Image);
+                assert_eq!(*limit_bytes, DEFAULT_MAX_IMAGE_BYTES);
+                assert_eq!(*needed_bytes, gray_needed);
+            }
+            other => panic!("expected the pre-decode SizeCap, got {other:?}"),
+        }
+        let entry = page_images(
+            bytes,
+            None,
+            None,
+            "pdf",
+            ImageDecode::Pixels,
+            Some(gray_needed),
+        )
+        .unwrap()
+        .remove(0)
+        .images
+        .remove(0);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::Decode(message)) => {
+                assert!(!message.is_empty(), "{message}")
+            }
+            other => panic!("expected the engine's Decode error under the override, got {other:?}"),
+        }
+
+        // Both entries present: the first decodes and stands, the second
+        // (over the per-image cap) is typed — neighbors intact.
+        let bytes = images_pdf(
+            "q 50 0 0 50 100 100 cm /Im1 Do Q\nq 50 0 0 50 300 400 cm /Im2 Do Q",
+            "",
+            &[red_1x1_image(), huge],
+        );
+        let page = page_images(bytes, None, None, "pdf", ImageDecode::Pixels, None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(page.images.len(), 2, "both entries present");
+        assert!(matches!(page.images[0].data, ImageBytes::Raw { .. }));
+        assert!(matches!(
+            page.images[1].data,
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope: CapScope::Image,
+                ..
+            })
+        ));
+
+        // A 100 MP DCT whose container is small: SERVED as a container —
+        // the estimate is the container's own size (the draft's
+        // w×h×components formula would have refused it).
+        let megapix = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 10000 /Height 10000 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode",
+                b"\xFF\xD8\xFF\xE0",
+            )],
+        );
+        let entry = first_image(megapix, ImageDecode::Pixels);
+        assert!(matches!(
+            entry.data,
+            ImageBytes::Container {
+                container: ContainerFormat::Jpeg,
+                ..
+            }
+        ));
+    }
+
+    /// The ~96 MiB 600-dpi letter-size RGB scan (5100×6600×3 =
+    /// 100,980,000 bytes) is SERVED under the 256 MiB cap (R7: the
+    /// draft's 64 MiB cap refused every such scan) — the samples are
+    /// zeros, so the fixture is small and the decode's 96 MiB buffer is
+    /// the point.
+    #[test]
+    fn images_a_six_hundred_dpi_letter_scan_estimate_is_served() {
+        use std::io::Write as _;
+        let samples = vec![0u8; 5_100 * 6_600 * 3];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&samples).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 5100 /Height 6600 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+                &compressed,
+            )],
+        );
+        let entry = first_image(bytes, ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Raw { pixels, .. } => assert_eq!(pixels.len(), 100_980_000),
+            other => panic!("expected the 96 MiB scan served, got {other:?}"),
+        }
+    }
+
+    /// The decode-failure visibility law: a truncated FlateDecode stream
+    /// is a VISIBLE TYPED ENTRY (`Decode`) with every handle field
+    /// intact, its sibling intact, the paint_order sequence complete.
+    #[test]
+    fn images_a_decode_failure_is_a_typed_entry_with_siblings_intact() {
+        let bytes = images_pdf(
+            "q 50 0 0 50 100 100 cm /Im1 Do Q\nq 50 0 0 50 300 400 cm /Im2 Do Q",
+            "",
+            &[
+                red_1x1_image(),
+                image_xobject(
+                    "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+                     /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+                    b"\x78\x01\x01truncated",
+                ),
+            ],
+        );
+        let page = page_images(bytes, None, None, "pdf", ImageDecode::Pixels, None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(page.images.len(), 2, "the failed image stays listed");
+        assert_eq!(page.images[0].paint_order, 0);
+        assert_eq!(page.images[1].paint_order, 1);
+        assert!(matches!(page.images[0].data, ImageBytes::Raw { .. }));
+        match &page.images[1].data {
+            ImageBytes::Error(ImageDataError::Decode(message)) => {
+                assert!(!message.is_empty(), "the engine's Display rides the entry")
+            }
+            other => panic!("expected the typed Decode entry, got {other:?}"),
+        }
+        // the failed entry's handle evidence stays intact
+        assert_eq!((page.images[1].width_px, page.images[1].height_px), (2, 2));
+        assert_eq!(page.images[1].filters, ["FlateDecode"]);
+    }
+
+    /// The CCITT honesty law (R10/F6): the packed codestream is served
+    /// VERBATIM (measured: decode() returns the input bytes, in == out),
+    /// `samples_are_raw` true (the buffer was never touched), and the
+    /// payload carries ALL SEVEN CcittParams fields — without them the
+    /// consumer could not decode the packed stream at all (no PDF to
+    /// read /DecodeParms from; a G4 vs G3 stream is not even tellable
+    /// apart).
+    #[test]
+    fn images_ccitt_serves_the_packed_stream_and_all_seven_params() {
+        let payload: &[u8] = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08";
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 1 \
+                 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 /Rows 8 >>",
+                payload,
+            )],
+        );
+        let entry = first_image(bytes, ImageDecode::Pixels);
+        assert_eq!(entry.filters, ["CCITTFaxDecode"]);
+        match &entry.data {
+            ImageBytes::Raw {
+                pixels,
+                bits_per_component,
+                samples_are_raw,
+                decode_folded_in,
+                ccitt,
+                ..
+            } => {
+                assert_eq!(pixels, &payload.to_vec(), "the packed stream verbatim");
+                assert_eq!(*bits_per_component, 1, "the buffer stayed packed");
+                assert!(samples_are_raw);
+                assert!(
+                    !decode_folded_in,
+                    "the /Decode polarity rides ccitt, never folded"
+                );
+                let ccitt = ccitt.as_ref().expect("the seven fields the consumer needs");
+                assert_eq!(ccitt.k, -1, "G4");
+                assert_eq!(ccitt.columns, 8);
+                assert_eq!(ccitt.rows, Some(8));
+                assert!(!ccitt.black_is_1);
+                assert!(!ccitt.end_of_line);
+                assert!(!ccitt.encoded_byte_align);
+                assert!(ccitt.end_of_block, "the engine's RTC default");
+            }
+            other => panic!("expected the packed Raw arm, got {other:?}"),
+        }
+    }
+
+    /// The R25/Indexed/16-bit payload laws (R6's self-describing buffer):
+    /// the 2×2 RGB Flate image keeps `samples_are_raw: true` (12 bytes);
+    /// an Indexed image's buffer is the EXPANDED palette RGB (192 bytes
+    /// from 64 index samples, `samples_are_raw: false`, the entry's
+    /// dictionary bpc stays 8); a 16-bit image's buffer is the REDUCED
+    /// 8-bit one (4 bytes, the payload's bpc 8 where the entry's
+    /// dictionary says 16 — R22's two-bpcs law).
+    #[test]
+    fn images_the_payload_describes_itself() {
+        // plain 8-bpc: the R25 common case
+        let entry = first_image(flate_2x2_rgb(), ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Raw {
+                pixels,
+                components,
+                bits_per_component,
+                samples_are_raw,
+                icc,
+                ..
+            } => {
+                assert_eq!(pixels.len(), 12);
+                assert_eq!((*components, *bits_per_component), (3, 8));
+                assert!(samples_are_raw);
+                assert!(!icc);
+            }
+            other => panic!("expected Raw, got {other:?}"),
+        }
+
+        // Indexed: expanded to the base's RGB — a 64-byte index stream
+        // (8×8 one sample per pixel) into a 4-entry palette.
+        let indexed = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+                 /ColorSpace [/Indexed /DeviceRGB 3 <FF0000 00FF00 0000FF 000000>] \
+                 /BitsPerComponent 8 /Filter /FlateDecode",
+                &zlib_flow(&[0u8; 64]),
+            )],
+        );
+        let entry = first_image(indexed, ImageDecode::Pixels);
+        assert_eq!(entry.color_space, "Indexed");
+        assert_eq!(entry.indexed_base.as_deref(), Some("DeviceRGB"));
+        assert_eq!(entry.bits_per_component, 8, "the DICTIONARY's (R22)");
+        match &entry.data {
+            ImageBytes::Raw {
+                pixels,
+                components,
+                bits_per_component,
+                samples_are_raw,
+                ..
+            } => {
+                assert_eq!(pixels.len(), 192, "the expansion, measured");
+                assert_eq!((*components, *bits_per_component), (3, 8), "the buffer's");
+                assert!(!samples_are_raw, "the palette lookup left the raw space");
+            }
+            other => panic!("expected the expanded Raw arm, got {other:?}"),
+        }
+
+        // 16-bit: reduced to 8
+        let gray16 = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 16 /Filter /FlateDecode",
+                &zlib_flow(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]),
+            )],
+        );
+        let entry = first_image(gray16, ImageDecode::Pixels);
+        assert_eq!(entry.bits_per_component, 16, "the DICTIONARY's (R22)");
+        match &entry.data {
+            ImageBytes::Raw {
+                pixels,
+                bits_per_component,
+                samples_are_raw,
+                ..
+            } => {
+                assert_eq!(pixels.len(), 4, "the reduction, measured");
+                assert_eq!(*bits_per_component, 8, "the buffer's");
+                assert!(!samples_are_raw);
+            }
+            other => panic!("expected the reduced Raw arm, got {other:?}"),
+        }
+    }
+
+    /// R8's honesty cells: a missing /ColorSpace reports the engine's
+    /// `DeviceRGB` DEFAULT with `color_space_declared: false` (the guess,
+    /// marked — the decode fails on that same dictionary), and a declared
+    /// DeviceRGB verifies true on a decoded entry (a decode re-parses
+    /// /ColorSpace and cannot succeed on the defaulted dictionary).
+    #[test]
+    fn images_the_device_rgb_fallback_is_flagged() {
+        let missing = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+                 /BitsPerComponent 8 /Filter /DCTDecode",
+                b"\xFF\xD8\xFF\xE0",
+            )],
+        );
+        // Handles mode: the guess is visible as false (nothing can verify it).
+        let entry = first_image(missing.clone(), ImageDecode::None);
+        assert_eq!(entry.color_space, "DeviceRGB");
+        assert!(!entry.color_space_declared);
+        // Pixels mode: the decode fails on the missing dictionary, the
+        // typed Decode entry rides, and the guess stays marked false.
+        let entry = first_image(missing, ImageDecode::Pixels);
+        assert!(!entry.color_space_declared);
+        assert!(matches!(
+            entry.data,
+            ImageBytes::Error(ImageDataError::Decode(_))
+        ));
+
+        // A declared DeviceRGB: unverified (false) in Handles mode, true
+        // on a decoded entry.
+        let declared = first_image(flate_2x2_rgb(), ImageDecode::None);
+        assert_eq!(declared.color_space, "DeviceRGB");
+        assert!(!declared.color_space_declared);
+        let decoded = first_image(flate_2x2_rgb(), ImageDecode::Pixels);
+        assert!(decoded.color_space_declared);
+    }
+
+    /// The transform leg (test 7): page_images' bbox == page_layout's
+    /// images' bbox elementwise across the 4-angle × crop matrix — the
+    /// same enumeration through the same one forward rule.
+    #[test]
+    fn images_bbox_matches_page_layout_across_the_angle_crop_matrix() {
+        for angle in [0, 90, 180, 270] {
+            for extras in ["".to_string(), "/CropBox [100 100 500 700]".to_string()] {
+                let page_extras = match angle {
+                    0 => extras.clone(),
+                    a if extras.is_empty() => format!("/Rotate {a}"),
+                    a => format!("/Rotate {a} {extras}"),
+                };
+                let bytes = red_1x1_pdf(&page_extras);
+                let images = page_images(bytes.clone(), None, None, "pdf", ImageDecode::None, None)
+                    .unwrap()
+                    .remove(0);
+                let layout = page_layout(bytes, None, None, "pdf").unwrap().remove(0);
+                assert_eq!(images.images.len(), layout.images.len());
+                for (entry, handle) in images.images.iter().zip(layout.images.iter()) {
+                    assert_eq!(
+                        entry.bbox,
+                        Some(handle.bbox),
+                        "angle {angle} extras {extras}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The empty laws (test 8): a content-parse-failure page is
+    /// `images: []` with the geometry intact (the engine's
+    /// empty-on-error law — never an error), and the `pages=`
+    /// normalization's parallel-output law: `pages=[1, 0]` reorders the
+    /// OUTPUT to the normalized selection, `page_index` on every entry,
+    /// the refusals byte-identical to page_layout's.
+    #[test]
+    fn images_the_empty_and_selection_laws() {
+        // A page whose content stream is a corrupt FlateDecode: the
+        // engine's image walk returns empty (document.rs:23771-23774).
+        let content = stream_object(b"/Filter /FlateDecode", b"\x78\x01\x01broken-flate-body");
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 5 0 R >> >> \
+               /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+            &content,
+            &red_1x1_image(),
+        ]);
+        let page = page_images(bytes, None, None, "pdf", ImageDecode::None, None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(page.images, Vec::new(), "the engine's empty-on-error law");
+        assert!(page.geometry.is_some(), "the geometry stays intact");
+
+        // pages=[1, 0]: the output parallel to the NORMALIZED selection.
+        let bytes = two_page_pdf("Alpha page text", "Beta page text");
+        let pages = page_images(
+            bytes.clone(),
+            Some(&[1, 0]),
+            None,
+            "pdf",
+            ImageDecode::None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            pages.iter().map(|p| p.page_index).collect::<Vec<_>>(),
+            [0, 1],
+            "normalized (sorted, deduped), output parallel to it"
+        );
+        // The selection refusals: byte-identical to page_layout's.
+        assert!(matches!(
+            page_images(
+                bytes.clone(),
+                Some(&[]),
+                None,
+                "pdf",
+                ImageDecode::None,
+                None
+            ),
+            Err(PagesError::Pages(_))
+        ));
+        assert!(matches!(
+            page_images(bytes, Some(&[9]), None, "pdf", ImageDecode::None, None),
+            Err(PagesError::Pages(_))
+        ));
+    }
+
+    /// The Handles-mode cheap law: with `decode` off, every entry's data
+    /// is `NotRequested` and the caps never run (nothing decoded).
+    #[test]
+    fn images_handles_mode_decodes_nothing() {
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 20000 /Height 20000 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+                b"\x00\x01\x02",
+            )],
+        );
+        let entry = first_image(bytes, ImageDecode::None);
+        assert_eq!(entry.data, ImageBytes::NotRequested);
+    }
+
+    // --- the page_text_chars probe (issue #206; the R4 mirror fix, the
+    // --- R9 mirrored predicate, the R14 oracle discipline) ----------------
+
+    /// The TJ-kerning fixture (the probe's measured one): 24pt "Wide"
+    /// drawn as `[(W) -120 (i) -120 (de)]` at (72, 700) — the kerning
+    /// rides char_widths, the stamping aligns, so the chars are the
+    /// MEASURED arm.
+    fn tj_wide_pdf(page_extras: &str) -> Vec<u8> {
+        layout_pdf(
+            "BT /F1 24 Tf 72 700 Td [(W) -120 (i) -120 (de)] TJ ET",
+            page_extras,
+        )
+    }
+
+    /// The §2.6-3 differential harness: the surface's chars against
+    /// `extract_chars`' origins — the same §9.4.4 model on an unrotated,
+    /// uncropped, single-line fixture (R14's oracle-validity statement:
+    /// sound as a MEASUREMENT oracle here, never as the surface's basis).
+    /// The measured arm pins BIT-EQUAL (the stamped offsets ARE the
+    /// oracle's origin_x by construction); the unmeasured arm accumulates
+    /// the drift for the zero-drift guard (measured 0.000 on every probe
+    /// fixture — the engine folds Tc/Tw/Tz/TJ into `char_widths`).
+    fn drift_against_oracle(bytes: Vec<u8>) -> (usize, usize, f32) {
+        // (surface chars, measured chars, max unmeasured drift)
+        let doc = PdfDocument::from_bytes(bytes.clone()).unwrap();
+        let oracle = doc.extract_chars(0).unwrap();
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        assert_eq!(
+            page.chars.len(),
+            oracle.len(),
+            "on an unrotated, uncropped, single-line fixture the counts align"
+        );
+        let mut measured = 0;
+        let mut drift = 0.0f32;
+        for (ch, oracle_char) in page.chars.iter().zip(oracle.iter()) {
+            if ch.x_measured {
+                measured += 1;
+                assert_eq!(
+                    ch.bbox.0.to_bits(),
+                    oracle_char.origin_x.to_bits(),
+                    "the measured arm is bit-equal to the oracle's origin_x"
+                );
+            } else {
+                drift = drift.max((ch.bbox.0 - oracle_char.origin_x).abs());
+            }
+            assert_eq!(ch.bbox.3, oracle_char.bbox.height, "the D2 pin, per char");
+        }
+        (page.chars.len(), measured, drift)
+    }
+
+    /// The R14 oracle pins, swept over the width-bookkeeping fixtures
+    /// (TJ kerning, Tc 5, Tw 10, Tz 150, a Tm jump — all rotation-0,
+    /// no crop): the measured arm bit-equal, the unmeasured arm's
+    /// zero-drift guard (the engine folds the adjustments into
+    /// char_widths, so the prefix-sum reproduces the origins exactly;
+    /// the analytic bound `|Σ TJ adjustments before i| × Tfs/1000` pt is
+    /// the docstring's, for the pathological width-bookkeeping-mismatch
+    /// class no fixture here produces).
+    #[test]
+    fn chars_measured_arm_bit_equal_and_the_unmeasured_arm_zero_drift() {
+        let fixtures = [
+            "BT /F1 24 Tf 72 700 Td [(W) -120 (i) -120 (de)] TJ ET",
+            "BT /F1 24 Tf 72 700 Td 5 Tc (Wide) Tj ET",
+            "BT /F1 24 Tf 72 700 Td 10 Tw (W i de) Tj ET",
+            "BT /F1 24 Tf 72 700 Td 150 Tz (Wide) Tj ET",
+            "BT /F1 24 Tf 72 700 Td (Wide) Tj 1 0 0 1 300 700 Tm (More) Tj ET",
+        ];
+        for content in fixtures {
+            let (count, measured, drift) = drift_against_oracle(layout_pdf(content, ""));
+            assert!(count >= 4, "{content}");
+            assert!(measured > 0 || drift == 0.0, "{content}: drift {drift}");
+            assert_eq!(drift, 0.0, "{content}: the zero-drift guard");
+        }
+        // The TJ fixture specifically: the measured arm is what the probe
+        // measured (stamped offsets).
+        let (_, measured, _) = drift_against_oracle(tj_wide_pdf(""));
+        assert_eq!(measured, 4, "the TJ fixture's span is stamped");
+    }
+
+    /// The TJ golden, in full: the four chars' boxes at the stamped
+    /// origins (72.0, 97.536, 105.744, 119.088 — the probe's measured
+    /// offsets), each box's height 24 (the D2 pin, per char), y the
+    /// baseline.
+    #[test]
+    fn chars_the_tj_fixture_golden() {
+        let page = page_text_chars(tj_wide_pdf(""), None, None, "pdf")
+            .unwrap()
+            .remove(0);
+        assert_eq!(page.chars.len(), 4);
+        let expected = [
+            ('W', 72.0, 25.536),
+            ('i', 97.536, 8.208),
+            ('d', 105.744, 13.344),
+            ('e', 119.088, 13.344),
+        ];
+        for (char_box, (ch, x, w)) in page.chars.iter().zip(expected) {
+            assert_eq!(char_box.ch, ch);
+            assert_box_near(char_box.bbox, (x, 700.0, w, 24.0), 0.001, "TJ char");
+            assert!(char_box.x_measured);
+            assert_eq!(char_box.wmode, 0);
+        }
+        // every box height == the font size (the D2 pin, per char)
+        assert!(page.chars.iter().all(|c| c.bbox.3 == 24.0));
+    }
+
+    /// THE JOIN LAW (§2.3): for every span, the chars' concat IS the
+    /// span's text — EXACTLY, across two opens (both sides iterate
+    /// `span.text.chars()` over the same deterministic parse) — and the
+    /// span-constant flags hold per span (R9's pin), with
+    /// `index_in_span` the code-point order.
+    #[test]
+    fn chars_join_the_span_texts_exactly_across_two_opens() {
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 72 700 Td (Hello) Tj ET\nBT /F1 12 Tf 72 100 Td (Wörld) Tj ET",
+            "",
+        );
+        let chars = page_text_chars(bytes.clone(), None, None, "pdf").unwrap();
+        let layout = page_layout(bytes, None, None, "pdf").unwrap();
+        assert_eq!(chars.len(), layout.len());
+        for (page_chars, page_layout) in chars.iter().zip(layout.iter()) {
+            assert_eq!(page_chars.page_index, page_layout.page_index);
+            assert_eq!(page_chars.format, page_layout.format);
+            assert_eq!(page_chars.geometry, page_layout.geometry);
+            for (span_index, span) in page_layout.spans.iter().enumerate() {
+                let mine: Vec<&TextCharBox> = page_chars
+                    .chars
+                    .iter()
+                    .filter(|c| c.span_index == span_index)
+                    .collect();
+                let joined: String = mine.iter().map(|c| c.ch).collect();
+                assert_eq!(joined, span.text, "span {span_index}: the join law");
+                // span-constant flags + code-point indexing
+                for (i, c) in mine.iter().enumerate() {
+                    assert_eq!(c.index_in_span, i);
+                    assert_eq!(
+                        (c.x_measured, c.wmode),
+                        (mine[0].x_measured, mine[0].wmode),
+                        "the flags are span-constant (R9)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Helper: the chars probe over an already-open doc (the oracle
+    /// tests' shape, `page_layout_bytes`' twin).
+    fn page_text_chars_bytes(doc: &PdfDocument) -> Vec<PageCharsData> {
+        (0..doc.page_count().unwrap())
+            .map(|page| page_text_chars_one(doc, page, "pdf"))
+            .collect()
+    }
+
+    /// The render-anchored CHAR oracle (§2.6-2, R18's caveats): a plain
+    /// fixture (no text_rise — `to_chars` puts every glyph at
+    /// `span.bbox.y`, so a super/sub span's ink is not in its char
+    /// boxes), cap-height glyphs ('H', no descender/italic overhang),
+    /// 72 dpi. For each angle × {no crop, crop}, the single char's
+    /// advance box contains the rendered ink; the (72, 700) "Hello"
+    /// baseline pins 'H''s box x at 72.0 ± 0.5 and every box's height at
+    /// 24.0 per char.
+    #[test]
+    fn chars_land_where_the_render_draws_the_ink_across_the_angle_crop_matrix() {
+        let dark = |r: u8, g: u8, b: u8| r < 128 && g < 128 && b < 128;
+        for angle in [0, 90, 180, 270] {
+            for (crop, raw_extras) in [(false, ""), (true, "/CropBox [100 100 500 700]")] {
+                let page_extras = match angle {
+                    0 => raw_extras.to_string(),
+                    a if raw_extras.is_empty() => format!("/Rotate {a}"),
+                    a => format!("/Rotate {a} {raw_extras}"),
+                };
+                // Marker placement inside the crop when cropped (the
+                // render clips to the visible box).
+                let (glyph_x, glyph_y): (f32, f32) =
+                    if crop { (150.0, 400.0) } else { (72.0, 700.0) };
+                let content = format!("BT /F1 24 Tf {glyph_x} {glyph_y} Td (H) Tj ET");
+                let bytes = layout_pdf(&content, &page_extras);
+                let doc = PdfDocument::from_bytes(bytes).unwrap();
+                let (_, ink) = render_ink(&doc, dark);
+                let page = page_text_chars_bytes(&doc).remove(0);
+                assert_eq!(page.chars.len(), 1, "angle {angle} crop {crop}");
+                let (bx, by, bw, bh) = page.chars[0].bbox;
+                assert!(
+                    bx as f64 - 1.5 <= ink.0
+                        && by as f64 - 1.5 <= ink.1
+                        && ink.2 <= (bx + bw) as f64 + 1.5
+                        && ink.3 <= (by + bh) as f64 + 1.5,
+                    "angle {angle} crop {crop}: the glyph ink ({ink:?}) must sit inside the \
+                     char's advance box ({bx},{by},{bw},{bh})"
+                );
+            }
+        }
+        // The (72, 700) "Hello" golden: 'H' box x starts at 72.0 ± 0.5,
+        // every box's height == 24.0 (the D2 pin, per char).
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "");
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        assert_eq!(page.chars.len(), 5);
+        assert!(near(page.chars[0].bbox.0, 72.0, 0.5), "{:?}", page.chars[0]);
+        assert!(page.chars.iter().all(|c| c.bbox.3 == 24.0));
+    }
+
+    /// THE R4 MIRROR FIX, per-char ink pin (the 180 page — the union pin
+    /// cannot see the mirroring): on a /Rotate 180 page the glyph order
+    /// runs right-to-left in the displayed frame, so the FIXED chars'
+    /// boxes strictly DECREASE in x along the run, the whole-word ink's
+    /// RIGHT edge lands in the FIRST char's box ('W' — pre-fix it sat at
+    /// the LEFT edge: the ~35 pt mirrored displacement, measured span
+    /// (479.568, 68, 60.432, 24), 'W' box x 479.568, ink x 514.464), and
+    /// the union of the char boxes still equals the mapped span box.
+    #[test]
+    fn chars_on_a_180_page_run_right_to_left_with_the_first_char_at_the_ink_right_edge() {
+        let dark = |r: u8, g: u8, b: u8| r < 128 && g < 128 && b < 128;
+        let bytes = tj_wide_pdf("/Rotate 180");
+        let doc = PdfDocument::from_bytes(bytes.clone()).unwrap();
+        let (_, ink) = render_ink(&doc, dark);
+        let page = page_text_chars(bytes.clone(), None, None, "pdf")
+            .unwrap()
+            .remove(0);
+        assert_eq!(page.chars.len(), 4);
+        // glyph order runs right-to-left: strictly decreasing x
+        for pair in page.chars.windows(2) {
+            assert!(
+                pair[0].bbox.0 > pair[1].bbox.0,
+                "the mirror fix: char boxes descend in x on a 180 page ({} vs {})",
+                pair[0].bbox.0,
+                pair[1].bbox.0
+            );
+        }
+        // the ink's right edge is in the FIRST char's box ('W'), the left
+        // edge in the LAST's ('e') — the per-char pin
+        let first = &page.chars[0];
+        assert!(
+            ink.2 <= (first.bbox.0 + first.bbox.2) as f64 + 1.5
+                && ink.2 >= first.bbox.0 as f64 - 1.5,
+            "the first char's box ({:?}) must contain the ink's right edge ({})",
+            first.bbox,
+            ink.2
+        );
+        let last = page.chars.last().unwrap();
+        assert!(
+            ink.0 >= last.bbox.0 as f64 - 1.5 && ink.0 <= (last.bbox.0 + last.bbox.2) as f64 + 1.5,
+            "the last char's box ({:?}) must contain the ink's left edge ({})",
+            last.bbox,
+            ink.0
+        );
+        // the union law survives: the union of the char boxes == the
+        // mapped span box (page_layout's)
+        let layout = page_layout(bytes, None, None, "pdf").unwrap().remove(0);
+        let span_box = layout.spans[0].bbox;
+        let union = (
+            page.chars
+                .iter()
+                .map(|c| c.bbox.0)
+                .fold(f32::INFINITY, f32::min),
+            page.chars
+                .iter()
+                .map(|c| c.bbox.1)
+                .fold(f32::INFINITY, f32::min),
+            page.chars
+                .iter()
+                .map(|c| c.bbox.0 + c.bbox.2)
+                .fold(f32::NEG_INFINITY, f32::max),
+            page.chars
+                .iter()
+                .map(|c| c.bbox.1 + c.bbox.3)
+                .fold(f32::NEG_INFINITY, f32::max),
+        );
+        assert_box_near(
+            (union.0, union.1, union.2 - union.0, union.3 - union.1),
+            span_box,
+            0.01,
+            "the union law on the 180 page",
+        );
+        // and every char is the prefix-sum arm (the stamping skips 180
+        // wholesale — the skip set coincides with the mapped set)
+        assert!(page.chars.iter().all(|c| !c.x_measured));
+    }
+
+    /// The WMode-1 pin (§2.6-5, R4's measured shape): every char carries
+    /// `wmode: 1`, `x_measured: false` (the offsets empty, the widths
+    /// [-24, -24]), and the boxes are the MEASURED normalized shape —
+    /// 'A' (276, 700, 24, 24), 'B' (252, 700, 24, 24): positive widths,
+    /// displaced one advance LEFT of their origins, stacked along x —
+    /// NOT "negative widths preserved" (Rect::new makes that
+    /// impossible). The divergence from the truth (#203's ink column at
+    /// (300, 652, 24, 72)) is pinned too: an engine bump that starts
+    /// flattening honestly re-opens the caveat instead of flipping a
+    /// green test.
+    #[test]
+    fn chars_wmode1_carries_the_flattened_fiction_flagged() {
+        let bytes = wmode1_pdf("BT /F1 24 Tf 300 700 Td <00410042> Tj ET", "", false);
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        assert_eq!(page.chars.len(), 2);
+        let a = &page.chars[0];
+        let b = &page.chars[1];
+        assert_eq!((a.ch, b.ch), ('A', 'B'));
+        assert_eq!((a.wmode, b.wmode), (1, 1), "the load-bearing honesty flag");
+        assert!(
+            !a.x_measured && !b.x_measured,
+            "the offsets are empty (measured)"
+        );
+        assert_box_near(a.bbox, (276.0, 700.0, 24.0, 24.0), 0.001, "the 'A' fiction");
+        assert_box_near(b.bbox, (252.0, 700.0, 24.0, 24.0), 0.001, "the 'B' fiction");
+        // the divergence from the truth: the true ink column (300, 652,
+        // 24, 72) — no char box may contain it (an engine bump that
+        // starts flattening honestly flips this pin and re-opens the
+        // caveat)
+        for c in &page.chars {
+            let (bx, by, bw, bh) = c.bbox;
+            let ink_inside = 300.0 >= bx - 0.5
+                && 652.0 >= by - 0.5
+                && 300.0 + 24.0 <= bx + bw + 0.5
+                && 652.0 + 72.0 <= by + bh + 0.5;
+            assert!(
+                !ink_inside,
+                "the wmode-1 fiction must stay visible: the char box ({bx},{by},{bw},{bh}) \
+                 must not contain the true ink column (300, 652, 24, 72)"
+            );
+        }
+    }
+
+    /// The sub-span grounding pins (§2.6-6, R5): the closed form ==
+    /// the general union on the LTR fixture (a telescoping identity);
+    /// `[0, len)` == the span's mapped box on a plain LTR fixture ONLY;
+    /// a mid-span `[1:3]` against the hand-computed union; and the
+    /// wmode-1 case where the closed form does NOT hold (the general
+    /// union is the law there).
+    #[test]
+    fn chars_sub_span_grounding_arithmetic() {
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "");
+        let page = page_text_chars(bytes.clone(), None, None, "pdf")
+            .unwrap()
+            .remove(0);
+        let chars = &page.chars;
+
+        // union over a range, the general form
+        let union = |range: std::ops::Range<usize>| {
+            let slice = &chars[range];
+            (
+                slice.iter().map(|c| c.bbox.0).fold(f32::INFINITY, f32::min),
+                slice.iter().map(|c| c.bbox.1).fold(f32::INFINITY, f32::min),
+                slice
+                    .iter()
+                    .map(|c| c.bbox.0 + c.bbox.2)
+                    .fold(f32::NEG_INFINITY, f32::max),
+                slice
+                    .iter()
+                    .map(|c| c.bbox.1 + c.bbox.3)
+                    .fold(f32::NEG_INFINITY, f32::max),
+            )
+        };
+        // closed form == union on the LTR fixture (consecutive boxes)
+        let closed_form = |range: std::ops::Range<usize>| {
+            let slice = &chars[range];
+            (
+                slice[0].bbox.0,
+                slice[0].bbox.1,
+                slice[0].bbox.3,
+                slice.iter().map(|c| c.bbox.2).sum::<f32>(),
+            )
+        };
+        for range in [0..1, 1..3, 0..5] {
+            let u = union(range.clone());
+            let f = closed_form(range.clone());
+            assert!(
+                near(u.0, f.0, 0.01)
+                    && near(u.1, f.1, 0.01)
+                    && near(u.2 - u.0, f.3, 0.01)
+                    && near(u.3 - u.1, f.2, 0.01),
+                "{range:?}: the closed form is the union's telescoping: {f:?} vs {u:?}"
+            );
+        }
+        // the mid-span hand golden: chars[1..3] of "Hello" — the union of
+        // 'e' and 'l'
+        let mid = union(1..3);
+        assert_box_near(
+            (mid.0, mid.1, mid.2 - mid.0, mid.3 - mid.1),
+            (
+                chars[1].bbox.0,
+                700.0,
+                chars[1].bbox.2 + chars[2].bbox.2,
+                24.0,
+            ),
+            0.001,
+            "the [1:3] union",
+        );
+        // [0, len) == the span's own mapped box (plain LTR only)
+        let layout = page_layout(bytes, None, None, "pdf").unwrap().remove(0);
+        let whole = union(0..5);
+        assert_box_near(
+            (whole.0, whole.1, whole.2 - whole.0, whole.3 - whole.1),
+            layout.spans[0].bbox,
+            0.01,
+            "the whole-span union == the span's mapped box (LTR)",
+        );
+
+        // The wmode-1 case: the closed form does NOT hold — 'A'+'B' stack
+        // BACKWARD along x (276 then 252), so the closed form's
+        // left-edge-first-x + positive-sum-width answer is wrong; the
+        // general union is the law.
+        let bytes = wmode1_pdf("BT /F1 24 Tf 300 700 Td <00410042> Tj ET", "", false);
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        let wchars = &page.chars;
+        let w_union = (
+            wchars
+                .iter()
+                .map(|c| c.bbox.0)
+                .fold(f32::INFINITY, f32::min),
+            wchars
+                .iter()
+                .map(|c| c.bbox.0 + c.bbox.2)
+                .fold(f32::NEG_INFINITY, f32::max),
+        );
+        let w_closed = (
+            wchars[0].bbox.0,
+            wchars[0].bbox.0 + wchars.iter().map(|c| c.bbox.2).sum::<f32>(),
+        );
+        assert!(
+            !near(w_union.0, w_closed.0, 0.01) || !near(w_union.1, w_closed.1, 0.01),
+            "the closed form must fail on wmode-1: closed {w_closed:?} vs union {w_union:?}"
+        );
+    }
+
+    /// The empty laws (§2.6-7): a content-parse-failure page is
+    /// `chars: []` with the geometry intact; a geometry-failure page is
+    /// `chars: []` with geometry None (page_layout's law); the crop
+    /// never ADDS content beyond the span parse (the chars are the SAME
+    /// parse the span surface serves); and the `pages=` selection laws
+    /// hold byte-pinned, the encrypted door first.
+    #[test]
+    fn chars_the_empty_and_selection_laws() {
+        // content-parse failure: the engine's empty-on-error law
+        let content = stream_object(b"/Filter /FlateDecode", b"\x78\x01\x01broken-flate-body");
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> \
+               /MediaBox [0 0 612 792] /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            &content,
+        ]);
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        assert_eq!(page.chars, Vec::new());
+        assert!(page.geometry.is_some(), "the geometry stays intact");
+
+        // geometry failure: a degenerate MediaBox is undeclarable —
+        // chars empty, geometry None
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 0 0] /Contents 4 0 R >>",
+            b"<< /Length 33 >>\nstream\nBT /F1 12 Tf 50 50 Td (Hi) Tj ET\nendstream",
+        ]);
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        assert_eq!(page.chars, Vec::new());
+        assert_eq!(page.geometry, None);
+
+        // the chars never exceed the span parse (the crop's 13-vs-6
+        // divergence stays on extract_chars' side of the line)
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 150 600 Td (Inside) Tj ET\nBT /F1 24 Tf 30 30 Td (Outside) Tj ET",
+            "/CropBox [100 100 500 700]",
+        );
+        let doc = PdfDocument::from_bytes(bytes.clone()).unwrap();
+        let raw_chars = doc.extract_chars(0).unwrap();
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        assert!(
+            page.chars.len() < raw_chars.len(),
+            "the crop-dropped run is beyond the span parse: {} chars vs {} raw",
+            page.chars.len(),
+            raw_chars.len()
+        );
+
+        // the pages= selection laws
+        let bytes = two_page_pdf("Alpha page text", "Beta page text");
+        let pages = page_text_chars(bytes.clone(), Some(&[1, 0]), None, "pdf").unwrap();
+        assert_eq!(
+            pages.iter().map(|p| p.page_index).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert!(matches!(
+            page_text_chars(bytes.clone(), Some(&[]), None, "pdf"),
+            Err(PagesError::Pages(_))
+        ));
+        assert!(matches!(
+            page_text_chars(bytes, Some(&[9]), None, "pdf"),
+            Err(PagesError::Pages(_))
+        ));
+        // the encrypted door: fail closed, before any content walk
+        let locked = encrypted_pdf("torque", "owner-pw");
+        assert!(matches!(
+            page_text_chars(locked, None, None, "pdf"),
+            Err(PagesError::Pdf(PdfError::EncryptedPdf))
+        ));
+    }
+
+    /// The R15 pin: the stamping skip is `rotation_degrees != 0` on EVERY
+    /// page rotation — a 90°-drawn run on a /Rotate 0 page also comes
+    /// back unstamped (`x_measured: false`).
+    #[test]
+    fn chars_a_rotated_run_on_a_zero_rotation_page_is_unstamped() {
+        let bytes = layout_pdf("BT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET", "");
+        let page = page_text_chars(bytes, None, None, "pdf").unwrap().remove(0);
+        assert_eq!(page.chars.len(), 4);
+        assert!(page.chars.iter().all(|c| !c.x_measured), "R15: not stamped");
+        assert!(page.chars.iter().all(|c| c.wmode == 0));
+    }
+
+    /// The measured flag's mirrored-predicate law (R9): a stamped span
+    /// whose offsets do NOT fit its bbox degrades to the prefix-sum arm
+    /// and must be REPORTED as unmeasured — the flag mirrors to_chars'
+    /// gate (len == count && finite && within bbox ± 0.5), never
+    /// `!offsets.is_empty()`. The probe's spans all carry in-box offsets,
+    /// so the gate's FIT half is pinned against a synthetic span: a span
+    /// whose offsets cover every glyph but fall outside the box is
+    /// exactly the degraded shape.
+    #[test]
+    fn chars_the_measured_flag_mirrors_the_gate_not_emptiness() {
+        // A real span, then synthetic offsets covering both glyphs but
+        // the second outside the box (the degraded shape to_chars itself
+        // refuses).
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hi) Tj ET", "");
+        let doc = PdfDocument::from_bytes(bytes).unwrap();
+        let mut span = doc.extract_spans(0).unwrap().remove(0);
+        span.char_x_offsets = vec![span.bbox.x, span.bbox.x + span.bbox.width + 5.0];
+        assert!(
+            !span_x_measured(&span),
+            "the fit half: an offset outside bbox ± 0.5 degrades the arm"
+        );
+        // and the same offsets INSIDE the box light it up
+        span.char_x_offsets = vec![span.bbox.x, span.bbox.x + 10.0];
+        assert!(span_x_measured(&span), "the covered arm");
+        // the length half: one offset short is unmeasured
+        span.char_x_offsets = vec![span.bbox.x];
+        assert!(!span_x_measured(&span));
+        // a non-finite offset is unmeasured
+        span.char_x_offsets = vec![span.bbox.x, f32::NAN];
+        assert!(!span_x_measured(&span));
     }
 }

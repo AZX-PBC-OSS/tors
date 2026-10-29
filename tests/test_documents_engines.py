@@ -48,6 +48,7 @@ from documents import (
     ENGINES_DIR,
     ENGINES_FILENAMES,
     HTML_FRAGMENT_DOCUMENT,
+    JP2_SIGNATURE_BOX,
     PDF_LINK_LABEL,
     PDF_LINK_URL,
     RICH_H1,
@@ -76,16 +77,27 @@ from documents import (
     generate_pdf_big,
     generate_pdf_crop,
     generate_pdf_crop_partial,
+    generate_pdf_encrypted_dct,
+    generate_pdf_encrypted_jpx,
     generate_pdf_layout,
     generate_pdf_layout_artifact,
     generate_pdf_layout_artifact_bmc,
     generate_pdf_layout_baseline,
     generate_pdf_layout_bold_mid_line,
     generate_pdf_layout_broken_flate,
+    generate_pdf_layout_broken_image,
+    generate_pdf_layout_ccitt,
     generate_pdf_layout_crop,
     generate_pdf_layout_crop_partial_span,
     generate_pdf_layout_dangling_contents,
+    generate_pdf_layout_dct,
+    generate_pdf_layout_gradient,
+    generate_pdf_layout_gradient_source,
+    generate_pdf_layout_huge_image,
     generate_pdf_layout_image,
+    generate_pdf_layout_indexed,
+    generate_pdf_layout_jpx,
+    generate_pdf_layout_missing_colorspace,
     generate_pdf_layout_pages,
     generate_pdf_layout_rotated,
     generate_pdf_layout_rotated_run,
@@ -127,22 +139,29 @@ try:  # the payload wheel (tors[documents])
         DocxStructure,
         HtmlStructure,
         ImageBox,
+        ImageBytes,
         NeedsOcrError,
+        PageCharsData,
         PageGeometry,
+        PageImageEntry,
+        PageImagesData,
         PageLayout,
         PageTables,
         PdfPermissions,
         PdfSecurity,
         Row,
         Table,
+        TextChar,
         TextLine,
         TextSpan,
         Word,
         XlsxStructure,
         document_structure,
         page_geometry,
+        page_images,
         page_layout,
         page_tables,
+        page_text_chars,
         pdf_classify,
         pdf_extract,
         pdf_page_count,
@@ -160,22 +179,29 @@ except ImportError:  # pragma: no cover - the in-base wiring alternative
             DocxStructure,
             HtmlStructure,
             ImageBox,
+            ImageBytes,
             NeedsOcrError,
+            PageCharsData,
             PageGeometry,
+            PageImageEntry,
+            PageImagesData,
             PageLayout,
             PageTables,
             PdfPermissions,
             PdfSecurity,
             Row,
             Table,
+            TextChar,
             TextLine,
             TextSpan,
             Word,
             XlsxStructure,
             document_structure,
             page_geometry,
+            page_images,
             page_layout,
             page_tables,
+            page_text_chars,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -1623,6 +1649,8 @@ class TestPdfFamilyBackendAndBudget:
             pdf_link_uris,
             page_layout,
             page_tables,
+            page_images,
+            page_text_chars,
         ):
             for bad in (-1,):
                 with pytest.raises(ValueError, match="positive"):
@@ -1648,6 +1676,14 @@ class TestPdfFamilyBackendAndBudget:
             page_tables(data=generate_docx_pgsz(), max_bytes=0)
         with pytest.raises(ValueError, match="(?i)unrecognized"):
             page_tables(data=b"junk bytes", max_bytes=0)
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_images(data=generate_docx_pgsz(), max_bytes=0)
+        with pytest.raises(ValueError, match="(?i)unrecognized"):
+            page_images(data=b"junk bytes", max_bytes=0)
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_text_chars(data=generate_docx_pgsz(), max_bytes=0)
+        with pytest.raises(ValueError, match="(?i)unrecognized"):
+            page_text_chars(data=b"junk bytes", max_bytes=0)
 
     def test_an_explicit_budget_binds_the_pdf_family_pre_read(self, tmp_path: Path) -> None:
         """The shared source-spine gate, extended to the pdf family: the
@@ -1949,6 +1985,8 @@ class TestEncryptedPdfs:
             page_geometry,
             page_layout,
             page_tables,
+            page_images,
+            page_text_chars,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -4204,6 +4242,56 @@ class TestLayoutClassContracts:
             (Row, ["cells", "is_header"]),
             (Cell, ["text", "bbox", "colspan", "rowspan"]),
             (
+                PageImagesData,
+                ["page_index", "format", "geometry", "images"],
+            ),
+            (
+                PageImageEntry,
+                [
+                    "bbox",
+                    "width_px",
+                    "height_px",
+                    "rotation_degrees",
+                    "paint_order",
+                    "color_space",
+                    "color_space_declared",
+                    "indexed_base",
+                    "bits_per_component",
+                    "byte_size_compressed",
+                    "filters",
+                    "is_inline",
+                    "data",
+                ],
+            ),
+            (
+                ImageBytes,
+                [
+                    "kind",
+                    "bytes",
+                    "container",
+                    "pixels",
+                    "width_px",
+                    "height_px",
+                    "components",
+                    "bpc",
+                    "pixel_format",
+                    "samples_are_raw",
+                    "decode_folded_in",
+                    "icc",
+                    "ccitt",
+                    "error_kind",
+                    "message",
+                    "scope",
+                    "limit_bytes",
+                    "needed_bytes",
+                ],
+            ),
+            (PageCharsData, ["page_index", "format", "geometry", "chars"]),
+            (
+                TextChar,
+                ["char", "bbox", "span_index", "index_in_span", "wmode", "x_measured"],
+            ),
+            (
                 PdfSecurity,
                 [
                     "encrypted",
@@ -4249,6 +4337,11 @@ class TestLayoutClassContracts:
         image_page = page_layout(data=generate_pdf_layout_image())[0]
         tabled = page_tables(data=generate_pdf_table_ruled())[0]
         security = pdf_security(data=_encrypted_pdf())
+        # the #205/#206 classes' live samples: the image entry from a
+        # decoded gradient page (the data arm's raw), the char from the
+        # baseline page's span parse
+        images_entry = page_images(data=generate_pdf_layout_gradient(), decode="pixels")[0]
+        chars_page = page_text_chars(data=generate_pdf_layout_baseline())[0]
         samples: dict[type, object] = {
             PageLayout: page,
             TextSpan: page.spans[0],
@@ -4259,6 +4352,11 @@ class TestLayoutClassContracts:
             Table: tabled.tables[0],
             Row: tabled.tables[0].rows[0],
             Cell: tabled.tables[0].rows[0].cells[0],
+            PageImagesData: images_entry,
+            PageImageEntry: images_entry.images[0],
+            ImageBytes: images_entry.images[0].data,
+            PageCharsData: chars_page,
+            TextChar: chars_page.chars[0],
             PdfSecurity: security,
             PdfPermissions: security.permissions,
         }
@@ -4288,8 +4386,28 @@ class TestLayoutClassContracts:
         assert tables_entry.tables[0].rows[0] == tables_same.tables[0].rows[0]
         assert tables_entry.tables[0].rows[0].cells[0] == tables_same.tables[0].rows[0].cells[0]
         assert tables_entry.geometry == tables_same.geometry
+        # the #205/#206 classes: the same structural equality, nested
+        images_entry = page_images(data=generate_pdf_layout_gradient(), decode="pixels")[0]
+        images_same = page_images(data=generate_pdf_layout_gradient(), decode="pixels")[0]
+        assert images_entry == images_same
+        assert images_entry.images[0] == images_same.images[0]
+        assert images_entry.images[0].data == images_same.images[0].data
+        chars_entry = page_text_chars(data=generate_pdf_layout_baseline())[0]
+        chars_same = page_text_chars(data=generate_pdf_layout_baseline())[0]
+        assert chars_entry == chars_same
+        assert chars_entry.chars[0] == chars_same.chars[0]
+        assert repr(images_entry.images[0].data).startswith("ImageBytes(")
         # repr: the class name and no crash
-        for value in (page, page.spans[0], page.lines[0], page.lines[0].words[0], page.geometry):
+        for value in (
+            page,
+            page.spans[0],
+            page.lines[0],
+            page.lines[0].words[0],
+            page.geometry,
+            images_entry.images[0],
+            images_entry.images[0].data,
+            chars_entry.chars[0],
+        ):
             assert type(value).__name__ in repr(value)
         for value in (
             tables_entry,
@@ -4318,6 +4436,411 @@ class TestLayoutClassContracts:
         perms_repr = repr(report.permissions)
         assert perms_repr.startswith("PdfPermissions(")
         assert "print_low_res=" in perms_repr and "raw_p=" in perms_repr
+
+
+# --- the page_images and page_text_chars surfaces (issues #205/#206) -----------
+
+
+class TestPageImages:
+    """The image-bytes probe's Python pins (§1.6's Python half + the R2
+    shipped-wheel pins, which only this suite — running against the BUILT
+    wheel — can hold): the decode modes, the four-arm data law, the
+    container sniff, the caps, the typed failures, the honesty flags, and
+    the class laws."""
+
+    def test_handles_mode_is_the_default_and_decodes_nothing(self) -> None:
+        """decode=None (the default): every entry's data.kind is
+        'not_requested' and the caps never run (the cheap law) — even for
+        the 1.2 GB estimate fixture."""
+        from tors_documents import page_images
+
+        for fixture in (generate_pdf_layout_two_images(), generate_pdf_layout_huge_image()):
+            for entry in page_images(data=fixture)[0].images:
+                assert entry.data.kind == "not_requested"
+                assert entry.data.bytes is None
+                assert entry.data.pixels is None
+                assert entry.data.error_kind is None
+
+    def test_pixels_mode_decodes_the_gradient_deterministically(self) -> None:
+        """decode='pixels' on the 64×64 gradient: Raw, Grayscale, 4096
+        bytes == the gradient source bytes (deterministic), bpc 8,
+        samples_are_raw TRUE (R25: nothing transformed this buffer — the
+        common case, not a footnote)."""
+        from tors_documents import page_images
+
+        entry = page_images(data=generate_pdf_layout_gradient(), decode="pixels")[0].images[0]
+        assert entry.data.kind == "raw"
+        assert entry.data.pixel_format == "grayscale"
+        assert entry.data.pixels == generate_pdf_layout_gradient_source()
+        assert (entry.data.components, entry.data.bpc) == (1, 8)
+        assert entry.data.samples_are_raw is True
+        assert entry.data.decode_folded_in is False
+        # the entry's dictionary metadata is its own (R22): dims on the
+        # entry, buffer dims on the payload
+        assert (entry.width_px, entry.height_px, entry.bits_per_component) == (64, 64, 8)
+
+    def test_container_mode_on_dct_and_the_filter_leaves_flate_alone(self) -> None:
+        """decode='container': the DCT fixture serves Container{jpeg}
+        starting ff d8 (the committed 301-byte JPEG's own bytes); the
+        Flate gradient stays not_requested (the same fixture decodes in
+        pixels mode — pinned both ways, so the filter cannot silently
+        become a decoder)."""
+        from tors_documents import page_images
+
+        entry = page_images(data=generate_pdf_layout_dct(), decode="container")[0].images[0]
+        assert entry.data.kind == "container"
+        assert entry.data.container == "jpeg"
+        assert entry.data.bytes[:2] == b"\xff\xd8"
+        assert len(entry.data.bytes) == 301
+
+        filtered = page_images(
+            data=generate_pdf_layout_gradient(), decode="container"
+        )[0].images[0]
+        assert filtered.data.kind == "not_requested"
+        assert filtered.data.bytes is None
+        assert filtered.filters == ["FlateDecode"]
+        decoded = page_images(
+            data=generate_pdf_layout_gradient(), decode="pixels"
+        )[0].images[0]
+        assert decoded.data.kind == "raw"
+
+    def test_container_mode_never_parses_the_jpeg(self) -> None:
+        """The R19 pin: a 1-byte garbage /DCTDecode payload still comes
+        back as Container{jpeg} — a parsed JPEG would error; the
+        passthrough never parses."""
+        from tors_documents import page_images
+
+        entry = page_images(data=generate_pdf_layout_dct(garbage=True), decode="pixels")[
+            0
+        ].images[0]
+        assert entry.data.kind == "container"
+        assert entry.data.bytes == b"\x00"
+        assert entry.data.container == "jpeg"
+
+    def test_the_bare_jpx_container_sniff_and_the_shipped_unsupported(self) -> None:
+        """The shipped wheel cannot decode JPX at all (R2, feature-gated):
+        the bare-/JPXDecode stream's container is the only JPX content the
+        surface can ever serve — 'jp2' for the signature box, 'j2k_codestream'
+        for the SOC marker, the typed 'decode' error for neither; in
+        pixels mode the engine's own classification rides (typed, never
+        silent — the shipped wheel's feature-naming string verbatim)."""
+        from tors_documents import page_images
+
+        jp2 = page_images(data=generate_pdf_layout_jpx("jp2"), decode="container")[0].images[0]
+        assert jp2.data.kind == "container"
+        assert jp2.data.container == "jp2"
+        assert jp2.data.bytes[:12] == JP2_SIGNATURE_BOX
+
+        soc = page_images(data=generate_pdf_layout_jpx("soc"), decode="container")[0].images[0]
+        assert soc.data.kind == "container"
+        assert soc.data.container == "j2k_codestream"
+
+        junk = page_images(data=generate_pdf_layout_jpx("junk"), decode="container")[0].images[0]
+        assert junk.data.kind == "error"
+        assert junk.data.error_kind == "decode"
+        assert "neither a JP2 file" in junk.data.message
+
+        pixels = page_images(data=generate_pdf_layout_jpx("jp2"), decode="pixels")[0].images[0]
+        assert pixels.data.kind == "error"
+        assert pixels.data.error_kind == "unsupported"
+        assert "rebuild with the `jpeg2000` feature to decode" in pixels.data.message
+
+    def test_the_encrypted_dct_container_is_decrypted(self) -> None:
+        """The R1 pin against the built wheel: the encrypted PDF's DCT
+        container comes back DECRYPTED (ff d8 — the JPEG's own bytes);
+        the raw stream bytes are ciphertext and are never served."""
+        from tors_documents import page_images
+
+        entry = page_images(
+            data=generate_pdf_encrypted_dct(), password="user", decode="container"
+        )[0].images[0]
+        assert entry.data.kind == "container"
+        assert entry.data.container == "jpeg"
+        assert entry.data.bytes[:2] == b"\xff\xd8"
+        assert len(entry.data.bytes) == 301
+
+    def test_the_encrypted_jpx_container_is_refused_naming_the_cause(self) -> None:
+        """The F1 pin against the built wheel: an encrypted bare-/JPXDecode
+        image's container would be ciphertext — the typed 'unsupported'
+        refusal carries the engine's feature-naming string verbatim AND
+        names the encrypted-document cause."""
+        from tors_documents import page_images
+
+        entry = page_images(
+            data=generate_pdf_encrypted_jpx(), password="user", decode="container"
+        )[0].images[0]
+        assert entry.data.kind == "error"
+        assert entry.data.error_kind == "unsupported"
+        assert "rebuild with the `jpeg2000` feature to decode" in entry.data.message
+        assert "encrypted" in entry.data.message
+        assert entry.data.bytes is None
+
+    def test_a_decode_failure_is_a_typed_entry_with_siblings_intact(self) -> None:
+        """The truncated FlateDecode stream: a typed 'decode' entry with
+        every handle field intact, the sibling intact, the paint_order
+        sequence complete."""
+        from tors_documents import page_images
+
+        page = page_images(data=generate_pdf_layout_broken_image(), decode="pixels")[0]
+        assert [entry.paint_order for entry in page.images] == [0, 1]
+        assert page.images[0].data.kind == "raw"
+        failed = page.images[1]
+        assert failed.data.kind == "error"
+        assert failed.data.error_kind == "decode"
+        assert failed.data.message
+        assert (failed.width_px, failed.height_px) == (2, 2)
+        assert failed.filters == ["FlateDecode"]
+
+    def test_the_caps_refuse_before_the_labour(self) -> None:
+        """The 1.2 GB estimate fixture: the typed 'size_cap' entry
+        (scope 'image', limit 256 MiB, needed 1.2 GB) BEFORE the decode
+        — the corrupt deflate body is the discriminator (a labouring
+        engine would answer 'decode'); the override lifts the per-image
+        cap; the 100 MP DCT's small container is SERVED."""
+        from tors_documents import page_images
+
+        entry = page_images(data=generate_pdf_layout_huge_image(), decode="pixels")[0].images[0]
+        assert entry.data.kind == "error"
+        assert entry.data.error_kind == "size_cap"
+        assert entry.data.scope == "image"
+        assert entry.data.limit_bytes == 256 * 1024 * 1024
+        assert entry.data.needed_bytes == 20_000 * 20_000 * 3
+        assert (
+            entry.data.limit_bytes < entry.data.needed_bytes
+        ), "the refusal must be the arithmetic's, before the labour"
+
+        # the 100 MP DCT: the estimate is the CONTAINER's own size
+        giant_dct = generate_pdf_layout_dct()
+        served = page_images(data=giant_dct, decode="pixels")[0].images[0]
+        assert served.data.kind == "container", served.data.error_kind
+
+    def test_the_ccitt_payload_carries_all_seven_params(self) -> None:
+        """The packed codestream verbatim (in == out, measured), and the
+        seven /DecodeParms fields — without them the consumer could not
+        decode the payload at all."""
+        from tors_documents import page_images
+
+        entry = page_images(data=generate_pdf_layout_ccitt(), decode="pixels")[0].images[0]
+        assert entry.data.kind == "raw"
+        assert entry.filters == ["CCITTFaxDecode"]
+        assert entry.data.pixels == bytes(range(9))
+        assert (entry.data.components, entry.data.bpc) == (1, 1)
+        assert entry.data.samples_are_raw is True
+        ccitt = entry.data.ccitt
+        assert ccitt is not None
+        k, columns, rows, black_is_1, end_of_line, encoded_byte_align, end_of_block = ccitt
+        assert (k, columns, rows) == (-1, 8, 8)
+        assert (black_is_1, end_of_line, encoded_byte_align, end_of_block) == (
+            False,
+            False,
+            False,
+            True,
+        )
+
+    def test_the_indexed_payload_and_the_missing_colorspace_flag(self) -> None:
+        """Indexed: the buffer is the EXPANDED palette RGB (192 bytes,
+        samples_are_raw False, the payload's own components/bpc) while the
+        entry's dictionary bpc stays 8 (R22) and indexed_base names the
+        base. The missing /ColorSpace: the DeviceRGB default flagged
+        (color_space_declared False) with the typed decode failure."""
+        from tors_documents import page_images
+
+        entry = page_images(data=generate_pdf_layout_indexed(), decode="pixels")[0].images[0]
+        assert (entry.color_space, entry.indexed_base) == ("Indexed", "DeviceRGB")
+        assert entry.bits_per_component == 8
+        assert entry.data.kind == "raw"
+        assert len(entry.data.pixels) == 192
+        assert (entry.data.components, entry.data.bpc) == (3, 8)
+        assert entry.data.samples_are_raw is False
+
+        missing = page_images(
+            data=generate_pdf_layout_missing_colorspace(), decode="pixels"
+        )[0].images[0]
+        assert (missing.color_space, missing.color_space_declared) == ("DeviceRGB", False)
+        assert missing.data.kind == "error"
+        assert missing.data.error_kind == "decode"
+
+    def test_the_identity_pairs_with_page_layout_and_the_empty_laws(self) -> None:
+        """The (page_index, paint_order) identity pairs with page_layout's
+        images elementwise; the office row carries images: [] with format
+        provenance; the content-failure page is images: [] with the
+        geometry intact; the refusals are page_layout's byte-pinned
+        strings; the encrypted door fails closed."""
+        from tors_documents import page_images, page_layout
+
+        data = generate_pdf_layout_image()
+        images = page_images(data=data)[0]
+        layout = page_layout(data=data)[0]
+        assert [entry.paint_order for entry in images.images] == [
+            handle.paint_order for handle in layout.images
+        ]
+        assert images.images[0].bbox == layout.images[0].bbox
+
+        office = page_images(data=generate_docx_pgsz())
+        assert len(office) == 1
+        assert office[0].images == []
+        assert office[0].format == "docx"
+
+        broken = page_images(data=generate_pdf_layout_broken_flate())[0]
+        assert broken.images == []
+        assert broken.geometry is not None
+
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_images(data=generate_pdf_layout_baseline(), pages=[])
+        with pytest.raises(ValueError, match="out of range"):
+            page_images(data=generate_pdf_layout_baseline(), pages=[9])
+        with pytest.raises(ValueError, match="encrypted and requires a password"):
+            page_images(data=_encrypted_pdf())
+        with pytest.raises(ValueError, match="(?i)decode must be one of"):
+            page_images(data=generate_pdf_layout_image(), decode="junk")
+        with pytest.raises(TypeError, match="(?i)decode must be one of"):
+            page_images(data=generate_pdf_layout_image(), decode=1)
+
+
+class TestPageTextChars:
+    """The char-boxes probe's Python pins (§2.6's Python half): the join
+    law, the span-constant flags, the 180-page mirror fix, the WMode-1
+    fiction, the sub-span arithmetic, and the empty/office laws."""
+
+    def test_the_join_law_and_the_span_constant_flags(self) -> None:
+        """For every span: the chars join to the span's text EXACTLY
+        (two opens — page_layout's), the flags are span-constant, and
+        index_in_span is the code-point order."""
+        from tors_documents import page_layout, page_text_chars
+
+        data = generate_pdf_layout_baseline()
+        chars = page_text_chars(data=data)[0]
+        layout = page_layout(data=data)[0]
+        for span_index, span in enumerate(layout.spans):
+            mine = [c for c in chars.chars if c.span_index == span_index]
+            joined = "".join(c.char for c in mine)
+            assert joined == span.text
+            for i, c in enumerate(mine):
+                assert c.index_in_span == i
+                assert (c.x_measured, c.wmode) == (mine[0].x_measured, mine[0].wmode)
+
+    def test_the_measured_arm_starts_the_baseline_and_the_d2_height(self) -> None:
+        """The (72, 700) 'Hello' golden: 'H' box x starts at 72.0 ± 0.5,
+        every box height == 24.0 (the D2 pin, per char)."""
+        from tors_documents import page_text_chars
+
+        page = page_text_chars(data=generate_pdf_layout_baseline())[0]
+        hello = page.chars[:5]
+        assert [c.char for c in hello] == list("Hello")
+        assert abs(hello[0].bbox[0] - 72.0) <= 0.5
+        assert all(c.bbox[3] == 24.0 for c in hello)
+        assert all(c.x_measured for c in hello)
+
+    def test_the_180_page_chars_run_right_to_left_with_the_mirror_fix(self) -> None:
+        """The R4 pin: on a /Rotate 180 page the char boxes DESCEND in x
+        along the run (glyph order right-to-left in the displayed frame),
+        'W' — the first char — carries the ink's right edge (pre-fix: ~35
+        pt displaced, the 'e' box on the 'W'); the union of the char
+        boxes still equals the mapped span box."""
+        from tors_documents import page_layout, page_text_chars
+
+        data = generate_pdf_layout_rotated(180)
+        # a TJ run so the stamp/measure machinery is exercised the same
+        # way the probe measured it
+        data = generate_pdf_layout(
+            b"BT /F1 24 Tf 72 700 Td [(W) -120 (i) -120 (de)] TJ ET", rotate=180
+        )
+        page = page_text_chars(data=data)[0]
+        assert [c.char for c in page.chars] == list("Wide")
+        xs = [c.bbox[0] for c in page.chars]
+        assert xs[0] > xs[1] > xs[2] > xs[3], xs
+        # the union == the mapped span box
+        layout = page_layout(data=data)[0]
+        union_x = min(c.bbox[0] for c in page.chars)
+        union_r = max(c.bbox[0] + c.bbox[2] for c in page.chars)
+        span_box = layout.spans[0].bbox
+        assert abs(union_x - span_box[0]) <= 0.01
+        assert abs(union_r - (span_box[0] + span_box[2])) <= 0.01
+
+    def test_the_wmode1_chars_carry_the_flattened_fiction_flagged(self) -> None:
+        """The WMode-1 pin: every char wmode == 1, x_measured False, and
+        the boxes are the measured normalized shape — 'A' (276, 700, 24,
+        24), 'B' (252, 700, 24, 24) — displaced one advance LEFT, stacked
+        along x; the divergence from the true ink column stays pinned."""
+        from tors_documents import page_text_chars
+
+        page = page_text_chars(data=generate_pdf_layout_wmode1())[0]
+        assert [(c.char, c.wmode, c.x_measured) for c in page.chars] == [
+            ("A", 1, False),
+            ("B", 1, False),
+        ]
+        a, b = page.chars
+        for char_box, expected in (
+            (a.bbox, (276.0, 700.0, 24.0, 24.0)),
+            (b.bbox, (252.0, 700.0, 24.0, 24.0)),
+        ):
+            assert (
+                round(char_box[0], 3),
+                round(char_box[1], 3),
+                round(char_box[2], 3),
+                round(char_box[3], 3),
+            ) == expected
+        # the fiction: no char box contains the true ink column
+        # (300, 652, 24, 72)
+        for c in page.chars:
+            x, y, w, h = c.bbox
+            contains = (
+                300 >= x - 0.5
+                and 652 >= y - 0.5
+                and 324 <= x + w + 0.5
+                and 724 <= y + h + 0.5
+            )
+            assert not contains
+
+    def test_the_sub_span_union_and_the_whole_span_box(self) -> None:
+        """The sub-span grounding: chars [1:3]'s union is the hand
+        computed box; chars [0, len)'s union == the span's mapped box on
+        the plain LTR fixture (where they provably coincide)."""
+        from tors_documents import page_layout, page_text_chars
+
+        data = generate_pdf_layout_baseline()
+        page = page_text_chars(data=data)[0]
+        layout = page_layout(data=data)[0]
+        hello = page.chars[:5]
+        mid = hello[1:3]
+        mid_union = (
+            min(c.bbox[0] for c in mid),
+            min(c.bbox[1] for c in mid),
+            max(c.bbox[0] + c.bbox[2] for c in mid),
+            max(c.bbox[1] + c.bbox[3] for c in mid),
+        )
+        assert abs(mid_union[0] - mid[0].bbox[0]) <= 0.01
+        assert abs((mid_union[2] - mid_union[0]) - (mid[0].bbox[2] + mid[1].bbox[2])) <= 0.01
+        whole = (
+            min(c.bbox[0] for c in hello),
+            min(c.bbox[1] for c in hello),
+            max(c.bbox[0] + c.bbox[2] for c in hello),
+            max(c.bbox[1] + c.bbox[3] for c in hello),
+        )
+        span_box = layout.spans[0].bbox
+        assert abs(whole[0] - span_box[0]) <= 0.01
+        assert abs(whole[1] - span_box[1]) <= 0.01
+        assert abs((whole[2] - whole[0]) - span_box[2]) <= 0.01
+        assert abs((whole[3] - whole[1]) - span_box[3]) <= 0.01
+
+    def test_the_empty_and_office_laws(self) -> None:
+        """The empty laws: the content-failure page is chars: [] with the
+        geometry intact; the office row is chars: [] with format
+        provenance; the crop never adds content beyond the span parse."""
+        from tors_documents import page_text_chars
+
+        broken = page_text_chars(data=generate_pdf_layout_broken_flate())[0]
+        assert broken.chars == []
+        assert broken.geometry is not None
+
+        office = page_text_chars(data=generate_docx_pgsz())
+        assert len(office) == 1
+        assert office[0].chars == []
+        assert office[0].format == "docx"
+
+        # the crop-dropped run stays beyond the span parse
+        page = page_text_chars(data=generate_pdf_layout_crop())[0]
+        assert [c.char for c in page.chars] == list("Inside")
 
 
 # --- the anydoc input ceiling (max_bytes=) ---------------------------------------

@@ -27,7 +27,9 @@ from tors.documents import (
     Backend,
     DocumentStructure,
     Format,
+    PageCharsData,
     PageGeometry,
+    PageImagesData,
     PageLayout,
     PageTables,
     PdfClassification,
@@ -120,6 +122,26 @@ async def page_tables(
     pages: int | list[int] | tuple[int, int] | None = ...,
     max_bytes: int | None = ...,
 ) -> list[PageTables]: ...
+async def page_images(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    format: Format | str | None = ...,
+    password: str | None = ...,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = ...,
+    decode: str | None = ...,
+    max_image_bytes: int | None = ...,
+) -> list[PageImagesData]: ...
+async def page_text_chars(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    format: Format | str | None = ...,
+    password: str | None = ...,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = ...,
+) -> list[PageCharsData]: ...
 async def document_structure(
     path: str | os.PathLike[str] | None = ...,
     data: bytes | None = ...,

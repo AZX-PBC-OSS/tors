@@ -52,6 +52,8 @@ _WRAPPED = (
     "page_geometry",
     "page_layout",
     "page_tables",
+    "page_images",
+    "page_text_chars",
     "document_structure",
     "pdf_classify",
     "pdf_extract",

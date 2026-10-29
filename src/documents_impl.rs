@@ -2421,6 +2421,213 @@ pub fn page_tables(
     }
 }
 
+/// The multi-format `page_images` probe (issue #205): per unit of the
+/// resolved format's geometry lane, the unit's geometry PLUS — PDF pages
+/// only — the page's image handles with the bytes behind them under the
+/// opt-in `decode` (`pdf_impl::page_images`: the F1 byte-source ruling,
+/// the R7 caps, the R8 honesty laws). The spine is [`page_tables`]'s
+/// exactly (R17/R21 — this body is its verbatim copy): resolve →
+/// capability (`geometry_engine`) → `format_name` → `pages=` non-PDF
+/// refusal → password non-PDF refusal → `max_bytes == 0` → engine leg,
+/// with the same `pages=` selection semantics (PDF-only, normalized with
+/// `markdown_pages`' exact rule and error strings, output parallel to
+/// the NORMALIZED selection, `page_index` on every entry).
+///
+/// Images are PDF-only in v1: an office row carries its declared
+/// geometry with `images: []` (R24: the per-format capability statement,
+/// NOT a per-page content judgment — a DOCX's images are real and are
+/// not served; the entry's `format` field is the marker), with no
+/// refused-marker (the engine exposes no drop counts). The no-geometry
+/// row: exactly one entry with `geometry: None` and no images. PDF
+/// failure semantics: per `pdf_impl::page_images` — the frame and
+/// content-failure laws, the typed decode entries, the caps.
+/// `decode=` is the core's [`pdf_impl::ImageDecode`] (None →
+/// Container → Pixels, R3); `max_image_bytes` the per-image cap
+/// override (`None` = the 256 MiB default; the 512 MiB per-call budget
+/// is not overridable). `max_bytes` is inert on the PDF lane except the
+/// zero-value refusal, and the office leg's input ceiling applies even
+/// though `images` is always `[]` there (the container still parses for
+/// geometry), raising identically to `page_layout`'s.
+#[allow(clippy::too_many_arguments)]
+pub fn page_images(
+    bytes: Vec<u8>,
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    pages: Option<Vec<usize>>,
+    options: &ConvertOptions,
+    decode: pdf_impl::ImageDecode,
+    max_image_bytes: Option<u64>,
+) -> Result<Vec<pdf_impl::PageImagesData>, DocumentError> {
+    let kind = resolve(&bytes, name_hint, format)?;
+    let lane = geometry_engine(kind, backend, &bytes)?;
+    // The entry's provenance marker: the resolved format's vocabulary
+    // name, resolved ONCE here and stamped on every entry (page_tables'
+    // exact rule).
+    let format_name = resolved_name(kind, &bytes);
+    if pages.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Pages(format!(
+            "pages= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.password.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Convert(format!(
+            "password= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.max_bytes.is_some_and(|limit| limit == 0) {
+        return Err(DocumentError::Convert("max_bytes must be positive".into()));
+    }
+    match lane {
+        // The no-geometry row: unit = whole document (single-flow), so
+        // exactly one entry with no geometry and no images, for every
+        // backend.
+        None => Ok(vec![pdf_impl::PageImagesData {
+            page_index: 0,
+            format: format_name.to_string(),
+            geometry: None,
+            images: Vec::new(),
+        }]),
+        Some(Engine::PdfOxide) => pdf_impl::page_images(
+            bytes,
+            pages.as_deref(),
+            options.password,
+            format_name,
+            decode,
+            max_image_bytes,
+        )
+        .map_err(pages_error),
+        Some(Engine::OfficeOxide) => {
+            // The office leg parses the container into resident memory (the
+            // same amplification class the conversion lane meters): the
+            // same input ceiling, explicit budget over the 32 MiB default.
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::OfficeOxide),
+                    render_size(limit),
+                )));
+            }
+            Ok(office_geometry(bytes, kind)?
+                .into_iter()
+                .enumerate()
+                .map(|(page_index, geometry)| pdf_impl::PageImagesData {
+                    page_index,
+                    format: format_name.to_string(),
+                    geometry: geometry.map(|g| pdf_impl::PageBox {
+                        width_pt: g.width_pt,
+                        height_pt: g.height_pt,
+                        rotation: g.rotation,
+                        crop: g.crop,
+                    }),
+                    images: Vec::new(),
+                })
+                .collect())
+        }
+        // geometry_engine's table is total: the Anydoc and Html2Md lanes
+        // never come back from it.
+        Some(_) => Err(DocumentError::Convert(
+            "images: unreachable engine lane".into(),
+        )),
+    }
+}
+
+/// The multi-format `page_text_chars` probe (issue #206): per unit of the
+/// resolved format's geometry lane, the unit's geometry PLUS — PDF pages
+/// only — the page's per-character boxes from the cached span parse
+/// (`pdf_impl::page_text_chars`: the R4 mirror fix, the R9 mirrored
+/// predicate, the join law). The spine is [`page_tables`]'s exactly —
+/// this body is its verbatim copy, `page_images`' too: resolve →
+/// capability → `format_name` → `pages=` non-PDF refusal → password
+/// non-PDF refusal → `max_bytes == 0` → engine leg, the same `pages=`
+/// selection semantics. Chars are PDF-only in v1: an office row carries
+/// its declared geometry with `chars: []` (R24: the per-format
+/// capability statement; the `format` field is the marker), no
+/// refused-marker. The no-geometry row: exactly one entry with
+/// `geometry: None` and no chars. There is no decode knob (R13: the cost
+/// is ≈ page_layout's span leg) and no image-cap equivalent ([R7's #206
+/// cell]: the ceiling beyond the input budget is none).
+pub fn page_text_chars(
+    bytes: Vec<u8>,
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    pages: Option<Vec<usize>>,
+    options: &ConvertOptions,
+) -> Result<Vec<pdf_impl::PageCharsData>, DocumentError> {
+    let kind = resolve(&bytes, name_hint, format)?;
+    let lane = geometry_engine(kind, backend, &bytes)?;
+    let format_name = resolved_name(kind, &bytes);
+    if pages.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Pages(format!(
+            "pages= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.password.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Convert(format!(
+            "password= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.max_bytes.is_some_and(|limit| limit == 0) {
+        return Err(DocumentError::Convert("max_bytes must be positive".into()));
+    }
+    match lane {
+        None => Ok(vec![pdf_impl::PageCharsData {
+            page_index: 0,
+            format: format_name.to_string(),
+            geometry: None,
+            chars: Vec::new(),
+        }]),
+        Some(Engine::PdfOxide) => {
+            pdf_impl::page_text_chars(bytes, pages.as_deref(), options.password, format_name)
+                .map_err(pages_error)
+        }
+        Some(Engine::OfficeOxide) => {
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::OfficeOxide),
+                    render_size(limit),
+                )));
+            }
+            Ok(office_geometry(bytes, kind)?
+                .into_iter()
+                .enumerate()
+                .map(|(page_index, geometry)| pdf_impl::PageCharsData {
+                    page_index,
+                    format: format_name.to_string(),
+                    geometry: geometry.map(|g| pdf_impl::PageBox {
+                        width_pt: g.width_pt,
+                        height_pt: g.height_pt,
+                        rotation: g.rotation,
+                        crop: g.crop,
+                    }),
+                    chars: Vec::new(),
+                })
+                .collect())
+        }
+        Some(_) => Err(DocumentError::Convert(
+            "text-chars: unreachable engine lane".into(),
+        )),
+    }
+}
+
 /// The most entries one structure payload materializes: 200,000, applied
 /// in document order to ALL THREE entry lists (xlsx cells, docx blocks,
 /// html nodes — the same O(N)-Python-objects class). The honest statement
