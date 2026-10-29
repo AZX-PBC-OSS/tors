@@ -82,6 +82,10 @@ pdf_extract(path=None, data=None, password=None, backend="auto",
             max_bytes=None) -> tuple[list[str], str]
 pdf_page_count(path=None, data=None, password=None, backend="auto",
                max_bytes=None) -> int
+pdf_page_labels(path=None, data=None, password=None, backend="auto",
+                max_bytes=None) -> list[str | None]
+pdf_security(path=None, data=None, password=None, backend="auto",
+             max_bytes=None) -> PdfSecurity
 pdf_classify(path=None, data=None, password=None, backend="auto",
              max_bytes=None) -> PdfClassification
 pdf_link_uris(path=None, data=None, password=None, backend="auto",
@@ -133,7 +137,33 @@ The rules in brief:
   `"image_text"`, `"mixed"`, or `"empty"`; a blank page is a different thing
   from a scan), `.pages_needing_ocr` (the 0-based indices of image-only pages,
   excluding blanks), and the derived `.has_text` / `.image_only`. Encrypted
-  documents fail closed on every entry (`ValueError` without `password=`).
+  documents fail closed on every entry (`ValueError` without `password=`;
+  the carve-out is `pdf_security`, which reports state instead — above).
+- `pdf_page_labels` returns the page label a reader displays, per page
+  (`"i"`, `"A-1"`, `"12"`): the ISO 32000 §12.4.2 numbering tree. `None` means
+  the page declares no label (no tree, or before the tree's first range) — the
+  caller's fabricate-an-ordinal signal, never fabricated here; a declared label
+  is always a string, including the empty one (a styleless, prefixless range
+  declares it). Labels render on u64 arithmetic (a legal `/St 4294967294` never
+  panics or wraps); rotation and crop are irrelevant (tree data); a corrupt
+  tree is presented as "no labels" (the documented masking). The encrypted door
+  governs unchanged: a locked document raises, never ciphertext labels.
+- `pdf_security` is the typed encryption/permissions probe — the door's one
+  documented carve-out: it REPORTS the locked state (`ValueError`-free) instead
+  of failing closed. `PdfSecurity` carries `.encrypted`,
+  `.unlocked_with_supplied_password` (the credentials THIS call held:
+  `password=None` means the implicit empty attempt), `.permissions` (the
+  declared `/P` flags, advisory per §7.6.3.2, or `None`), and
+  `.owner_password_only` (the empty password authenticated). Reading rule:
+  `readable = !encrypted || unlocked || owner_password_only` — never read
+  `unlocked == false` as "locked" (the owner-only + wrong-password cell). Three
+  states collapse into `encrypted && permissions is None` (malformed `/Encrypt`,
+  unsupported `/V`/`/R`, a crypto-policy denial): "needs a password" is
+  indistinguishable from "this build/policy refuses the cipher", and the report
+  is identical with or without a password. It never unlocks beyond the supplied
+  password (one password per call plus the open's own single implicit empty
+  attempt); the fail-closed door stays every content surface's single encryption
+  authority.
 - `max_bytes=` is the input budget. An explicit value binds every engine lane
   before a byte is read or copied, overriding the default in either
   direction; `None` reads under `MAX_INPUT_READ`, a finite 512 MiB read
@@ -198,7 +228,7 @@ silent fallback:
 | format family | `backend="auto"` | `backend="oxide"` | `backend="anydoc"` |
 |---|---|---|---|
 | pdf | pdf_oxide 0.3.78 | pdf_oxide | anydoc (pdf-inspector) |
-| the PDF-only family (`pdf_extract`/`pdf_page_count`/`pdf_classify`/`pdf_link_uris`) | pdf_oxide | pdf_oxide | `ValueError`: a capability refusal, not a format one (see below) |
+| the PDF-only family (`pdf_extract`/`pdf_page_count`/`pdf_page_labels`/`pdf_security`/`pdf_classify`/`pdf_link_uris`) | pdf_oxide | pdf_oxide | `ValueError`: a capability refusal, not a format one (see below) |
 | html / htm | html-to-markdown-rs 3.12 | `ValueError` | `ValueError` |
 | doc / docx (incl. `docm`) | anydoc 0.2.4 | office_oxide 0.1.10 | anydoc |
 | xls / xlsx (incl. `xlsm`) | anydoc | office_oxide | anydoc |
@@ -425,9 +455,9 @@ Three honesty laws ride on the boxes, and one flag:
 
 ## Async and the GIL
 
-`tors.documents.aio` gives the nine input-scaling functions (`to_markdown`,
-`to_text`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris`,
-`page_geometry`, `page_layout`, `page_tables`)
+`tors.documents.aio` gives the eleven input-scaling functions (`to_markdown`,
+`to_text`, `pdf_extract`, `pdf_page_count`, `pdf_page_labels`, `pdf_security`,
+`pdf_classify`, `pdf_link_uris`, `page_geometry`, `page_layout`, `page_tables`)
 their `asyncio.to_thread` twins: same signatures, same discipline as
 [`tors.aio`](async.md) (an unconditional thread hop, never a size-based
 branch). `sniff` stays sync-only: its cost is a container parse, but it

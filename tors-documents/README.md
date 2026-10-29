@@ -51,7 +51,8 @@ resolves this wheel; the matching versions install side by side.
 - [Documents](https://azx-pbc-oss.github.io/tors/documents/): what the
   surface is, the engine table, and why the split into two wheels
 - [The full API reference](https://azx-pbc-oss.github.io/tors/api/#torsdocuments):
-  `to_markdown`/`to_text`/`sniff`/`pdf_extract`/`pdf_page_count`/`pdf_classify`/`pdf_link_uris`/`page_geometry`/`page_layout`,
-  the `Backend`/`Format`/`PageKind` enums, `PdfClassification`, `PageGeometry`,
+  `to_markdown`/`to_text`/`sniff`/`pdf_extract`/`pdf_page_count`/`pdf_page_labels`/`pdf_security`/`pdf_classify`/`pdf_link_uris`/`page_geometry`/`page_layout`/`page_tables`,
+  the `Backend`/`Format`/`PageKind` enums, `PdfClassification`, `PdfSecurity`,
+  `PdfPermissions`, `PageGeometry`,
   `PageLayout`, `TextSpan`, `TextLine`, `ImageBox`,
   `NeedsOcrError`, and `tors.documents.aio`
