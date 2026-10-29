@@ -818,3 +818,42 @@ class TestMinhashEngineScaling:
         small = _min_wall_ms(lambda: tors.weighted_minhash_signature(small_text, num_perm=128))
         large = _min_wall_ms(lambda: tors.weighted_minhash_signature(large_text, num_perm=128))
         _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+
+# --- chunk_quality: the sentence/chunk boundary sweep -------------------------------
+#
+# The quality pass over the chunk family's own output: integrity counts
+# per-sentence boundary crossings over a SORTED boundary set (a binary
+# search pair per sentence), cohesion finds each chunk's contained
+# sentences by a binary-search pair into the sorted segmentation --
+# O((S + C) log(S + C)). The first cut scanned every chunk per sentence
+# and every sentence per chunk (O(S * C)): measured 802ms -> 6530ms for
+# a 3x input at document scale (8.1x; the finding's box measured the
+# same shape 355ms -> 2956ms, 8.3x).
+
+
+def _chunk_quality_shape(n_sentences: int) -> dict:
+    text = "The oil sample read fine. " * n_sentences
+    return tors.chunk_quality(tors.chunk_text(text, 50), text)
+
+
+class TestChunkQualityScanScaling:
+    @pytest.mark.timing
+    def test_the_sentence_chunk_sweep_stays_linear(self) -> None:
+        """~19k -> ~58k chunks over ~0.9 -> ~2.7 MB (3x input), the
+        family's own output at the finding's document scale: the sweep
+        is one boundary sort plus a binary-search pair per sentence and
+        per chunk, so a 3x input measures ~3x (the old O(S*C) scans
+        measured 8.1x here, 355ms -> 2956ms on the finding's box). The
+        gate is this axis's own 3.5x-per-3x band -- a linear sweep sits
+        ~10% under it on a quiet box while a quadratic's 8x+ blows
+        through; the ratio is load-independent, so the cell passes on
+        the first clean window over up to 3 (first_clean)."""
+        small, large = _min_wall_ms(lambda: _chunk_quality_shape(35_000)), _min_wall_ms(
+            lambda: _chunk_quality_shape(105_000)
+        )
+        assert large < 3.5 * small, (
+            f"cost grew {small:.2f}ms -> {large:.2f}ms for a 3x input "
+            f"({large / small:.2f}x, allowed 3.5x): the sentence/chunk "
+            "scans grew superlinear"
+        )

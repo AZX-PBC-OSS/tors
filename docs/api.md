@@ -4156,7 +4156,11 @@ runs to the end untrimmed) answers the separator-skip question first, so
 a window that OPENS on a separator match is never emitted — not even as
 the untrimmed final chunk. A trailing separator run therefore survives
 only as a suffix of a content-bearing chunk, and an all-separator
-document chunks to zero chunks.
+document chunks to zero chunks. (The one shape where separators
+visibly survive whole: a WHOLE-document budget emits the entire text as
+its single untrimmed final chunk, so there is no boundary to drop
+anything at and every interior separator rides inside it — the drop
+convention acts only at chunk boundaries.)
 
 `overlap` snaps the next chunk's start backward to the nearest GRAPHEME
 boundary at or before the target, not necessarily a semantic
@@ -4592,6 +4596,14 @@ anything, vacuously; no sentence-chunk pair exists, the conservative
 0/0 reading, the same convention `grounding_coverage` pins). A span out
 of `text`'s range or with `start > end` raises `ValueError`; `tau < 0`
 raises `ValueError`.
+
+**The `chunks` walk's bound, stated because it is a limit**: the spans
+walk refuses past 2,000,000 spans with `ValueError` — but the bound is
+the documents scale, not a config-list ceiling, because the honest
+population here is the chunk family's own output (a 9.9 MB document at
+a 50-codepoint budget is ~220,000 spans, and the family's perf targets
+sit at 12 MiB documents); the cap is the runaway-iterator backstop
+(~32 MB of 16-byte spans), never a legitimate-call ceiling.
 
 ```python
 text = "The pump failed. The bushing torque spec was 42 Nm. Replaced."

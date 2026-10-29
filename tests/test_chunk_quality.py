@@ -236,3 +236,24 @@ def test_the_loop_harness_smoke() -> None:
     # The scaling cell's first_clean discipline, smoke-checked so the
     # import stays honest (tests/test_loop_harness.py owns the red side).
     first_clean(lambda: tors.chunk_quality([(0, 5)], "hello"), lambda out: None, samples=1)
+
+
+class TestTheDocumentsScaleWalkCap:
+    @pytest.mark.timing
+    def test_the_chunk_familys_own_document_scale_output_scores(self) -> None:
+        """The 220k-span repro, scoring not refusing: ``chunk_text`` on
+        a ~10 MB document at ``max_chars=50`` yields ~220,000 spans —
+        2.2x the config-list walk cap (100,000) that used to refuse the
+        family's own output with "refusing an unbounded batch". The
+        walk's cap here is the documents-scale 2,000,000
+        (docs/api.md's stated bound; the walk never reads ``__len__``,
+        so the cap is the runaway-iterator backstop, not a
+        legitimate-call ceiling): the scores come back, no refusal."""
+        sentence = "The oil sample read fine. "
+        text = sentence * 400_000  # ~10.4 MB, the repro's document scale
+        chunks = tors.chunk_text(text, 50)
+        assert len(chunks) > 200_000, f"repro scale lost: {len(chunks)} spans"
+        out = tors.chunk_quality(chunks, text)
+        assert set(out) == {"integrity", "cohesion"}
+        assert 0.0 <= out["integrity"] <= 1.0
+        assert 0.0 <= out["cohesion"] <= 1.0
