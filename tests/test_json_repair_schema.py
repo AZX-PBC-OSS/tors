@@ -300,6 +300,43 @@ class TestSchemaStandard:
         with pytest.raises(ValueError, match="schema recursion depth"):
             repair_json_loads("{}", schema=schema2)
 
+    def test_date_prenormalization_never_breaks_enum_validity(self) -> None:
+        # The F-2 class (normalize_keys states the invariant for itself:
+        # "a rename that would break validity is skipped"): the date
+        # pre-normalization rewrote "March 5, 2024" -> "2024-03-05"
+        # BEFORE validation, so an enum pinning the RAW spelling failed
+        # on the rewritten one ("is not one of"). A schema-valid input
+        # must validate: the enum stays intact on the raw spelling.
+        schema = {"type": "string", "format": "date", "enum": ["March 5, 2024"]}
+        assert repair_json_loads('"March 5, 2024"', schema=schema) == "March 5, 2024"
+
+    def test_date_prenormalization_never_breaks_pattern_validity(self) -> None:
+        # The same class, pattern side: "13/05/2024" was rewritten to
+        # the canonical "2024-05-13", which the node's own pattern
+        # (^dd/mm/yyyy) refuses. The rewrite is accepted only when the
+        # normalized value still validates (normalize_keys'
+        # compatible-probe shape), so the raw spelling passes.
+        schema = {
+            "type": "string",
+            "format": "date",
+            "pattern": "^[0-9]{2}/[0-9]{2}/[0-9]{4}$",
+        }
+        assert repair_json_loads('"13/05/2024"', schema=schema) == "13/05/2024"
+
+    def test_date_prenormalization_still_lands_in_the_enum(self) -> None:
+        # The gate's other half: the probe reads the node's constraints
+        # on the PROPOSED spelling, so a rewrite that LANDS in the enum
+        # still fires (skipping on the enum's mere presence would strand
+        # the raw spelling outside it).
+        schema = {"type": "string", "format": "date", "enum": ["2024-03-05"]}
+        assert repair_json_loads('"March 5, 2024"', schema=schema) == "2024-03-05"
+
+    def test_date_prenormalization_unchanged_without_constraints(self) -> None:
+        # The unconstrained format node: the canonicalizing rewrite
+        # fires exactly as before the gate.
+        schema = {"type": "string", "format": "date"}
+        assert repair_json_loads('"March 5, 2024"', schema=schema) == "2024-03-05"
+
 
 class TestSchemaSalvage:
     def test_selects_first_matching_fragment(self) -> None:
