@@ -32,7 +32,7 @@ jobs:
       - name: Install Rust
         # The action installs with rustup's `--profile minimal`, which ships neither
         # rustfmt nor clippy; this input is what makes the two steps below runnable.
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
 
@@ -45,7 +45,7 @@ jobs:
         # tors-documents/target: the payload crate is deliberately NOT a cargo workspace
         # member (its Cargo.toml's header), so it builds into its own target dir the
         # root key would never cache; the same reason the fuzz job maps fuzz/ below.
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
         with:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
@@ -116,7 +116,7 @@ jobs:
       - name: Install uv
         # For the ruff step below: ruff is a dev-group dependency (pyproject.toml),
         # so the lockfile, not this workflow, owns its version.
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Ruff
         # The Python-side lint gate (config in pyproject.toml [tool.ruff];
@@ -171,14 +171,14 @@ jobs:
           lfs: true
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
         # Same choice as the lint job's cache step (rationale there).
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -234,13 +234,13 @@ jobs:
           lfs: true
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # The heavy lanes are Python-version-independent (the sweep is
           # extension parity, the timing cells measure the native pass);
@@ -296,12 +296,12 @@ jobs:
       - name: Install Rust (nightly)
         # cargo-fuzz's instrumented builds need nightly's -Z sanitizer flags;
         # the rest of CI stays on stable (see the lint job's own note).
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: nightly
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
         with:
           workspaces: ". -> target\nfuzz -> target"
 

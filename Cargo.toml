@@ -251,13 +251,14 @@ anydoc = { version = "0.2.4", optional = true }
 # direct API edge to code already there (the same precedent as
 # aho-corasick and encoding_rs, both promoted from lock transitives). The
 # anydoc-vs-office_oxide routing default lives in documents_impl's docs.
-# EXACT pin (=`0.1.11`): office_oxide 0.1.12 added a `defined_names` field to
-# its `DocumentIR` struct, and pdf_oxide <= 0.3.78's own initializers do not
-# set it — every fresh build (uv's isolated wheel builds included, which
-# resolve crates.io without this repo's Cargo.lock) fails E0063 under the
-# caret range. Lifted the day pdf_oxide ships a release built against
-# 0.1.12+.
-office_oxide = { version = "=0.1.11", optional = true }
+# EXACT pin (=`0.1.15`): a deliberate hold point, NOT a build constraint —
+# 0.1.15 compiles clean against pdf_oxide 0.3.78 (the old E0063 concern over
+# DocumentIR's `defined_names` field is stale; the caret range never broke,
+# and uv's isolated wheel builds resolve it fine). The exact pin exists only
+# to keep the engine surface from drifting under the suite's feet mid-cycle;
+# 0.1.12–0.1.15 behavior is pinned by the full test suite, which verified
+# this lift on the 2026-10 deps rev.
+office_oxide = { version = "=0.1.15", optional = true }
 # The HTML lane of the documents surface (`src/documents_impl.rs`): neither
 # anydoc nor office_oxide reads HTML, so the lane has its own engine.
 # html-to-markdown-rs (MIT, xberg-io, 1.2M downloads) is the measured pick
