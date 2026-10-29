@@ -1384,6 +1384,428 @@ fn page_layout_one(doc: &PdfDocument, page: usize, format: &str) -> PageLayoutDa
     }
 }
 
+// --- the page_tables probe (spec: issue #204; the frame-coherence gate A1,
+// --- the four cell-box branches A2, the refused-marker A9) -------------------
+
+/// The table-primitive cap (A6): `page_tables` counts the page's
+/// `is_table_primitive()` paths and skips detection above this many — the
+/// markdown lane's own `MAX_TABLE_EDGES` (document.rs:21549), the O(H×V)
+/// intersection sweep's documented bail-out that public `extract_tables`
+/// does NOT inherit. The cap makes this surface's worst case the engine's
+/// documented one: one path walk, no O(E²) sweep. A skipped page is the
+/// refused entry (`tables_refused: true`) — at rotation 0 that
+/// combination names the cap (A9's reading rule), nowhere else.
+const MAX_TABLE_PRIMITIVES: usize = 1500;
+
+/// One `page_tables` cell: the engine's cell text, its render-space box
+/// ([`Cell`]'s regime is per-branch — see the field doc), and the merge
+/// spans. `is_header` is deliberately cut (A2: every engine constructor
+/// writes it equal to [`Row`]'s, so it carries no information [`Row`].
+/// `is_header` does not); so are `mcids` and the synthesized `spans`
+/// (spec §3's field bar).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cell {
+    /// The cell's text (the engine's cell text verbatim; an empty cell is
+    /// `""`).
+    pub text: String,
+    /// The cell's box in the page's DECLARED RENDER SPACE (the D1 law:
+    /// [`map_box_forward`]) — `(x, y, w, h)`, y-up. Its regime is the
+    /// engine's, per branch (A2): an intersection-branch cell's box is the
+    /// RULING rectangle (always `Some`, empty cells included); the
+    /// cluster/band/text branches take member-span unions (`None` when
+    /// empty); a vertical merge pads merged rows with `bbox: None` cells
+    /// inside an otherwise ruling-rect table. Not observable from the
+    /// return value, kept asymmetric on purpose (normalizing either way
+    /// invents geometry or discards it). GEOMETRY, not ownership: an empty
+    /// cell's box is grid geometry, not a claim on the text inside it, and
+    /// may lie OUTSIDE the page box (ruling lines are not crop-filtered —
+    /// the unclipped law; the TEXT side is, so a grid can also lose enough
+    /// cells to vanish entirely).
+    pub bbox: Option<(f32, f32, f32, f32)>,
+    /// The column span (the engine's; 1 unless a merge covers this cell).
+    pub colspan: u32,
+    /// The row span (the engine's; 1 unless a merge covers this cell).
+    pub rowspan: u32,
+}
+
+/// One `page_tables` row: the row's cells and the engine's own header
+/// verdict (boldness/font-size heuristics on the text/cluster branches;
+/// ALWAYS false on the intersection branch — the pinned engine
+/// limitation).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    /// The row's cells, grid order. `len` may be LESS than the table's
+    /// `col_count` when a colspan/rowspan merge covers cells (the
+    /// cluster-branch merge, A2 — the intersection branch always emits
+    /// exactly `col_count`); a consumer lays cells out by walking
+    /// `colspan`, never by `cells[i]`-as-column-i.
+    pub cells: Vec<Cell>,
+    /// Whether the engine judged this row a header row.
+    pub is_header: bool,
+}
+
+/// One `page_tables` table: the engine's detected grid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableEntry {
+    /// The grid's rows, the engine's order (branch-deterministic, never
+    /// re-sorted here: a vertical merge emits its merged groups
+    /// bottom-group-first, the cluster path top-first — both pinned).
+    pub rows: Vec<Row>,
+    /// Whether the engine found a header section (the intersection branch
+    /// never sets it — always false there, a documented limitation).
+    pub has_header: bool,
+    /// The engine's grid column count. Rows may be shorter under merges
+    /// (see [`Row::cells`]).
+    pub col_count: usize,
+    /// The table's box in render space — the ENGINE's own union (A2/A13:
+    /// cell boxes on the intersection branch, member spans on the cluster/
+    /// band/text branches, cluster line-extent × row-extent on the cluster
+    /// grid, the two prior boxes after a vertical merge), pinned by
+    /// goldens, never re-derived from the cells here. `Some` on every
+    /// table the engine returns (the `min_table_cells ≥ 4` gate guarantees
+    /// filled cells); `None` is retained only for engine parity and is not
+    /// reachable in v1. NOT the table's ink extent: it includes empty grid
+    /// cells and can lie outside the page box.
+    pub bbox: Option<(f32, f32, f32, f32)>,
+}
+
+/// One `page_tables` entry: the page's geometry (the same [`PageBox`]
+/// `page_geometry`/`page_layout` serve), plus the page's detected tables
+/// with per-cell boxes in the same render space. Output is parallel to the
+/// normalized `pages=` selection, and every entry carries `page_index`
+/// (normalization reorders; the caller maps back by it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageTablesData {
+    /// The 0-based page this entry describes.
+    pub page_index: usize,
+    /// The resolved format's vocabulary name (`resolved_name` spelling —
+    /// the same string `page_layout` stamps). Provenance carried ON the
+    /// entry: the format — not the entry's shape — tells you why `tables`
+    /// may be empty. On an OFFICE row `tables: []` is the per-format
+    /// capability statement (tables are PDF-only in v1: the engine IR's
+    /// tables carry no coordinates), so there `format` marks "unsupported
+    /// here", not "no tables" — and `tables_refused` stays false (A9: not
+    /// a per-page content judgment). On the pdf lane `tables: []` with
+    /// `tables_refused: false` means "no tables / content unreadable"
+    /// (deliberately indistinguishable, like `page_layout`'s empty
+    /// lists), and `tables_refused: true` means THIS SURFACE declined a
+    /// page whose inputs indicate possible table content.
+    pub format: String,
+    /// The page's declared render box (the `page_geometry` entry): `None`
+    /// where the page's box cannot be read or declares no positive extent
+    /// — then `tables` is empty too (no frame to map into).
+    pub geometry: Option<PageBox>,
+    /// The page's detected tables (the spatial detector's answer — see the
+    /// divergence note on [`page_tables`]).
+    pub tables: Vec<TableEntry>,
+    /// The A9 marker: TRUE iff this surface deliberately declined to serve
+    /// a page whose inputs indicate possible table content — the
+    /// frame-incoherent /Rotate classes (A1) or the table-primitive edge
+    /// cap (A6). Reading rule: `tables_refused` + `geometry.rotation !=
+    /// 0` → frame incoherence; `true` at rotation 0 → the edge cap.
+    /// FALSE for no-tables pages, for content-stream failures (unknowable
+    /// — stays indistinguishable from no-tables by design), and on office
+    /// rows (their marker is `format`).
+    pub tables_refused: bool,
+}
+
+/// The A1 gate's verdict for one page: which frame the engine's table
+/// boxes are in (and so how they map forward), or that the page's inputs
+/// are frame-INCOHERENT and the surface refuses. computable from public
+/// API only: the page's rotation, whether any path is a table primitive
+/// (`has_rulings`), and the spans' `page_rotation_applied` flags
+/// (`any_mapped`/`all_mapped` — the engine-mapping flag, NOT
+/// `rotation_degrees`, which is content rotation). Per the ruling's table,
+/// with the A12 fail-closed default: any combination NOT listed coherent
+/// is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Frame {
+    /// The engine's table boxes are raw user space: [`map_box_forward`]
+    /// directly (identity at rotation 0).
+    Raw,
+    /// The engine's table boxes are its own page-rotation mapping (the
+    /// span union branches; a pathless page): [`unmap_engine_box`] first,
+    /// then [`map_box_forward`] — page_layout's span treatment exactly.
+    Mapped,
+    /// Frame-incoherent inputs (the detector would compare text in one
+    /// frame against rulings in another): refuse — `tables: []`,
+    /// `tables_refused: true`.
+    Incoherent,
+}
+
+fn table_frame_gate(rotation: i32, has_rulings: bool, any_mapped: bool, all_mapped: bool) -> Frame {
+    match rotation {
+        // 0: the engine maps nothing and the forward rule is the identity;
+        // every page at 0 is coherent by construction (the ruling table's
+        // first row: "any | never | raw").
+        0 => Frame::Raw,
+        _ if any_mapped => {
+            // Mapped spans present. Coherent only when the page is
+            // PATHLESS (no rulings) and EVERY span is mapped: then the
+            // detector's whole input is in the engine's mapped frame and
+            // the unmap→forward round trip is exact. With rulings the
+            // frames disagree (the measured 180 ruled/symmetric and
+            // 90/270 sideways-ruled failures); with a MIX of mapped and
+            // raw spans the detector compares two text frames — all
+            // refused (fail-closed: these are the unlisted combinations).
+            if !has_rulings && all_mapped {
+                Frame::Mapped
+            } else {
+                Frame::Incoherent
+            }
+        }
+        // No mapped spans: the detector's text input is raw, and so are
+        // the paths (paths are never page-rotation-mapped) — raw
+        // throughout, forward-map exactly. (At 90/270 this is the upright
+        // -text page, ruled or not; at 180 no spans survive unmapped —
+        // the engine maps ALL of them — so this arm sees only spanless
+        // 180 pages, which carry no table either way.)
+        _ => Frame::Raw,
+    }
+}
+
+/// The tables probe: one open, and per requested page the page's geometry
+/// plus its detected tables with per-cell boxes in the page's declared
+/// render space ([`PageTablesData`]). `pages` is the `pages=` selection:
+/// `None` = the whole document in page order; `Some` is normalized here
+/// with `markdown_pages`' exact rule and error strings
+/// ([`normalize_selection`] / [`validate_selection_range`]), and the
+/// output is parallel to the NORMALIZED selection, every entry carrying
+/// its `page_index`.
+///
+/// The per-page pipeline (A1/A6): the page box reads ONCE (media, visible,
+/// rotation — the same triple [`page_geometry`] folds); ONE
+/// `extract_paths` walk serves both the A6 cap count and the
+/// `has_rulings` gate input; one `extract_spans` walk serves the gate's
+/// mappedness inputs; the engine's `extract_tables` (spatial detector,
+/// default config — no threshold knobs in v1) runs only when the gate
+/// serves and the cap does not bite. Any `extract_tables` error (a
+/// content-stream failure upstream of it included) is the content-read
+/// policy, never an error: `tables: []`, geometry intact
+/// (`unwrap_or_default`), deliberately indistinguishable from a
+/// no-tables page. `extract_spans`/`extract_paths` failures poison
+/// nothing either: they read as empty inputs (the frame gate then serves
+/// a no-tables page).
+///
+/// The frame-coherence gate (A1, A12's fail-closed default): the
+/// detector's inputs live in two frames — text spans inherit the engine's
+/// page-rotation mapping, paths never get it — and the detector compares
+/// them in BOTH frames' disagreement regimes, where it misassigns or
+/// loses the table (measured: a ruled 2×2 on /Rotate 180 is not detected
+/// at all; a 180-symmetric grid comes back with every cell's text
+/// 180°-swapped; sideways text under rulings misassigns). Three classes
+/// are coherent and served exactly — rotation 0 (any content);
+/// 90/270 with NO engine-mapped span (upright text; raw throughout); and
+/// a PATHLESS page whose every span is engine-mapped (text-only tables;
+/// `unmap_engine_box` → [`map_box_forward`], `page_layout`'s span
+/// treatment) — every other combination refuses:
+/// `tables: []`, `tables_refused: true`, geometry intact. The docs' reading
+/// rule (A9): `tables_refused` with `geometry.rotation != 0` is frame
+/// incoherence; `tables_refused` at rotation 0 is the primitive cap.
+///
+/// The markdown divergence (A4, stated, not fixed in v1): this surface
+/// builds on the PUBLIC `extract_tables` — spatial-only, unconsolidated.
+/// `to_markdown` renders tables through a different, private pipeline
+/// (structure-tree-first for tagged PDFs, fragment consolidation, the RTL
+/// decline guard, the edge cap, the relaxed wide-table retry), so the
+/// TABLE SET can differ on any PDF: page_tables is the spatial detector's
+/// answer, to_markdown renders a different table set. Double-reporting
+/// (A3): `page_layout` serves `extract_spans`, which returns table
+/// members — content inside a detected table's area may appear in BOTH
+/// surfaces; neither de-dups the other, there is no identity join, and
+/// cell bboxes must NOT be used to subtract from page_layout (an empty
+/// intersection cell's box is grid geometry, not ownership).
+///
+/// Zero pages: an empty vec. Encrypted documents fail closed at the
+/// [`open`] door check (before the `pages=` validation — A10's PDF-leg
+/// order: open → page_count → normalize/validate, so an encrypted
+/// document with a malformed selection answers the encryption refusal).
+/// Runs under [`with_depth_headroom`], like every entry point.
+pub fn page_tables(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+    format: &'static str,
+) -> Result<Vec<PageTablesData>, PagesError> {
+    let selected = pages.map(<[usize]>::to_vec);
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || page_tables_pass(bytes, selected.as_deref(), password.as_deref(), format),
+        PagesError::Pdf,
+    )
+}
+
+/// The pass [`page_tables`] runs under [`with_depth_headroom`] — the
+/// selection normalization shared with [`page_layout_pass`] (so the error
+/// strings are byte-identical) and the per-page fold.
+fn page_tables_pass(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+    format: &'static str,
+) -> Result<Vec<PageTablesData>, PagesError> {
+    let doc = open(bytes, password).map_err(PagesError::Pdf)?;
+    let count = doc.page_count().map_err(PagesError::Pdf)?;
+    let selected = match pages {
+        None => (0..count).collect::<Vec<usize>>(),
+        Some(pages) => {
+            let selected = normalize_selection(pages)?;
+            validate_selection_range(&selected, count)?;
+            selected
+        }
+    };
+    Ok(selected
+        .iter()
+        .map(|&page| page_tables_one(&doc, page, format))
+        .collect())
+}
+
+/// The per-entry `None`-geometry shape, [`empty_entry`]'s tables twin:
+/// geometry `None` (no frame — the D1 space is defined by the box) with
+/// no tables, the entry's `page_index` still carried, `tables_refused`
+/// false (A5: the empty-entry law is unchanged; a PDF-only reachable
+/// state).
+fn empty_tables_entry(page: usize, format: &str) -> PageTablesData {
+    PageTablesData {
+        page_index: page,
+        format: format.to_string(),
+        geometry: None,
+        tables: Vec::new(),
+        tables_refused: false,
+    }
+}
+
+/// One page's tables ([`page_tables_pass`]'s per-page step): the box reads
+/// feed both the `PageBox` build and the transform (fetched ONCE —
+/// page_layout's law); the primitive count and the mappedness inputs feed
+/// the gate; the engine's tables map through the ONE forward rule in the
+/// gate's frame.
+fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesData {
+    // The frame: any error here (the page's own get_page walk included)
+    // is the per-entry None rule — geometry None, no frame, so the
+    // content has no render space to be mapped into and no tables are
+    // served (the empty-entry law, A5).
+    let Ok(media) = doc.get_page_media_box(page) else {
+        return empty_tables_entry(page, format);
+    };
+    let Ok(visible) = doc.get_page_visible_box(page) else {
+        return empty_tables_entry(page, format);
+    };
+    let Ok(rotation) = doc.get_page_rotation(page) else {
+        return empty_tables_entry(page, format);
+    };
+    let geometry = PageBox::from_visible_box(visible, rotation, media);
+    if geometry.is_none() {
+        // A non-positive/non-finite extent: undeclarable — and the
+        // transform's frame with it.
+        return empty_tables_entry(page, format);
+    }
+
+    // ONE path walk for both gate inputs (A6/last ruling): the table
+    // primitives' count IS the has_rulings bit (0 = none). A path-walk
+    // failure reads as zero primitives (and starves extract_tables below
+    // into its own empty answer — the content-failure class, refused:
+    // false).
+    let paths = doc.extract_paths(page).unwrap_or_default();
+    let primitives = paths.iter().filter(|p| p.is_table_primitive()).count();
+    let has_rulings = primitives > 0;
+
+    // The A6 cap: above the markdown lane's MAX_TABLE_EDGES the surface
+    // skips detection — the refused entry, geometry intact (rotation 0
+    // distinguishes the cap from the frame refusals, A9's reading rule).
+    if primitives > MAX_TABLE_PRIMITIVES {
+        return PageTablesData {
+            page_index: page,
+            format: format.to_string(),
+            geometry,
+            tables: Vec::new(),
+            tables_refused: true,
+        };
+    }
+
+    // The gate's span inputs: the flow spans' engine-mapping flags (A1:
+    // `page_rotation_applied == rotation` is the mapped bit — NOT
+    // `rotation_degrees`, which is content rotation). A span-parse
+    // failure reads as no spans (none mapped — the gate then serves a
+    // page the engine will find no tables on, the same empty shape).
+    let spans = doc.extract_spans(page).unwrap_or_default();
+    let mut any_mapped = false;
+    let mut all_mapped = true;
+    for span in &spans {
+        let mapped = rotation != 0 && span.page_rotation_applied == rotation;
+        any_mapped |= mapped;
+        all_mapped &= mapped;
+    }
+
+    // The A1 frame-coherence gate (A12's fail-closed default).
+    let frame = table_frame_gate(rotation, has_rulings, any_mapped, all_mapped);
+    if frame == Frame::Incoherent {
+        return PageTablesData {
+            page_index: page,
+            format: format.to_string(),
+            geometry,
+            tables: Vec::new(),
+            tables_refused: true,
+        };
+    }
+
+    // The engine's tables, in the gate's frame. ANY extract_tables error
+    // is the content-read policy (A6): empty, geometry intact, never
+    // raised — the common failure shape is the same `tables: []`.
+    let tables = doc
+        .extract_tables(page)
+        .unwrap_or_default()
+        .iter()
+        .map(|table| {
+            let map = |b: Option<pdf_oxide::geometry::Rect>| {
+                b.map(|rect| {
+                    let box_ = (rect.x, rect.y, rect.width, rect.height);
+                    // The engine pre-mapped these boxes: inverse-map about
+                    // the MediaBox first (page_layout's span treatment),
+                    // then the one forward rule. (Frame::Incoherent never
+                    // reaches here — the gate refused above.)
+                    let raw = if frame == Frame::Mapped {
+                        unmap_engine_box(box_, media, rotation)
+                    } else {
+                        box_
+                    };
+                    map_box_forward(raw, visible, rotation)
+                })
+            };
+            TableEntry {
+                bbox: map(table.bbox),
+                rows: table
+                    .rows
+                    .iter()
+                    .map(|row| Row {
+                        cells: row
+                            .cells
+                            .iter()
+                            .map(|cell| Cell {
+                                text: cell.text.clone(),
+                                bbox: map(cell.bbox),
+                                colspan: cell.colspan,
+                                rowspan: cell.rowspan,
+                            })
+                            .collect(),
+                        is_header: row.is_header,
+                    })
+                    .collect(),
+                has_header: table.has_header,
+                col_count: table.col_count,
+            }
+        })
+        .collect();
+
+    PageTablesData {
+        page_index: page,
+        format: format.to_string(),
+        geometry,
+        tables,
+        tables_refused: false,
+    }
+}
+
 /// The `/Annots` link-annotation walk: for every page, the URIs of its
 /// `/Subtype /Link` annotations whose action is a URI (`/A << /S /URI /URI
 /// (...) >>`), in annotation order: one `Vec<String>` per page, page
@@ -3913,5 +4335,1068 @@ mod tests {
         assert_eq!(geometry[0].unwrap().height_pt, 792.0);
         // and the explicit empty password is the same call
         assert_eq!(page_geometry(locked, Some("")).unwrap(), geometry);
+    }
+
+    // --- the page_tables probe (issue #204; the A1 gate, the A6 cap, the
+    // --- A9 refused marker; evidence: /tmp/opencode/probe-tables out.txt
+    // --- and out2-out7.txt, the preserved measurement oracle) --------------
+
+    /// The ruled 2×2's content stream (the probe's fixture verbatim):
+    /// three verticals x ∈ {100, 300, 500} spanning y 600..800, three
+    /// horizontals y ∈ {600, 700, 800} spanning x 100..500, and one glyph
+    /// per cell (A/B/C/D at (120,750)/(320,750)/(120,650)/(320,650)).
+    const RULED_2X2: &str = "0.5 w 100 600 m 100 800 l S\n\
+         0.5 w 300 600 m 300 800 l S\n\
+         0.5 w 500 600 m 500 800 l S\n\
+         0.5 w 100 600 m 500 600 l S\n\
+         0.5 w 100 700 m 500 700 l S\n\
+         0.5 w 100 800 m 500 800 l S\n\
+         BT /F1 12 Tf 120 750 Td (A) Tj ET\n\
+         BT /F1 12 Tf 320 750 Td (B) Tj ET\n\
+         BT /F1 12 Tf 120 650 Td (C) Tj ET\n\
+         BT /F1 12 Tf 320 650 Td (D) Tj ET";
+
+    /// The text-only 4×2's content stream (the probe's fixture verbatim):
+    /// two x-columns (100/300), four baselines (700/650/600/550), no
+    /// rulings anywhere.
+    const TEXT_ONLY_4X2: &str = "BT /F1 12 Tf 100 700 Td (Region) Tj ET\n\
+         BT /F1 12 Tf 300 700 Td (Value) Tj ET\n\
+         BT /F1 12 Tf 100 650 Td (North) Tj ET\n\
+         BT /F1 12 Tf 300 650 Td (120) Tj ET\n\
+         BT /F1 12 Tf 100 600 Td (South) Tj ET\n\
+         BT /F1 12 Tf 300 600 Td (340) Tj ET\n\
+         BT /F1 12 Tf 100 550 Td (East) Tj ET\n\
+         BT /F1 12 Tf 300 550 Td (560) Tj ET";
+
+    /// The 180-symmetric ruled 2×2 (the probe's sym_grid verbatim): the
+    /// grid centered on (306, 396) is invariant under (x, y) → (612−x,
+    /// 792−y), so the /Rotate 180 detector DOES find a grid — with every
+    /// cell's text 180°-swapped (measured out2). The gate's regression
+    /// fixture: the refusal is not the vanished-table accident.
+    const SYM_GRID_2X2: &str = "0.5 w 206 346 m 206 446 l S\n\
+         0.5 w 306 346 m 306 446 l S\n\
+         0.5 w 406 346 m 406 446 l S\n\
+         0.5 w 206 346 m 406 346 l S\n\
+         0.5 w 206 396 m 406 396 l S\n\
+         0.5 w 206 446 m 406 446 l S\n\
+         BT /F1 12 Tf 220 420 Td (A) Tj ET\n\
+         BT /F1 12 Tf 320 420 Td (B) Tj ET\n\
+         BT /F1 12 Tf 220 370 Td (C) Tj ET\n\
+         BT /F1 12 Tf 320 370 Td (D) Tj ET";
+
+    /// Sideways (rotated-Tm) text inside a ruled 2×2 (the probe's
+    /// sideways_ruled verbatim): the 90/270-with-rulings-and-mapped-spans
+    /// class — text and rules share no frame.
+    const SIDEWAYS_RULED: &str = "0.5 w 100 600 m 100 800 l S\n\
+         0.5 w 300 600 m 300 800 l S\n\
+         0.5 w 500 600 m 500 800 l S\n\
+         0.5 w 100 600 m 500 600 l S\n\
+         0.5 w 100 700 m 500 700 l S\n\
+         0.5 w 100 800 m 500 800 l S\n\
+         BT /F1 12 Tf 0 1 -1 0 130 610 Tm (A) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 330 610 Tm (B) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 130 710 Tm (C) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 330 710 Tm (D) Tj ET";
+
+    /// Sideways text-only 4×2 (the A12 served class at 90/270): every
+    /// span drawn with `Tm [0 1 -1 0 x y]` — engine-mapped on a
+    /// 90/270 page (`page_rotation_applied == rotation`), no rulings.
+    const SIDEWAYS_TEXT_ONLY: &str = "BT /F1 12 Tf 0 1 -1 0 100 700 Tm (Region) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 300 700 Tm (Value) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 100 650 Tm (North) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 300 650 Tm (120) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 100 600 Tm (South) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 300 600 Tm (340) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 100 550 Tm (East) Tj ET\n\
+         BT /F1 12 Tf 0 1 -1 0 300 550 Tm (560) Tj ET";
+
+    /// Two ruled grids stacked with disjoint x-ranges and a 20 pt gap (the
+    /// probe's stacked_disjoint verbatim): the vertical MERGE path's
+    /// fixture (A11 — the disjoint-x spelling).
+    const STACKED_DISJOINT: &str = "0.5 w 100 600 m 100 800 l S\n\
+         0.5 w 200 600 m 200 800 l S\n\
+         0.5 w 300 600 m 300 800 l S\n\
+         0.5 w 100 600 m 300 600 l S\n\
+         0.5 w 100 700 m 300 700 l S\n\
+         0.5 w 100 800 m 300 800 l S\n\
+         BT /F1 12 Tf 120 750 Td (T1) Tj ET\n\
+         BT /F1 12 Tf 220 750 Td (T2) Tj ET\n\
+         BT /F1 12 Tf 120 650 Td (T3) Tj ET\n\
+         BT /F1 12 Tf 220 650 Td (T4) Tj ET\n\
+         0.5 w 350 380 m 350 580 l S\n\
+         0.5 w 450 380 m 450 580 l S\n\
+         0.5 w 550 380 m 550 580 l S\n\
+         0.5 w 350 380 m 550 380 l S\n\
+         0.5 w 350 480 m 550 480 l S\n\
+         0.5 w 350 580 m 550 580 l S\n\
+         BT /F1 12 Tf 370 530 Td (B1) Tj ET\n\
+         BT /F1 12 Tf 470 530 Td (B2) Tj ET\n\
+         BT /F1 12 Tf 370 430 Td (B3) Tj ET\n\
+         BT /F1 12 Tf 470 430 Td (B4) Tj ET";
+
+    /// Two ruled grids stacked with SHARED x and a 20 pt gap, the bottom
+    /// one 3-column (the probe's stacked_grids verbatim): the CLUSTER
+    /// path's fixture (A11 — shared-x routes to the cluster; A13's
+    /// line-extent bbox and second has_header source; A2's None-pad row).
+    const STACKED_SHARED_X: &str = "0.5 w 100 600 m 100 800 l S\n\
+         0.5 w 300 600 m 300 800 l S\n\
+         0.5 w 500 600 m 500 800 l S\n\
+         0.5 w 100 600 m 500 600 l S\n\
+         0.5 w 100 800 m 500 800 l S\n\
+         BT /F1 12 Tf 120 700 Td (T1) Tj ET\n\
+         BT /F1 12 Tf 320 700 Td (T2) Tj ET\n\
+         0.5 w 100 380 m 100 580 l S\n\
+         0.5 w 233 380 m 233 580 l S\n\
+         0.5 w 366 380 m 366 580 l S\n\
+         0.5 w 500 380 m 500 580 l S\n\
+         0.5 w 100 380 m 500 380 l S\n\
+         0.5 w 100 580 m 500 580 l S\n\
+         BT /F1 12 Tf 120 480 Td (B1) Tj ET\n\
+         BT /F1 12 Tf 250 480 Td (B2) Tj ET\n\
+         BT /F1 12 Tf 380 480 Td (B3) Tj ET";
+
+    /// The page_tables fixture builder: one page, the given content
+    /// stream, `page_extras` (the /Rotate//CropBox fragments) — the
+    /// layout fixtures' exact base (`layout_pdf`).
+    fn tables_pdf(content: &str, page_extras: &str) -> Vec<u8> {
+        layout_pdf(content, page_extras)
+    }
+
+    /// The single-page tables entry (most fixtures are one page).
+    fn one_table_page(bytes: Vec<u8>) -> PageTablesData {
+        page_tables(bytes, None, None, "pdf").unwrap().remove(0)
+    }
+
+    /// The first table's first-row cell texts (the swapped-text pins).
+    fn row_texts(page: &PageTablesData, row: usize) -> Vec<&str> {
+        page.tables[0].rows[row]
+            .cells
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect()
+    }
+
+    /// A cell's text and its measured box (the golden pair's type).
+    type CellGolden<'a> = (&'a str, (f32, f32, f32, f32));
+
+    /// Whether the rendered page has ink within ±1 px of the render-space
+    /// point (the ruling-position oracle's pixel probe; 72 dpi, 1pt = 1px,
+    /// the raster's top-left origin flipped to render space first). The
+    /// channel test takes the stroke's anti-aliasing into account: a 0.5pt
+    /// ruling renders ~25%-coverage gray (~191 on white — measured), so
+    /// `ruling` ink is anything clearly off the white paper, while the
+    /// solid text/fill ink the sibling oracles use stays `< 128`.
+    fn ink_near(image: &pdf_oxide::rendering::RenderedImage, x: f64, y: f64) -> bool {
+        let ruling = |r: u8, _g: u8, _b: u8| r < 220;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let px = x as i64 + dx as i64;
+                let py = image.height as i64 - 1 - (y as i64) + dy as i64;
+                if px < 0 || py < 0 || px >= image.width as i64 || py >= image.height as i64 {
+                    continue;
+                }
+                let i = ((py * image.width as i64 + px) * 4) as usize;
+                if ruling(image.data[i], image.data[i + 1], image.data[i + 2]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn rendered(doc: &PdfDocument) -> pdf_oxide::rendering::RenderedImage {
+        pdf_oxide::rendering::render_page(
+            doc,
+            0,
+            &pdf_oxide::rendering::RenderOptions::with_dpi(72).as_raw(),
+        )
+        .unwrap()
+    }
+
+    /// The rot-0 intersection-grid golden, RENDER-ANCHORED (Q4's oracle:
+    /// the cell edges are checked against the RENDERED RULING positions,
+    /// not the fixture's own coordinates): the engine's cell boxes are the
+    /// ruling rectangles — A(100,700,200,100) B(300,700,200,100)
+    /// C(100,600,200,100) D(300,600,200,100) measured (out.txt) — and
+    /// every cell edge lands on ink the renderer drew. `has_header` is
+    /// FALSE (the intersection branch never sets it — the pinned engine
+    /// limitation), `col_count == 2`, the table bbox the ruled rectangle
+    /// (100,600,400,200), and `tables_refused` false.
+    #[test]
+    fn tables_ruled_2x2_rot0_cells_match_the_rendered_rulings() {
+        let bytes = tables_pdf(RULED_2X2, "");
+        let doc = PdfDocument::from_bytes(bytes.clone()).unwrap();
+        let image = rendered(&doc);
+        // the rendered ruling positions: the ON-PAGE points of the grid
+        // carry ink (the fixture's y=800 top rule rides above the 792pt
+        // render — off-raster, the unclipped law's own evidence below);
+        // a point just off the grid does not.
+        for x in [100.0, 300.0, 500.0] {
+            for y in [600.0, 700.0, 750.0] {
+                assert!(ink_near(&image, x, y), "no rendered ruling at ({x}, {y})");
+            }
+        }
+        for x in [150.0, 400.0] {
+            assert!(
+                ink_near(&image, x, 600.0),
+                "no rendered horizontal at ({x}, 600)"
+            );
+            assert!(
+                ink_near(&image, x, 700.0),
+                "no rendered horizontal at ({x}, 700)"
+            );
+        }
+        assert!(
+            !ink_near(&image, 90.0, 590.0),
+            "the oracle's negative control: nothing at (90, 590)"
+        );
+
+        let page = one_table_page(bytes);
+        assert!(!page.tables_refused);
+        assert_eq!(page.page_index, 0);
+        assert_eq!(page.format, "pdf");
+        let geometry = page.geometry.unwrap();
+        assert_eq!(
+            (geometry.width_pt, geometry.height_pt, geometry.rotation),
+            (612.0, 792.0, 0)
+        );
+        assert_eq!(page.tables.len(), 1);
+        let table = &page.tables[0];
+        assert_eq!(
+            (table.col_count, table.has_header),
+            (2, false),
+            "the pinned engine limitation"
+        );
+        assert_eq!(table.bbox, Some((100.0, 600.0, 400.0, 200.0)));
+        assert_eq!(table.rows.len(), 2);
+        assert!(!table.rows[0].is_header && !table.rows[1].is_header);
+        let expected = [
+            ("A", (100.0, 700.0, 200.0, 100.0)),
+            ("B", (300.0, 700.0, 200.0, 100.0)),
+            ("C", (100.0, 600.0, 200.0, 100.0)),
+            ("D", (300.0, 600.0, 200.0, 100.0)),
+        ];
+        let got: Vec<CellGolden> = table
+            .rows
+            .iter()
+            .flat_map(|r| &r.cells)
+            .map(|c| (c.text.as_str(), c.bbox.unwrap()))
+            .collect();
+        assert_eq!(got.len(), 4);
+        for ((text, bbox), (want_text, want_bbox)) in got.iter().zip(expected.iter()) {
+            assert_eq!(text, want_text);
+            assert_box_near(*bbox, *want_bbox, 0.01, &format!("cell {want_text}"));
+            // the Q4 oracle: every ON-PAGE cell edge is a rendered ruling
+            // (the intersection branch's boxes ARE ruling geometry) —
+            // sample each edge's midpoint. The top row's top edge (y=800)
+            // is off the 792pt page: the UNCLIPPED law's own evidence
+            // (ruling geometry is not crop-clipped, and here not even
+            // page-clipped in the answer), so it is pinned off-render.
+            let (x, y, w, h) = *bbox;
+            let mid_x = f64::from(x + w / 2.0);
+            let mid_y = f64::from(y + h / 2.0);
+            let edge = |px: f64, py: f64, name: &str| {
+                if (0.0..=612.0).contains(&px) && (0.0..=792.0).contains(&py) {
+                    assert!(
+                        ink_near(&image, px, py),
+                        "cell {text}: {name} edge off ruling"
+                    );
+                } else {
+                    assert!(
+                        !ink_near(&image, px, py),
+                        "cell {text}: {name} edge off the page yet rendered"
+                    );
+                }
+            };
+            edge(f64::from(x), mid_y, "left");
+            edge(f64::from(x + w), mid_y, "right");
+            edge(mid_x, f64::from(y), "bottom");
+            edge(mid_x, f64::from(y + h), "top");
+        }
+        // the top row's boxes ride 100pt past the render page's top edge
+        // (measured fixture geometry: rules at y=800 on a 792pt page) —
+        // returned unclipped, the cell-boxes-are-geometry law
+        assert_eq!(table.rows[0].cells[0].bbox.unwrap().3 + 700.0, 800.0);
+    }
+
+    /// The A1 refusal classes, pinned (Q4's oracle change: /Rotate 180
+    /// fixtures pin `tables: []`, NOT mapped boxes):
+    ///
+    /// - a ruled 2×2 on /Rotate 180 — the engine detects NOTHING (measured
+    ///   out.txt: text mapped to y≈30/130, rules at y=600..800) — and the
+    ///   surface refuses it as frame-incoherent (`tables_refused: true`,
+    ///   geometry intact with rotation 180, A9);
+    /// - the 180-SYMMETRIC ruled grid on /Rotate 180 — the engine DOES
+    ///   detect it and every cell's text comes back 180°-swapped (measured
+    ///   out2: r0c0 = "D" where the raw top-left cell held "A") — the
+    ///   qualitative-failure regression that proves the gate is a content
+    ///   law, not the vanished-table accident; refused the same way;
+    /// - the same symmetric grid at rotation 0 SERVES with the upright
+    ///   cells (the control: the fixture is not the problem);
+    /// - sideways (rotated-Tm) text under rulings at 90 and 270 — the
+    ///   measured misassignment class (out2: tables: 0) — refused.
+    #[test]
+    fn tables_the_frame_incoherent_classes_are_refused() {
+        // ruled 2x2 at 180: the vanished table
+        let page = one_table_page(tables_pdf(RULED_2X2, "/Rotate 180"));
+        assert!(page.tables.is_empty());
+        assert!(
+            page.tables_refused,
+            "180 + rulings: the frame-incoherent refusal"
+        );
+        assert_eq!(page.geometry.unwrap().rotation, 180);
+
+        // the 180-symmetric grid at 180: detected-but-swapped upstream,
+        // refused here — the regression that proves the gate
+        let page = one_table_page(tables_pdf(SYM_GRID_2X2, "/Rotate 180"));
+        assert!(page.tables.is_empty());
+        assert!(page.tables_refused);
+        // ...and the rot-0 control: the same grid serves upright
+        let page = one_table_page(tables_pdf(SYM_GRID_2X2, ""));
+        assert!(!page.tables_refused);
+        assert_eq!(page.tables.len(), 1);
+        assert_eq!(row_texts(&page, 0), vec!["A", "B"]);
+        assert_eq!(row_texts(&page, 1), vec!["C", "D"]);
+
+        // sideways text under rulings at 90 and 270
+        for rotation in ["/Rotate 90", "/Rotate 270"] {
+            let page = one_table_page(tables_pdf(SIDEWAYS_RULED, rotation));
+            assert!(page.tables.is_empty(), "{rotation}");
+            assert!(page.tables_refused, "{rotation}");
+        }
+    }
+
+    /// The 90/270 coherent class with rulings (A1's row 5): upright text,
+    /// raw frame throughout — the engine's ruling-rect cells forward-map
+    /// exactly. Goldens (derived from the measured raw boxes, out.txt's
+    /// rot-0 cells through the forward rule): cell A raw (100,700,200,100)
+    /// at 90 → (700, 612−100−200, 100, 200) = (700, 312, 100, 200).
+    #[test]
+    fn tables_the_90_270_upright_ruled_class_forward_maps_exactly() {
+        let page = one_table_page(tables_pdf(RULED_2X2, "/Rotate 90"));
+        assert!(!page.tables_refused);
+        assert_eq!(page.tables.len(), 1);
+        assert_eq!(page.geometry.unwrap().rotation, 90);
+        let table = &page.tables[0];
+        assert_eq!(table.bbox, Some((600.0, 112.0, 200.0, 400.0)));
+        let a = &table.rows[0].cells[0];
+        assert_eq!(a.text, "A");
+        assert_box_near(
+            a.bbox.unwrap(),
+            (700.0, 312.0, 100.0, 200.0),
+            0.01,
+            "cell A at 90",
+        );
+
+        // 270: the other swap arm — A → (792−700−100, 100, 100, 200)
+        let page = one_table_page(tables_pdf(RULED_2X2, "/Rotate 270"));
+        assert!(!page.tables_refused);
+        let table = &page.tables[0];
+        assert_box_near(
+            table.rows[0].cells[0].bbox.unwrap(),
+            (-8.0, 100.0, 100.0, 200.0),
+            0.01,
+            "cell A at 270",
+        );
+    }
+
+    /// The 90/270 coherent class without rulings (A1's row 2): upright
+    /// text-only tables serve with the forward rule over the span-union
+    /// cells. Measured raw boxes (out.txt rot 0) forward-mapped: at 90,
+    /// "Region" (100,700,38.02,12) → (700, 473.98, 12, 38.02); the table
+    /// bbox (100,550,230.684,162) → (550, 281.32, 162, 230.684).
+    #[test]
+    fn tables_the_90_270_upright_text_only_class_forward_maps_exactly() {
+        for rotation in [90, 270] {
+            let page = one_table_page(tables_pdf(TEXT_ONLY_4X2, &format!("/Rotate {rotation}")));
+            assert!(!page.tables_refused, "{rotation}");
+            assert_eq!(page.tables.len(), 1, "{rotation}: the measured detection");
+            assert_eq!(page.geometry.unwrap().rotation, rotation);
+            let table = &page.tables[0];
+            assert_eq!((table.col_count, table.has_header), (2, false));
+            let region = &table.rows[0].cells[0];
+            assert_eq!(region.text, "Region");
+            if rotation == 90 {
+                assert_box_near(
+                    region.bbox.unwrap(),
+                    (700.0, 612.0 - 100.0 - 38.016, 12.0, 38.016),
+                    0.01,
+                    "Region at 90",
+                );
+                assert_box_near(
+                    table.bbox.unwrap(),
+                    (550.0, 612.0 - 100.0 - 230.684, 162.0, 230.684),
+                    0.01,
+                    "table bbox at 90",
+                );
+            } else {
+                assert_box_near(
+                    region.bbox.unwrap(),
+                    (792.0 - 700.0 - 12.0, 100.0, 12.0, 38.016),
+                    0.01,
+                    "Region at 270",
+                );
+                assert_box_near(
+                    table.bbox.unwrap(),
+                    (792.0 - 550.0 - 162.0, 100.0, 162.0, 230.684),
+                    0.01,
+                    "table bbox at 270",
+                );
+            }
+        }
+    }
+
+    /// The A12 served class: a PATHLESS page whose every span is
+    /// engine-mapped — the sideways text-only table at 270 (measured
+    /// out3: detected, 4×4 with None-padded cells) serves through
+    /// unmap→forward, which is the identity here (no crop: the frames
+    /// coincide), so the boxes are the engine's mapped numbers verbatim.
+    /// The 90 arm of the same fixture is coherent too (all mapped) and
+    /// the detector finds NOTHING there (measured out3) — served empty,
+    /// `tables_refused` false (the detector's sideways limit at 90, not a
+    /// refusal; the asymmetry is the engine's).
+    #[test]
+    fn tables_the_sideways_text_only_class_serves_via_unmap_then_forward() {
+        // 270: served, the mapped numbers round-trip exactly
+        let page = one_table_page(tables_pdf(SIDEWAYS_TEXT_ONLY, "/Rotate 270"));
+        assert!(!page.tables_refused);
+        assert_eq!(page.geometry.unwrap().rotation, 270);
+        assert_eq!(page.tables.len(), 1);
+        let table = &page.tables[0];
+        assert_eq!((table.col_count, table.has_header), (4, false));
+        assert_box_near(
+            table.bbox.unwrap(),
+            (80.0, 100.0, 174.012, 230.684),
+            0.01,
+            "T0 bbox",
+        );
+        // the measured grid (out3): r0 [Value, pad, pad, pad]; the pads
+        // are the cluster branch's None cells, INSIDE the table
+        let r0 = &table.rows[0];
+        assert_eq!(r0.cells[0].text, "Value");
+        assert_box_near(
+            r0.cells[0].bbox.unwrap(),
+            (80.0, 300.0, 30.684, 30.684),
+            0.01,
+            "Value",
+        );
+        for pad in &r0.cells[1..] {
+            assert_eq!(pad.text, "");
+            assert_eq!(
+                pad.bbox, None,
+                "a pad cell's None bbox is the engine's truth"
+            );
+        }
+        // r1's filled cells (the measured boxes, mapped verbatim)
+        let r1 = &table.rows[1];
+        assert_eq!(r1.cells[0].text, "");
+        assert_eq!(r1.cells[0].bbox, None);
+        assert_eq!(r1.cells[1].text, "120");
+        assert_box_near(
+            r1.cells[1].bbox.unwrap(),
+            (130.0, 300.0, 20.016, 20.016),
+            0.01,
+            "120",
+        );
+        assert_eq!(r1.cells[3].text, "560");
+        assert_box_near(
+            r1.cells[3].bbox.unwrap(),
+            (230.0, 300.0, 20.016, 20.016),
+            0.01,
+            "560",
+        );
+
+        // 90: coherent, served, the detector declines — empty, not refused
+        let page = one_table_page(tables_pdf(SIDEWAYS_TEXT_ONLY, "/Rotate 90"));
+        assert!(!page.tables_refused);
+        assert!(
+            page.tables.is_empty(),
+            "measured out3: the 90 detector limit"
+        );
+    }
+
+    /// The A12 served class's 180 arm: a PATHLESS page whose every span
+    /// is engine-mapped (at 180 the engine maps ALL spans) — the text-only
+    /// 4×2 on /Rotate 180 (measured out.txt: detected, one table, every
+    /// cell's bbox the span's own) serves through unmap→forward, the
+    /// identity here (no crop: the frames coincide), so the boxes are the
+    /// engine's mapped numbers verbatim. The other Frame::Mapped arm (the
+    /// 270 sideways test above) and this one are the class's whole wiring
+    /// coverage, end to end.
+    #[test]
+    fn tables_the_180_text_only_class_serves_via_unmap_then_forward() {
+        let page = one_table_page(tables_pdf(TEXT_ONLY_4X2, "/Rotate 180"));
+        assert!(!page.tables_refused, "the served 180 class, not a refusal");
+        assert_eq!(page.geometry.unwrap().rotation, 180);
+        assert_eq!(page.tables.len(), 1);
+        let table = &page.tables[0];
+        assert_eq!((table.col_count, table.has_header), (2, false));
+        assert_box_near(
+            table.bbox.unwrap(),
+            (281.316, 80.0, 230.684, 162.0),
+            0.01,
+            "T0 bbox",
+        );
+        // the measured grid (out.txt, mapped verbatim): the rows are the
+        // MAPPED frame's y-bands — 560/East on top (the raw bottom row,
+        // mapped), the Region/Value column heads last; every cell's bbox
+        // is the span's own (the span-union branch's cell == span law).
+        let expected = [
+            ("560", (291.984, 230.0, 20.016, 12.0)),
+            ("East", (487.988, 230.0, 24.012, 12.0)),
+            ("340", (291.984, 180.0, 20.016, 12.0)),
+            ("South", (480.644, 180.0, 31.356, 12.0)),
+            ("120", (291.984, 130.0, 20.016, 12.0)),
+            ("North", (482.66, 130.0, 29.34, 12.0)),
+            ("Value", (281.316, 80.0, 30.684, 12.0)),
+            ("Region", (473.984, 80.0, 38.016, 12.0)),
+        ];
+        assert_eq!(table.rows.len(), 4);
+        let got: Vec<CellGolden> = table
+            .rows
+            .iter()
+            .flat_map(|r| &r.cells)
+            .map(|c| (c.text.as_str(), c.bbox.unwrap()))
+            .collect();
+        assert_eq!(got.len(), 8);
+        for ((text, bbox), (want_text, want_bbox)) in got.iter().zip(expected.iter()) {
+            assert_eq!(text, want_text);
+            assert_box_near(*bbox, *want_bbox, 0.01, want_text);
+        }
+    }
+
+    /// The A12 mixed-span refusal classes: a pathless page whose spans MIX
+    /// engine-mapped (sideways) and raw (upright) runs — the detector
+    /// would compare two text frames; refused (fail-closed: the unlisted
+    /// combination), geometry intact, at both 90 and 270.
+    #[test]
+    fn tables_the_mixed_span_classes_are_refused() {
+        let mixed = "BT /F1 12 Tf 100 700 Td (up) Tj ET\n\
+             BT /F1 12 Tf 0 1 -1 0 300 650 Tm (side) Tj ET\n\
+             BT /F1 12 Tf 100 600 Td (raw) Tj ET\n\
+             BT /F1 12 Tf 0 1 -1 0 300 550 Tm (flip) Tj ET";
+        for rotation in [90, 270] {
+            let page = one_table_page(tables_pdf(mixed, &format!("/Rotate {rotation}")));
+            assert!(page.tables.is_empty(), "{rotation}");
+            assert!(page.tables_refused, "{rotation}: the mixed-span refusal");
+            assert_eq!(page.geometry.unwrap().rotation, rotation);
+        }
+    }
+
+    /// The crop laws on this surface (the unclipped law + the text-side
+    /// asymmetry, both measured out2): under the [110 550 550 800] crop
+    /// the ruled grid survives with cells whose boxes lie OUTSIDE the
+    /// visible box — cell A raw (100,700,200,100) → (100−110, 700−550,
+    /// 200, 100) = (−10, 150, 200, 100), a negative x on a 440-wide page —
+    /// returned unclipped, the consumer clips. And under [150 600 550
+    /// 800] the crop drops the LEFT column's text (the TEXT side IS
+    /// crop-filtered — the 2pt law) and the table VANISHES: `tables: []`
+    /// with `tables_refused` FALSE (no tables found ≠ a refusal).
+    #[test]
+    fn tables_the_crop_laws_out_of_box_cells_and_the_text_side_filter() {
+        // the survivor: an out-of-box cell, returned unclipped
+        let page = one_table_page(tables_pdf(RULED_2X2, "/CropBox [110 550 550 800]"));
+        assert!(!page.tables_refused);
+        assert_eq!(
+            page.tables.len(),
+            1,
+            "measured out2: the grid survives this crop"
+        );
+        let geometry = page.geometry.unwrap();
+        // the crop's intersection with the MediaBox: x 110..550, y 550..792
+        assert_eq!((geometry.width_pt, geometry.height_pt), (440.0, 242.0));
+        let a = &page.tables[0].rows[0].cells[0];
+        assert_eq!(a.text, "A");
+        assert_box_near(
+            a.bbox.unwrap(),
+            (-10.0, 150.0, 200.0, 100.0),
+            0.01,
+            "the unclipped cell",
+        );
+        assert!(
+            a.bbox.unwrap().0 < 0.0,
+            "the box lies outside the page box: the consumer clips"
+        );
+
+        // the vanish variant: the text side is crop-filtered, the table dies
+        let page = one_table_page(tables_pdf(RULED_2X2, "/CropBox [150 600 550 800]"));
+        assert!(
+            page.tables.is_empty(),
+            "measured out2: the crop drops the left column's text"
+        );
+        assert!(
+            !page.tables_refused,
+            "a vanished table is the engine's answer, not a refusal"
+        );
+        assert!(page.geometry.is_some(), "geometry intact");
+    }
+
+    /// No rules and no table-shaped text → `tables: []`, refused FALSE —
+    /// the no-tables page, never an error (the detector-limit pins: these
+    /// two filters are engine heuristics, so the FIXTURE BYTES are
+    /// pinned, not the rule — measured out3): plain prose lines decline;
+    /// a TOC with INLINE dot leaders (one span per entry: single-column)
+    /// declines. (The measured boundary, stated in the docstring not
+    /// pinned as a rule: a TWO-column TOC shape — title + page number
+    /// spans — IS detected as a table by the same engine, out3; the
+    /// heuristic's answer is the fixture's, and these bytes' answer is
+    /// [].)
+    #[test]
+    fn tables_prose_and_toc_pages_serve_empty_not_refused() {
+        // the two-page prose fixture: no tables on either page
+        let bytes = two_page_pdf("Alpha page text", "Beta page text");
+        for (page_index, entry) in page_tables(bytes, None, None, "pdf")
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            assert!(entry.tables.is_empty());
+            assert!(!entry.tables_refused);
+            assert!(entry.geometry.is_some());
+            assert_eq!(entry.page_index, page_index);
+        }
+        // plain prose: three full-width lines
+        let prose = "BT /F1 12 Tf 72 700 Td (It was a dark and stormy night; the rain fell) Tj ET\n\
+             BT /F1 12 Tf 72 682 Td (over the plain, and the waves dashed against the rocks.) Tj ET\n\
+             BT /F1 12 Tf 72 664 Td (The captain stood at the rail and watched the sea.) Tj ET";
+        let page = one_table_page(tables_pdf(prose, ""));
+        assert!(page.tables.is_empty());
+        assert!(!page.tables_refused);
+        // the TOC with inline leaders (measured out3: tables: 0)
+        let toc = "BT /F1 18 Tf 72 720 Td (Contents) Tj ET\n\
+             BT /F1 12 Tf 72 680 Td (Introduction . . . . . . . . . . . . 1) Tj ET\n\
+             BT /F1 12 Tf 72 656 Td (Methods and materials . . . . . . . . . . . . 9) Tj ET\n\
+             BT /F1 12 Tf 72 632 Td (Results of the study . . . . . . . . . . . . 17) Tj ET";
+        let page = one_table_page(tables_pdf(toc, ""));
+        assert!(
+            page.tables.is_empty(),
+            "the detector-limit pin: these bytes decline"
+        );
+        assert!(!page.tables_refused);
+    }
+
+    /// The multi-table page (measured out4): two ruled grids stacked far
+    /// apart (disjoint x, a 100pt y gap — past the merge's reach) come
+    /// back as TWO tables, in the engine's own order (the BOTTOM grid
+    /// first — measured), each a clean 2×2 of ruling-rect cells.
+    #[test]
+    fn tables_a_multi_table_page_returns_two_tables_bottom_first() {
+        let far_apart = "0.5 w 100 600 m 100 800 l S\n\
+             0.5 w 200 600 m 200 800 l S\n\
+             0.5 w 300 600 m 300 800 l S\n\
+             0.5 w 100 600 m 300 600 l S\n\
+             0.5 w 100 700 m 300 700 l S\n\
+             0.5 w 100 800 m 300 800 l S\n\
+             BT /F1 12 Tf 120 750 Td (T1) Tj ET\n\
+             BT /F1 12 Tf 220 750 Td (T2) Tj ET\n\
+             BT /F1 12 Tf 120 650 Td (T3) Tj ET\n\
+             BT /F1 12 Tf 220 650 Td (T4) Tj ET\n\
+             0.5 w 350 300 m 350 500 l S\n\
+             0.5 w 450 300 m 450 500 l S\n\
+             0.5 w 550 300 m 550 500 l S\n\
+             0.5 w 350 300 m 550 300 l S\n\
+             0.5 w 350 400 m 550 400 l S\n\
+             0.5 w 350 500 m 550 500 l S\n\
+             BT /F1 12 Tf 370 450 Td (B1) Tj ET\n\
+             BT /F1 12 Tf 470 450 Td (B2) Tj ET\n\
+             BT /F1 12 Tf 370 350 Td (B3) Tj ET\n\
+             BT /F1 12 Tf 470 350 Td (B4) Tj ET";
+        let page = one_table_page(tables_pdf(far_apart, ""));
+        assert!(!page.tables_refused);
+        assert_eq!(
+            page.tables.len(),
+            2,
+            "measured out4: two grids far apart = two tables"
+        );
+        // the engine's order: the bottom grid first (measured)
+        assert_eq!(row_texts(&page, 0), vec!["B1", "B2"]); // page.tables[0].rows[0]
+        assert_eq!(page.tables[0].bbox, Some((350.0, 300.0, 200.0, 200.0)));
+        assert_eq!(page.tables[1].bbox, Some((100.0, 600.0, 200.0, 200.0)));
+    }
+
+    /// The A11 MERGE-path fixture: two disjoint-x ruled grids with a
+    /// 20pt y gap merge into ONE table whose rows are BOTTOM-GROUP-FIRST
+    /// (measured out2 — the merge sorts by top-y ascending and appends,
+    /// the engine never re-sorts after merging) with every cell a
+    /// ruling-rect box. Branch-deterministic, pinned as documented engine
+    /// behaviour.
+    #[test]
+    fn tables_the_disjoint_x_vertical_merge_is_bottom_group_first() {
+        let page = one_table_page(tables_pdf(STACKED_DISJOINT, ""));
+        assert!(!page.tables_refused);
+        assert_eq!(page.tables.len(), 1, "measured out2: the two grids MERGE");
+        let table = &page.tables[0];
+        assert_eq!(table.col_count, 2);
+        assert_eq!(table.bbox, Some((100.0, 380.0, 450.0, 420.0)));
+        assert_eq!(table.rows.len(), 4);
+        // bottom group first: rows 0-1 are B1..B4 (the y=380..580 grid),
+        // rows 2-3 are T1..T4 (the y=600..800 grid) — measured out2
+        assert_eq!(row_texts(&page, 0), vec!["B1", "B2"]);
+        assert_box_near(
+            table.rows[0].cells[0].bbox.unwrap(),
+            (350.0, 480.0, 100.0, 100.0),
+            0.01,
+            "B1",
+        );
+        assert_eq!(row_texts(&page, 1), vec!["B3", "B4"]);
+        assert_eq!(row_texts(&page, 2), vec!["T1", "T2"]);
+        assert_box_near(
+            table.rows[2].cells[0].bbox.unwrap(),
+            (100.0, 700.0, 100.0, 100.0),
+            0.01,
+            "T1",
+        );
+        assert_eq!(row_texts(&page, 3), vec!["T3", "T4"]);
+        for row in &table.rows {
+            assert!(!row.is_header);
+            assert_eq!(row.cells.len(), table.col_count);
+        }
+    }
+
+    /// The A11/A13 CLUSTER-path fixture: two SHARED-x ruled grids (2-col
+    /// over 3-col, gap 20) route to the line-cluster branch — one table,
+    /// TOP-GROUP-FIRST (measured out2), `has_header` TRUE (the cluster
+    /// branch's second header source, A13), the table bbox the cluster's
+    /// LINE-EXTENT × ROW-EXTENT (99.75/400.5 — the 0.5pt stroke widths
+    /// included, NOT the member-span union, A13), and the 2-col group's
+    /// rows padded to the 3-col grid with `"" None` cells (A2's pad, the
+    /// None inside a ruling-ruled page).
+    #[test]
+    fn tables_the_shared_x_cluster_path_is_top_first_with_none_pads() {
+        let page = one_table_page(tables_pdf(STACKED_SHARED_X, ""));
+        assert!(!page.tables_refused);
+        assert_eq!(page.tables.len(), 1);
+        let table = &page.tables[0];
+        assert_eq!(
+            table.col_count, 3,
+            "measured out2: the merged grid is 3 columns"
+        );
+        assert!(
+            table.has_header,
+            "the cluster branch's header heuristic, measured"
+        );
+        // A13: the cluster bbox is the LINE extent × ROW extent (the
+        // stroke-width-inclusive 99.75..500.25 x 380..713), pinned by the
+        // measured golden — not the cells' span-union.
+        assert_box_near(
+            table.bbox.unwrap(),
+            (99.75, 380.0, 400.5, 333.0),
+            0.01,
+            "the cluster bbox",
+        );
+        assert_eq!(table.rows.len(), 2);
+        // top group first (measured out2), padded to 3 with a None cell
+        assert_eq!(row_texts(&page, 0), vec!["T1", "T2", ""]);
+        assert_box_near(
+            table.rows[0].cells[0].bbox.unwrap(),
+            (120.0, 700.0, 14.004, 12.0),
+            0.01,
+            "T1",
+        );
+        assert_eq!(table.rows[0].cells[2].text, "");
+        assert_eq!(table.rows[0].cells[2].bbox, None, "the None pad, measured");
+        assert!(
+            table.rows[0].is_header,
+            "the header verdict rides the row too"
+        );
+        assert_eq!(row_texts(&page, 1), vec!["B1", "B2", "B3"]);
+        assert_box_near(
+            table.rows[1].cells[1].bbox.unwrap(),
+            (250.0, 480.0, 14.676, 12.0),
+            0.01,
+            "B2",
+        );
+    }
+
+    /// The A2 shape invariants, swept over every SERVED fixture here:
+    /// `col_count` is the grid's column count and a row is never LONGER
+    /// than it (merges only shorten — and the measured pad shape keeps
+    /// length equality); every cell carries colspan/rowspan ≥ 1. The
+    /// colspan>1/rowspan>1 MERGE ITSELF is flagged (spec §6's "fixture
+    /// still to build"): six fixture shapes aimed at
+    /// `detect_merged_cells_visually`'s two triggers (a band with the
+    /// column rule missing; overflowing cell text) all either declined
+    /// detection or came back colspan-1 (probe out5/out6/out7) — the
+    /// pass-through fields are pinned == 1 so an engine bump that starts
+    /// merging cannot arrive silently, and the ragged case stays a
+    /// documented v2 fixture.
+    #[test]
+    fn tables_the_shape_invariants_hold_on_every_served_fixture() {
+        let served = [
+            (RULED_2X2, "", 1usize),
+            (STACKED_DISJOINT, "", 1),
+            (STACKED_SHARED_X, "", 1),
+            (TEXT_ONLY_4X2, "", 1),
+            (TEXT_ONLY_4X2, "/Rotate 90", 1),
+            (SIDEWAYS_TEXT_ONLY, "/Rotate 270", 1),
+            (RULED_2X2, "/CropBox [110 550 550 800]", 1),
+        ];
+        for (content, extras, table_count) in served {
+            let page = one_table_page(tables_pdf(content, extras));
+            assert_eq!(page.tables.len(), table_count, "{extras}");
+            for table in &page.tables {
+                assert!(table.col_count >= 2, "is_real_grid's own gate");
+                assert!(table.bbox.is_some(), "Some on every returned table (A2)");
+                for row in &table.rows {
+                    assert!(
+                        row.cells.len() <= table.col_count,
+                        "the ragged law: never longer"
+                    );
+                    for cell in &row.cells {
+                        assert!(cell.colspan >= 1 && cell.rowspan >= 1);
+                        // the flagged merge pin: the measured engine never
+                        // emits a merge in these fixtures — a drift here
+                        // means the detector grew merges and the flagged
+                        // fixture question re-opens
+                        assert_eq!((cell.colspan, cell.rowspan), (1, 1), "the flagged pin");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The A6 cap: a page with more than the markdown lane's
+    /// MAX_TABLE_EDGES (1500) table primitives skips detection —
+    /// `tables: []`, `tables_refused: true`, GEOMETRY INTACT (the A9
+    /// reading rule: true at rotation 0 names the cap, not frame
+    /// incoherence). 751 verticals + 751 horizontals = 1502 primitives;
+    /// the call completes (the cap's whole point: no O(E²) sweep).
+    #[test]
+    fn tables_above_the_primitive_cap_skip_detection_and_refuse() {
+        let mut content = String::new();
+        for i in 0..751 {
+            let x = 100.0 + i as f32 * 0.5;
+            content.push_str(&format!("0.5 w {x} 600 m {x} 800 l S\n"));
+        }
+        for i in 0..751 {
+            let y = 600.0 + i as f32 * 0.25;
+            content.push_str(&format!("0.5 w 100 {y} m 500 {y} l S\n"));
+        }
+        let page = one_table_page(tables_pdf(&content, ""));
+        assert!(page.tables.is_empty());
+        assert!(page.tables_refused, "the cap refusal: skipped detection");
+        assert_eq!(
+            page.geometry.unwrap().rotation,
+            0,
+            "rotation 0 distinguishes the cap (A9)"
+        );
+        // just under the cap (1499 primitives) the sweep runs — and finds
+        // no is_real_grid in these near-degenerate rules, the served-empty
+        // shape (the cap is >, per the markdown lane's own bail-out)
+        let mut content = String::new();
+        for i in 0..749 {
+            let x = 100.0 + i as f32 * 0.5;
+            content.push_str(&format!("0.5 w {x} 600 m {x} 800 l S\n"));
+        }
+        for i in 0..750 {
+            let y = 600.0 + i as f32 * 0.25;
+            content.push_str(&format!("0.5 w 100 {y} m 500 {y} l S\n"));
+        }
+        let page = one_table_page(tables_pdf(&content, ""));
+        assert!(
+            !page.tables_refused,
+            "1499 < 1500: no cap, the gate decides"
+        );
+    }
+
+    /// The `pages=` law on the tables probe: `None` = whole document; a
+    /// selection normalizes (sort + dedup) and the output is parallel to
+    /// the NORMALIZED selection with every entry carrying its
+    /// `page_index`; the empty and out-of-range refusals are
+    /// `markdown_pages`' byte-identical strings.
+    #[test]
+    fn tables_pages_selection_is_normalized_and_parallel() {
+        let mut objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>".to_vec(),
+        ];
+        for text in ["one", "two", "three"] {
+            let page_number = objects.len() + 1;
+            let font_number = page_number + 1;
+            let stream_number = page_number + 2;
+            let content = format!("BT /F1 12 Tf 50 700 Td ({text}) Tj ET");
+            objects.push(
+                format!(
+                    "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 {font_number} 0 R >> >> \
+                 /MediaBox [0 0 612 792] /Contents {stream_number} 0 R >>"
+                )
+                .into_bytes(),
+            );
+            objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
+            objects.push(
+                format!(
+                    "<< /Length {} >>\nstream\n{content}\nendstream",
+                    content.len() + 1
+                )
+                .into_bytes(),
+            );
+        }
+        let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+        let bytes = objects_pdf(&refs);
+        let whole = page_tables(bytes.clone(), None, None, "pdf").unwrap();
+        assert_eq!(
+            whole.iter().map(|p| p.page_index).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        let subset = page_tables(bytes.clone(), Some(&[2, 0]), None, "pdf").unwrap();
+        assert_eq!(
+            subset.iter().map(|p| p.page_index).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(subset[0].format, "pdf");
+        // duplicates normalize away
+        assert_eq!(
+            page_tables(bytes.clone(), Some(&[1, 1]), None, "pdf").unwrap()[0].page_index,
+            1
+        );
+        // the byte-pinned refusals (markdown_pages' strings, shared rule)
+        let err = page_tables(bytes.clone(), Some(&[]), None, "pdf").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "pages= selected no pages: pass None for the whole document"
+        );
+        let err = page_tables(bytes, Some(&[3]), None, "pdf").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "page index 3 is out of range for a 3-page document (pages= is 0-based)"
+        );
+    }
+
+    /// A10's PDF-leg order, pinned: `open` (the encrypted door) precedes
+    /// the `pages=` normalization/validation, so an encrypted document
+    /// with a MALFORMED selection answers the encryption refusal first;
+    /// with the right password the range error is the answer; and an
+    /// unlocked document passes through to the entry (the geometry-only
+    /// fixture carries no tables).
+    #[test]
+    fn tables_the_encrypted_door_precedes_the_pages_validation() {
+        let locked = encrypted_pdf("torque", "owner-pw");
+        let err = page_tables(locked.clone(), Some(&[99]), None, "pdf").unwrap_err();
+        assert!(
+            matches!(err, PagesError::Pdf(PdfError::EncryptedPdf)),
+            "A10: the door precedes the range check: {err}"
+        );
+        let err = page_tables(locked.clone(), Some(&[99]), Some("torque"), "pdf").unwrap_err();
+        assert!(matches!(err, PagesError::Pages(_)), "{err}");
+        let entries = page_tables(locked, Some(&[0]), Some("torque"), "pdf").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].geometry.unwrap().height_pt, 792.0);
+        assert!(entries[0].tables.is_empty() && !entries[0].tables_refused);
+    }
+
+    /// The A6 content-failure law, pinned: a page whose content stream
+    /// fails to decode (the broken-Flate fixture) answers `tables: []`
+    /// with the geometry INTACT and `tables_refused` FALSE — the failure
+    /// is UNKNOWABLE (indistinguishable from a no-tables page, by
+    /// design): never an error, never a refusal the page's inputs cannot
+    /// support.
+    #[test]
+    fn tables_content_failures_are_empty_not_errors_and_not_refusals() {
+        let junk = b"this is not zlib data, not even close";
+        let broken = format!(
+            "<< /Length {} /Filter /FlateDecode >>\nstream\n{}",
+            junk.len(),
+            std::str::from_utf8(junk).unwrap()
+        );
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+            broken.as_bytes(),
+        ]);
+        let page = one_table_page(bytes);
+        assert!(page.geometry.is_some(), "the page box is intact");
+        assert!(page.tables.is_empty(), "the empty shape, not an error");
+        assert!(
+            !page.tables_refused,
+            "unknowable: the documented indistinguishability"
+        );
+    }
+
+    /// The empty-entry law (A5, unchanged): a page whose box read fails
+    /// (no MediaBox) is a `geometry: None` entry with `tables: []` and
+    /// `tables_refused` false, its siblings intact.
+    #[test]
+    fn tables_an_unreadable_page_box_is_the_empty_entry() {
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+            b"<< /Type /Page /Parent 2 0 R >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        ]);
+        let entries = page_tables(bytes, None, None, "pdf").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].geometry, None);
+        assert!(entries[0].tables.is_empty() && !entries[0].tables_refused);
+        assert_eq!(
+            entries[1].geometry.unwrap().width_pt,
+            612.0,
+            "the sibling is intact"
+        );
+    }
+
+    /// Zero pages → `[]`.
+    #[test]
+    fn tables_a_zero_page_document_yields_an_empty_list() {
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [] /Count 0 >>",
+        ]);
+        assert_eq!(
+            page_tables(bytes, None, None, "pdf").unwrap(),
+            Vec::<PageTablesData>::new()
+        );
+    }
+
+    /// The A1 gate at unit level: the ruling table's every listed row
+    /// (A12's fail-closed default covers the unlisted ones — asserted as
+    /// refusals too).
+    #[test]
+    fn the_frame_gate_matches_the_ruling_table() {
+        use Frame::{Incoherent, Mapped, Raw};
+        // rotation 0: raw, always
+        assert_eq!(table_frame_gate(0, false, false, true), Raw);
+        assert_eq!(table_frame_gate(0, true, false, true), Raw);
+        // 90/270 without rulings: none-mapped raw / all-mapped mapped / mixed refused
+        assert_eq!(table_frame_gate(90, false, false, false), Raw);
+        assert_eq!(table_frame_gate(270, false, false, false), Raw);
+        assert_eq!(table_frame_gate(90, false, true, true), Mapped);
+        assert_eq!(table_frame_gate(270, false, true, true), Mapped);
+        assert_eq!(table_frame_gate(90, false, true, false), Incoherent);
+        // 90/270 with rulings: none-mapped raw / any-mapped refused
+        assert_eq!(table_frame_gate(90, true, false, false), Raw);
+        assert_eq!(table_frame_gate(270, true, false, false), Raw);
+        assert_eq!(table_frame_gate(90, true, true, true), Incoherent);
+        assert_eq!(table_frame_gate(270, true, true, false), Incoherent);
+        // 180: all-mapped pathless serves; every rulings combination refuses
+        assert_eq!(table_frame_gate(180, false, true, true), Mapped);
+        assert_eq!(table_frame_gate(180, true, true, true), Incoherent);
+        assert_eq!(table_frame_gate(180, true, true, false), Incoherent);
+        assert_eq!(table_frame_gate(180, false, true, false), Incoherent);
+        // the (any=false, all=true) combination is the ZERO-SPAN vacuity
+        // (all ⊆ any for any real span set): a spanless 180 page — no
+        // table input at all — serves raw-empty, refused false.
+        assert_eq!(table_frame_gate(180, false, false, true), Raw);
+        assert_eq!(table_frame_gate(180, true, false, true), Raw);
+    }
+
+    /// The pdfium-hazard property, tables side: 8 threads opening their
+    /// own document over the same bytes, every answer byte-identical to
+    /// the single-threaded one (the pass is `Send` end to end, like every
+    /// entry point).
+    #[test]
+    fn tables_concurrent_calls_are_byte_identical() {
+        let bytes = std::sync::Arc::new(tables_pdf(RULED_2X2, ""));
+        let expected = page_tables((*bytes).clone(), None, None, "pdf").unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let bytes = std::sync::Arc::clone(&bytes);
+            handles.push(std::thread::spawn(move || {
+                page_tables((*bytes).clone(), None, None, "pdf").unwrap()
+            }));
+        }
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), expected);
+        }
     }
 }

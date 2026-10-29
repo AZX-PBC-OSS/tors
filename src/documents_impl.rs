@@ -2292,6 +2292,135 @@ pub fn page_layout(
     }
 }
 
+/// The multi-format `page_tables` probe: per unit of the resolved format's
+/// geometry lane, the unit's geometry PLUS — PDF only — the page's
+/// detected tables with per-cell boxes in the page's declared render
+/// space (`pdf_impl::page_tables`, issue #204: the frame-coherence gate
+/// A1, the primitive edge cap A6, the refused marker A9). The spine is
+/// [`page_layout`]'s exactly (A8 — resolve → capability (`geometry_engine`)
+/// → `format_name` → `pages=` non-PDF refusal → password non-PDF refusal →
+/// `max_bytes == 0` → engine leg), with the same `pages=` selection
+/// semantics (PDF-only, normalized with `markdown_pages`' exact rule and
+/// error strings, output parallel to the NORMALIZED selection,
+/// `page_index` on every entry).
+///
+/// Tables are PDF-only in v1: the office engines' IR tables carry grid and
+/// cell text but NO coordinates (office_oxide ir.rs `Element::Table`), and
+/// "grid without boxes" is ruled out — a row that has boxes sometimes is
+/// the worst answer — so the office rows serve their declared geometry
+/// with `tables: []` and `tables_refused: false` (A9: `[]` there is the
+/// per-format capability statement, NOT a per-page content judgment; the
+/// entry's `format` field is the marker that says so). DOCX table→section
+/// attribution needs converter-internal body-window logic the seam does
+/// not replicate (see the `office_geometry` note); the grid-without-boxes
+/// spelling is the v2 candidate (clean for PPTX/XLSX via `to_ir()`).
+///
+/// The no-geometry row: exactly one entry with `geometry: None` and no
+/// tables, for every backend. Every entry carries the resolved format's
+/// vocabulary name (`resolved_name` spelling) as its `format` field.
+/// PDF failure semantics: per `pdf_impl::page_tables` — a page whose box
+/// read fails is `geometry: None` + no tables, siblings intact; a
+/// content-stream failure is no tables, geometry intact, and (unlike the
+/// frame refusals) `tables_refused: false` — unknowable, documented;
+/// encrypted doors fail closed. `max_bytes` is inert on the PDF lane
+/// except the zero-value refusal (pdf_oxide's own limits govern there —
+/// the PDF lane is unmetered); the office leg's input ceiling applies
+/// even though `tables` is always `[]` there (the container still parses
+/// for geometry), and it must raise identically to `page_layout`'s.
+pub fn page_tables(
+    bytes: Vec<u8>,
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    pages: Option<Vec<usize>>,
+    options: &ConvertOptions,
+) -> Result<Vec<pdf_impl::PageTablesData>, DocumentError> {
+    let kind = resolve(&bytes, name_hint, format)?;
+    let lane = geometry_engine(kind, backend, &bytes)?;
+    // The entry's provenance marker: the resolved format's vocabulary
+    // name, resolved ONCE here and stamped on every entry (page_layout's
+    // exact rule — the format, not the entry's shape, tells a consumer
+    // holding only an entry why `tables` is empty: an office row's
+    // per-format capability statement, a PDF page's no-tables/failure
+    // shape, a refusal's skip).
+    let format_name = resolved_name(kind, &bytes);
+    // `pages=` is a PDF-lane parameter (page_layout's own refusal,
+    // byte-identical wording): a non-None selection on any non-PDF row is
+    // convert()'s typed refusal. The capability refusal above still wins
+    // first; the password-kind refusal and the zero refusal follow in the
+    // same order (A8).
+    if pages.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Pages(format!(
+            "pages= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.password.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Convert(format!(
+            "password= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.max_bytes.is_some_and(|limit| limit == 0) {
+        return Err(DocumentError::Convert("max_bytes must be positive".into()));
+    }
+    match lane {
+        // The no-geometry row: unit = whole document (single-flow), so
+        // exactly one entry with no geometry and no tables, for every
+        // backend.
+        None => Ok(vec![pdf_impl::PageTablesData {
+            page_index: 0,
+            format: format_name.to_string(),
+            geometry: None,
+            tables: Vec::new(),
+            tables_refused: false,
+        }]),
+        Some(Engine::PdfOxide) => {
+            pdf_impl::page_tables(bytes, pages.as_deref(), options.password, format_name)
+                .map_err(pages_error)
+        }
+        Some(Engine::OfficeOxide) => {
+            // The office leg parses the container into resident memory (the
+            // same amplification class the conversion lane meters): the
+            // same input ceiling, explicit budget over the 32 MiB default.
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::OfficeOxide),
+                    render_size(limit),
+                )));
+            }
+            Ok(office_geometry(bytes, kind)?
+                .into_iter()
+                .enumerate()
+                .map(|(page_index, geometry)| pdf_impl::PageTablesData {
+                    page_index,
+                    format: format_name.to_string(),
+                    geometry: geometry.map(|g| pdf_impl::PageBox {
+                        width_pt: g.width_pt,
+                        height_pt: g.height_pt,
+                        rotation: g.rotation,
+                        crop: g.crop,
+                    }),
+                    tables: Vec::new(),
+                    tables_refused: false,
+                })
+                .collect())
+        }
+        // geometry_engine's table is total: the Anydoc and Html2Md lanes
+        // never come back from it.
+        Some(_) => Err(DocumentError::Convert(
+            "tables: unreachable engine lane".into(),
+        )),
+    }
+}
+
 /// The HTML conversion: html-to-markdown-rs under the options the lane
 /// measured with. `extract_metadata: false` suppresses the YAML frontmatter
 /// its default configuration emits for `<title>`/`<meta>`: the body is the

@@ -51,8 +51,12 @@ import pytest
 try:
     import tors_documents
     from tors_documents import (
+        Cell,
         ImageBox,
         PageLayout,
+        PageTables,
+        Row,
+        Table,
         TextLine,
         TextSpan,
         Word,
@@ -393,6 +397,10 @@ def test_page_layout_classes_carry_exactly_the_d6_field_lists() -> None:
         "TextLine": ["text", "bbox", "words"],
         "Word": ["text", "bbox"],
         "ImageBox": ["bbox", "width_px", "height_px", "rotation_degrees", "paint_order"],
+        "PageTables": ["page_index", "format", "geometry", "tables", "tables_refused"],
+        "Table": ["rows", "has_header", "col_count", "bbox"],
+        "Row": ["cells", "is_header"],
+        "Cell": ["text", "bbox", "colspan", "rowspan"],
     }
     live_classes = {
         "PageLayout": PageLayout,
@@ -400,6 +408,10 @@ def test_page_layout_classes_carry_exactly_the_d6_field_lists() -> None:
         "TextLine": TextLine,
         "Word": Word,
         "ImageBox": ImageBox,
+        "PageTables": PageTables,
+        "Table": Table,
+        "Row": Row,
+        "Cell": Cell,
     }
     for stub in (_PAYLOAD_STUB, _SHIM_STUB):
         for name, fields in field_lists.items():

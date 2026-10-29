@@ -7916,7 +7916,7 @@ heartbeat-granularity and 8-thread byte-identical concurrency gates).
 |---|---|
 | `OSError` | the file is missing or unreadable (IO): a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
 | `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the type only, never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes: `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float; a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=`; all argument-contract failures, raised under the GIL before any work runs |
-| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, and on `page_geometry`/`page_layout` for pdf and the office families, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; on `page_layout`, a `pages=` selection on a non-PDF (PDF-only: a page index cannot name a section); an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB ceiling, and the pdf lane reads under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, and on `page_geometry`/`page_layout`/`page_tables` for pdf and the office families, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; on `page_layout`/`page_tables`, a `pages=` selection on a non-PDF (PDF-only: a page index cannot name a section); an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB ceiling, and the pdf lane reads under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
 | `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages: route the document to an OCR stage |
 
 **Format resolution order**: a mislabeled or extensionless file (a temp-file download,
@@ -8536,6 +8536,92 @@ tors.documents.page_layout("tests/engines_corpus/engines_report.docx", pages=[0]
 **Async**: `await tors.documents.aio.page_layout(...)` runs this under
 `asyncio.to_thread` so the event loop stays responsive across the call.
 
+## `tors.documents.page_tables`
+
+```python
+def page_tables(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+) -> list[PageTables]: ...
+```
+
+The per-cell table-box probe: per unit of the resolved format's geometry lane,
+the unit's geometry plus — PDF pages only — the page's detected tables with
+per-cell text and boxes, all in the page's declared render space (**points,
+bottom-left origin, y-up; /Rotate applied; one transform owned by the library**,
+the same frame `page_layout` maps; boxes are unclipped — a cell box may lie
+outside the page box, the consumer clips). One open per call. Office rows serve
+their declared geometry with `tables: []` (tables are PDF-only in v1); the
+no-geometry formats answer one `geometry=None` entry.
+
+`tables_refused` is the entry's honesty flag, TRUE iff the surface deliberately
+declined to serve a page whose inputs indicate possible table content. The
+reading rule: `tables_refused: true` with `geometry.rotation != 0` → **frame
+incoherence** — on pages where `/Rotate` and the drawn content disagree
+(notably /Rotate 180 with ruled tables: the detector compares text in one frame
+against rulings in another — a ruled table vanishes there, a 180-symmetric one
+comes back with every cell's text 180°-swapped), this surface reports no tables
+rather than wrong ones; `true` at rotation 0 → **the edge cap** (a page with
+more table primitives than the markdown lane's own 1500-edge bail-out;
+detection skipped). FALSE for no-tables pages, for content-stream failures
+(unknowable — `tables: []` stays indistinguishable from a no-tables page, like
+`page_layout`'s empty lists), and on office rows (there `tables: []` is the
+per-format capability statement and the entry's `format` field is the marker).
+
+The three honesty laws a table consumer must read first (full statements in
+[documents.md](documents.md#page-geometry-and-layout)): **cell boxes are
+GEOMETRY, not ownership** — an empty intersection cell carries a box that is
+declared grid geometry, not a claim on the text inside it, so cell bboxes must
+NOT be used to subtract text from other surfaces (the engine's own assembly
+needs per-cell token budgets to do that safely); **the table set is the public
+spatial detector's answer** (spatial-only, unconsolidated) — `to_markdown`
+renders a different, private pipeline (structure-tree-first for tagged PDFs,
+fragment consolidation, the RTL guard, the edge cap, the relaxed wide-table
+retry), so the sets can differ on ANY PDF; and **content inside a detected
+table's area may appear in both this surface and `page_layout`** — neither
+de-dups the other, there is no identity join.
+
+`pages=`/`backend=`/`password=`/`max_bytes=` and the refusal order behave
+exactly as on `page_layout` (the byte-pinned `pages=` errors, the capability
+refusal first, the encrypted door before the `pages=` validation, `max_bytes`
+inert on the pdf lane except the zero-value refusal, the office leg's 32 MiB
+ceiling binding even though `tables` is always `[]` there).
+
+```python
+import tors.documents
+
+# a no-tables page: empty, never an error, never a refusal
+entry = tors.documents.page_tables("tests/engines_corpus/engines_two_page.pdf")[0]
+entry.tables, entry.tables_refused
+# ([], False)
+
+# an office row: tables are PDF-only in v1 — `tables: []` is the per-format
+# capability statement, and the entry's `format` field is the marker
+tors.documents.page_tables("tests/engines_corpus/engines_report.docx")
+# [PageTables(page_index=0, format="docx", geometry=None, tables=[], tables_refused=False)]
+
+# the cells: the test suite's ruled 2x2 fixture (tests/documents.py's
+# generate_pdf_table_ruled; run from the repo root)
+from documents import generate_pdf_table_ruled
+
+entry = tors.documents.page_tables(data=generate_pdf_table_ruled())[0]
+entry.tables[0].col_count, entry.tables[0].has_header
+# (2, False)  — has_header is always False on the ruled (intersection) branch
+[(cell.text, cell.bbox) for cell in entry.tables[0].rows[0].cells]
+# [('A', (100.0, 700.0, 200.0, 100.0)), ('B', (300.0, 700.0, 200.0, 100.0))]
+entry.tables_refused
+# False  — True would mean the surface declined: rotation != 0 names frame
+#          incoherence, rotation 0 names the edge cap
+```
+
+**Async**: `await tors.documents.aio.page_tables(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
 ## `tors.documents.PdfClassification`
 
 The `pdf_classify` result: the preflight's answer with the routing rules derived
@@ -8697,6 +8783,76 @@ unit square), and `paint_order: int` (the image's index among the page's
 painted images, in content-stream order — the only stable handle the
 engine offers).
 
+## `tors.documents.PageTables`
+
+One `page_tables` entry: the page's geometry plus its detected tables — the
+native pyclass exposed directly (the `PageGeometry` deviation note applies to
+all four tables classes); `==` is structural (the five fields). Attributes:
+`page_index: int` (0-based, mandatory on every entry — the `pages=`
+normalization reorders), `format: str` (the resolved format's vocabulary name;
+every entry of one call carries the same name), `geometry: PageGeometry | None`
+(`None` where the page's box cannot be read or declares no positive extent —
+then `tables` is empty too), `tables: list[Table]`, `tables_refused: bool`.
+
+Provenance rides on the entry: `format` — not the entry's shape — tells you
+why `tables` may be empty. An office row carries declared geometry with an
+empty `tables` (tables are PDF-only in v1 — the office engines' tables carry
+no coordinates, and "boxes sometimes" is the worst answer), so there `format`
+marks "unsupported here", not "no tables"; a no-tables, scanned, or
+content-unparseable PDF page reports the same empty shape on the pdf lane with
+`tables_refused: false`. `tables_refused: true` is the deliberate-decline
+marker — `geometry.rotation != 0` names the frame-incoherent class, rotation 0
+the edge cap (see [page_tables](#torsdocumentspage_tables)).
+
+## `tors.documents.Table`
+
+One detected table (`PageTables.tables[]`): the engine's grid; `==` is
+structural (the four fields). Attributes:
+
+- `rows: list[Row]` — the grid's rows, the engine's order (branch-deterministic,
+  never re-sorted: a vertical merge emits its merged groups bottom-group-first,
+  the cluster path top-first).
+- `has_header: bool` — the engine's header-section verdict (boldness/font-size
+  heuristics); **always false on the intersection branch** (the ruled-grid
+  branch never sets it) — a pinned engine limitation.
+- `col_count: int` — the engine's grid column count. Rows may be SHORTER than
+  it when a colspan/rowspan merge covers cells: lay cells out by walking
+  `colspan`, never by `cells[i]`-as-column-i.
+- `bbox: tuple[float, float, float, float] | None` — the table's box in render
+  space, the ENGINE's own union (cell boxes on the intersection branch, member
+  spans on the other branches, the cluster grid's line-extent × row-extent,
+  the two prior boxes after a vertical merge), never re-derived from the cells.
+  Some on every table the engine returns. NOT the table's ink extent: it
+  includes empty grid cells and can lie outside the page box — the page box is
+  the consumer's clip.
+
+## `tors.documents.Row`
+
+One row in a `Table` (`Table.rows[]`); `==` is structural (the two fields).
+Attributes: `cells: list[Cell]` in grid order (possibly fewer than the table's
+`col_count` under merges), and `is_header: bool` (the engine's row verdict —
+always false on the intersection branch).
+
+## `tors.documents.Cell`
+
+One cell in a `Row` (`Row.cells[]`): the cell's text, box, and merge spans;
+`==` is structural (the four fields). Attributes:
+
+- `text: str` — the cell's text verbatim (an empty cell is `""`).
+- `bbox: tuple[float, float, float, float] | None` — the cell's box in render
+  space. Its regime is the engine's, per branch (never re-normalized):
+  intersection-branch cells are RULING rectangles (always Some, empty cells
+  included); cluster/band/text cells are span unions (None when empty); a
+  vertical merge pads merged rows with None cells inside an otherwise
+  ruling-rect table. **GEOMETRY, not ownership**: an empty cell's box is
+  declared grid geometry, not a claim on the text inside it — do not subtract
+  cell boxes from other surfaces' text. Boxes are unclipped — a cell box may
+  lie outside the page box (ruling lines are not crop-filtered; the TEXT side
+  is, so a grid can lose enough cells to vanish) — the page box is the
+  consumer's clip, and "cell box present" is never "cell is visible".
+- `colspan: int` / `rowspan: int` — the merge spans (1 unless a merge covers
+  this cell).
+
 ## `tors.documents.Backend` / `tors.documents.Format`
 
 ```python
@@ -8737,9 +8893,9 @@ never disagree.
 
 ## `tors.documents.aio`
 
-The awaitable spellings of the eight path functions (`to_markdown`, `to_text`,
+The awaitable spellings of the nine path functions (`to_markdown`, `to_text`,
 `pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_link_uris`,
-`page_geometry`, `page_layout`), each an
+`page_geometry`, `page_layout`, `page_tables`), each an
 unconditional `asyncio.to_thread` dispatch, signatures identical to the sync
 spellings, `path`/`data=` flowing through unchanged (pinned by the suite). The same doctrine as `tors.aio`: every one of these calls is a single
 native pass whose cost scales with the document (a small one is milliseconds, a large

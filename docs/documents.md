@@ -90,6 +90,8 @@ page_geometry(path=None, data=None, format=None, password=None, backend="auto",
               max_bytes=None) -> list[PageGeometry | None]
 page_layout(path=None, data=None, format=None, password=None, backend="auto",
             pages=None, max_bytes=None) -> list[PageLayout]
+page_tables(path=None, data=None, format=None, password=None, backend="auto",
+            pages=None, max_bytes=None) -> list[PageTables]
 ```
 
 The full per-function contract (signatures, the `pages=` and
@@ -255,7 +257,9 @@ typed-error contract; they are uncovered at the conversion level.
 the resolved format's geometry lane, the unit's declared render box — and,
 PDF pages only for `page_layout`, the page's text spans, text lines (words
 nested), and image boxes, all in the page's declared render space, from one
-open. The same source spine, refusal order, and `format=`/`password=`/
+open. (`page_tables` is the third probe on the same lane: per-cell table
+boxes, PDF pages only — see [below](#per-cell-table-boxes).) The same
+source spine, refusal order, and `format=`/`password=`/
 `max_bytes=` contracts as the probes above; `auto` and `oxide` are identical
 on these surfaces for every format (the geometry lane is a property of the
 format, not a choice), and `pages=` is PDF-only — a page index cannot name a
@@ -357,11 +361,73 @@ why the lists are empty: a consumer holding only an entry reads
 `entry.format` and knows the office case (no text surfaces) from the
 blank/scanned PDF case (no text on the page).
 
+### Per-cell table boxes
+
+`page_tables` is the third geometry-lane surface: per unit of the same
+lane, the unit's geometry plus — PDF pages only — the page's detected
+tables with per-cell text and boxes, in the same declared render space as
+`page_layout`, from one open. The spine, refusal order, `pages=`
+semantics, and `backend=`/`password=`/`max_bytes=` contracts are
+`page_layout`'s exactly; the capability table above applies to it
+identically (it IS the same table), with one addition: the office rows'
+`tables: []` is the per-format capability statement — the office engines'
+tables carry grid and cell text but no coordinates, and "boxes sometimes"
+is the worst answer — so there the entry's `format` field marks
+"unsupported here", not "no tables", and `tables_refused` stays false.
+
+| format | tables served |
+|---|---|
+| pdf | the spatial detector's tables, per-cell boxes in render space |
+| office families | `[]` with `tables_refused: false` (capability statement; the `format` field is the marker) |
+| html / csv / tsv / rtf / epub / odt / ods / odp | `[]` at the one `geometry=None` entry |
+
+Three honesty laws ride on the boxes, and one flag:
+
+- **`tables_refused` is the deliberate-decline marker.** TRUE iff the
+  surface declined a page whose inputs indicate possible table content:
+  the frame-incoherent `/Rotate` classes or the edge cap. Reading rule:
+  `tables_refused: true` + `geometry.rotation != 0` → **frame
+  incoherence** — on pages where `/Rotate` and the drawn content disagree
+  (notably /Rotate 180 with ruled tables), the detector compares text in
+  one frame against rulings in another: a ruled table vanishes there, a
+  180-symmetric one comes back with every cell's text 180°-swapped — so
+  this surface reports no tables rather than wrong ones. `tables_refused:
+  true` at rotation 0 → **the edge cap** (more table primitives than the
+  markdown lane's own 1500-edge bail-out; detection skipped). FALSE for
+  no-tables pages, for content-stream failures (unknowable — `tables: []`
+  stays indistinguishable from a no-tables page by design), and on office
+  rows (their marker is `format`).
+- **Cell boxes are GEOMETRY, not ownership.** A cell's box is the
+  engine's box for that cell; its regime is per-branch and not observable
+  from the return value (intersection cells: ruling rectangles, always
+  Some, empty cells included; cluster/band/text cells: span unions, None
+  when empty; a vertical merge pads merged rows with None cells). An
+  empty cell's box is declared grid geometry, not a claim on the text
+  inside it — do NOT subtract cell bboxes from other surfaces' text (the
+  engine's own assembly needs per-cell token budgets to do that safely).
+  Cell boxes may lie outside the page box (ruling lines are not
+  crop-filtered; the TEXT side IS, so a grid can lose enough cells to
+  vanish entirely) — returned, the consumer clips; never read "cell box
+  present" as "cell is visible".
+- **The table set is the spatial detector's answer, not the markdown's.**
+  `page_tables` builds on the public `extract_tables` (spatial-only,
+  unconsolidated); `to_markdown` renders tables through a different,
+  private pipeline (structure-tree-first for tagged PDFs, fragment
+  consolidation, the RTL guard, the edge cap, the relaxed wide-table
+  retry), so the sets can differ on ANY PDF. Replicating the private
+  pipeline is an upstream ask, not a v1 goal.
+- **Double-reporting is real.** `page_layout` serves `extract_spans`,
+  which returns table members (the drop lives in the markdown assembly's
+  consumer filter, not the core): content inside a detected table's area
+  may appear in BOTH surfaces; neither de-dups the other, there is no
+  identity join. Use `page_tables` for the grid and cell text, `page_layout`
+  for everything else, and accept the overlap; do not subtract cell bboxes.
+
 ## Async and the GIL
 
-`tors.documents.aio` gives the eight input-scaling functions (`to_markdown`,
+`tors.documents.aio` gives the nine input-scaling functions (`to_markdown`,
 `to_text`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris`,
-`page_geometry`, `page_layout`)
+`page_geometry`, `page_layout`, `page_tables`)
 their `asyncio.to_thread` twins: same signatures, same discipline as
 [`tors.aio`](async.md) (an unconditional thread hop, never a size-based
 branch). `sniff` stays sync-only: its cost is a container parse, but it

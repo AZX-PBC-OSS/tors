@@ -30,10 +30,14 @@ import os
 from enum import Enum
 
 from tors_documents._tors_documents import (
+    Cell,
     ImageBox,
     NeedsOcrError,
     PageGeometry,
     PageLayout,
+    PageTables,
+    Row,
+    Table,
     TextLine,
     TextSpan,
     Word,
@@ -49,6 +53,7 @@ from tors_documents._tors_documents import PdfClassification as _NativePdfClassi
 from tors_documents._tors_documents import __version__ as __version__
 from tors_documents._tors_documents import page_geometry as _native_page_geometry
 from tors_documents._tors_documents import page_layout as _native_page_layout
+from tors_documents._tors_documents import page_tables as _native_page_tables
 from tors_documents._tors_documents import pdf_classify as _native_pdf_classify
 from tors_documents._tors_documents import pdf_extract as _native_pdf_extract
 from tors_documents._tors_documents import pdf_link_uris as _native_pdf_link_uris
@@ -61,19 +66,24 @@ from tors_documents._tors_documents import to_text as _native_to_text
 
 __all__ = [
     "Backend",
+    "Cell",
     "Format",
     "ImageBox",
     "NeedsOcrError",
     "PageGeometry",
     "PageKind",
     "PageLayout",
+    "PageTables",
     "PdfClassification",
+    "Row",
+    "Table",
     "TextLine",
     "TextSpan",
     "Word",
     "__version__",
     "page_geometry",
     "page_layout",
+    "page_tables",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",
@@ -408,6 +418,54 @@ def page_layout(
     pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
     SECURITY.md)."""
     return _native_page_layout(
+        _coerce_path(path),
+        data,
+        format,
+        password,
+        backend,
+        pages,
+        max_bytes,
+    )
+
+
+def page_tables(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    max_bytes: int | None = None,
+) -> list[PageTables]:
+    """The per-cell table-box probe (the full contract is the native
+    function's docstring): per unit of the resolved format's geometry
+    lane, the unit's geometry plus — PDF pages only — the page's detected
+    tables with per-cell text and boxes, all in the page's declared
+    render space (the same frame ``page_layout`` maps: **points,
+    bottom-left origin, y-up; /Rotate applied; one transform owned by the
+    library; boxes are unclipped — a cell box may lie outside the page
+    box, the consumer clips**). The classes are the native
+    :class:`PageTables`, :class:`Table`, :class:`Row`, and :class:`Cell`
+    (exposed directly, structural ``==``). The entry's
+    ``tables_refused`` flag: TRUE iff this surface deliberately declined
+    a page whose inputs indicate possible table content — the
+    frame-incoherent /Rotate classes (``geometry.rotation != 0`` names
+    them) or the table-primitive edge cap (rotation 0); FALSE for
+    no-tables pages, content failures (unknowable, indistinguishable
+    from no-tables), and office rows (tables are PDF-only in v1: an
+    office row's ``tables: []`` is the per-format capability statement
+    and the entry's ``format`` field is the marker). The table set is
+    the public spatial detector's answer — ``to_markdown`` renders a
+    different (private, consolidating) pipeline, so the sets can differ
+    on any PDF; and content inside a detected table's area may appear in
+    BOTH this surface and ``page_layout`` (no de-dup, no identity join,
+    and cell bboxes must NOT be used to subtract). ``pages=``,
+    ``backend=``, ``password=``, ``max_bytes=``, and the refusal order
+    are ``page_layout``'s exactly. The whole read+resolve+tables pass
+    runs GIL-free. ⚠ A malformed PDF can crash the process (uncatchable
+    native stack exhaustion in the pdf_oxide engine): sandbox untrusted
+    PDFs (docs/documents.md, SECURITY.md)."""
+    return _native_page_tables(
         _coerce_path(path),
         data,
         format,

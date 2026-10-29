@@ -28,6 +28,9 @@ from tors_documents.aio import (
     page_layout as page_layout,
 )
 from tors_documents.aio import (
+    page_tables as page_tables,
+)
+from tors_documents.aio import (
     pdf_classify as pdf_classify,
 )
 from tors_documents.aio import (
@@ -49,6 +52,7 @@ from tors_documents.aio import (
 __all__ = [
     "page_geometry",
     "page_layout",
+    "page_tables",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",

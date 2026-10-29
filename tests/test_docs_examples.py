@@ -1042,6 +1042,39 @@ class TestDocumentsGeometryExamples:
             tors.documents.page_layout("tests/engines_corpus/engines_report.docx", pages=[0])
         assert str(raised.value) == 'pages= applies to PDF documents only, not "docx"'
 
+    def test_page_tables_examples(self) -> None:
+        """docs/api.md's page_tables section examples and the class
+        sections' repr literals, re-derived against the built extension."""
+        import tors.documents
+
+        # the no-tables page (the doc's example)
+        entry = tors.documents.page_tables("tests/engines_corpus/engines_two_page.pdf")[0]
+        assert entry.tables == [] and entry.tables_refused is False
+
+        # the office row: the capability statement with the format marker
+        (docx_entry,) = tors.documents.page_tables("tests/engines_corpus/engines_report.docx")
+        assert docx_entry.tables == [] and docx_entry.tables_refused is False
+        assert docx_entry.format == "docx"
+        assert repr(docx_entry) == (
+            'PageTables(page_index=0, format="docx", geometry=None, tables=[], '
+            "tables_refused=False)"
+        )
+
+        # the cells: the ruled 2x2 fixture's goldens (the doc's example)
+        from documents import generate_pdf_table_ruled
+
+        (entry,) = tors.documents.page_tables(data=generate_pdf_table_ruled())
+        assert (entry.tables[0].col_count, entry.tables[0].has_header) == (2, False)
+        assert [(cell.text, cell.bbox) for cell in entry.tables[0].rows[0].cells] == [
+            ("A", (100.0, 700.0, 200.0, 100.0)),
+            ("B", (300.0, 700.0, 200.0, 100.0)),
+        ]
+        assert entry.tables_refused is False
+        assert type(entry.tables[0]).__name__ == "Table"
+        assert repr(entry.tables[0].rows[0].cells[0]) == (
+            'Cell(text="A", bbox=(100.0, 700.0, 200.0, 100.0), colspan=1, rowspan=1)'
+        )
+
 
 class TestIndexExamples:
     """docs/index.md's quick-start literals."""

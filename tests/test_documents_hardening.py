@@ -63,6 +63,7 @@ import pytest
 from tors_documents import (
     page_geometry,
     page_layout,
+    page_tables,
     pdf_classify,
     pdf_extract,
     pdf_link_uris,
@@ -180,6 +181,7 @@ class TestNonRegularPathsAreTypedRefusals:
             to_text,
             page_geometry,
             page_layout,
+            page_tables,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -414,6 +416,7 @@ class TestNulInPathIsAValueError:
             to_text,
             page_geometry,
             page_layout,
+            page_tables,
             pdf_page_count,
             pdf_classify,
         ):
@@ -451,6 +454,7 @@ class TestPathCoercionNamesTheArgument:
             to_text,
             page_geometry,
             page_layout,
+            page_tables,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
