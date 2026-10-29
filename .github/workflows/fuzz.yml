@@ -33,13 +33,13 @@ jobs:
         # cargo-fuzz's instrumented builds need nightly's -Z sanitizer flags;
         # the rest of CI stays on stable (see the lint job's own note in
         # ci.yml).
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: nightly
 
       - name: Cache cargo
         # Same choice as ci.yml's fuzz-smoke job (rationale there).
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
         with:
           workspaces: ". -> target\nfuzz -> target"
 
