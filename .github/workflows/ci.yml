@@ -174,7 +174,11 @@ jobs:
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
-        # Same choice as the lint job's cache step (rationale there).
+        # Same choice as the lint job's cache step (rationale there). The
+        # workspaces list matches the lint job's too: the sync below builds
+        # the payload wheel's extension into tors-documents/target, which
+        # the default root-only key never caches — without it every matrix
+        # leg pays a cold engine-tree build per run.
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
 
       - name: Install uv
@@ -237,6 +241,9 @@ jobs:
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo
+        # Same choice and workspaces list as the test job's cache step
+        # (rationale there): the sync below also builds the payload into
+        # tors-documents/target.
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
 
       - name: Install uv
