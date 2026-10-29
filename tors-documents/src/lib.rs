@@ -1424,6 +1424,13 @@ pub fn page_layout(
     // The zero value threads through (see `parse_max_bytes_on`): the
     // core's sequenced check is this surface's zero refusal.
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -1904,9 +1911,13 @@ impl PageLayout {
 /// byte-pinned error strings, output parallel to the NORMALIZED selection
 /// with `page_index` on every entry, the office leg's 32 MiB ceiling
 /// binding even though `tables` is always `[]` there, and the encrypted
-/// door preceding the `pages=` validation on the PDF lane (A10: an
+/// door preceding the `pages=` range validation on the PDF lane (A10: an
 /// encrypted document with a malformed selection answers the encryption).
-/// A10's door-first order also means `max_bytes` is inert on the PDF lane
+/// A10's full order is two-tier (the binding parses the pages= SHAPE
+/// under the GIL before the detach: an empty/negative/non-index selection
+/// refuses BEFORE the door; the door precedes the core's RANGE
+/// validation) — and its door-first order also means `max_bytes` is
+/// inert on the PDF lane
 /// except the zero-value refusal (pdf_oxide's own limits govern there).
 ///
 /// GIL model: page_layout's shape — argument marshalling under the GIL,
@@ -1952,6 +1963,13 @@ pub fn page_tables(
     // The zero value threads through (see `parse_max_bytes_on`): the
     // core's sequenced check is this surface's zero refusal.
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -2445,6 +2463,13 @@ pub fn page_images(
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
     let decode = parse_image_decode(decode)?;
     let max_image_bytes = parse_max_image_bytes(max_image_bytes)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -2629,6 +2654,13 @@ pub fn page_text_chars(
         return Err(document_error(py, refusal)?);
     }
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -5439,6 +5471,13 @@ fn convert(
     let source = parse_source(path, data, what)?;
     let format = parse_format(format)?;
     let backend = parse_backend(backend)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let password = parse_password(password)?;
     let max_bytes = parse_max_bytes(max_bytes)?;

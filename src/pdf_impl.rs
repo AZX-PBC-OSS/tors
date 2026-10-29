@@ -2051,10 +2051,14 @@ fn table_frame_gate(
 /// intersection cell's box is grid geometry, not ownership).
 ///
 /// Zero pages: an empty vec. Encrypted documents fail closed at the
-/// [`open`] door check (before the `pages=` validation — A10's PDF-leg
-/// order: open → page_count → normalize/validate, so an encrypted
-/// document with a malformed selection answers the encryption refusal).
-/// Runs under [`with_depth_headroom`], like every entry point.
+/// [`open`] door check (the PDF leg of A10's order — open → page_count →
+/// normalize/validate, so an encrypted document with a malformed
+/// selection answers the encryption refusal). A10's full order is
+/// TWO-TIER: the BINDING parses the pages= SHAPE under the GIL before
+/// the detach (an empty selection, a negative index, a non-index type —
+/// `parse_pages` refusals), so those precede the door; the door
+/// precedes the core's range validation. Runs under
+/// [`with_depth_headroom`], like every entry point.
 pub fn page_tables(
     bytes: Vec<u8>,
     pages: Option<&[usize]>,

@@ -4835,6 +4835,28 @@ class TestPageImages:
         with pytest.raises(TypeError, match="(?i)decode must be one of"):
             page_images(data=generate_pdf_layout_image(), decode=1)
 
+    def test_the_pages_shape_refusal_precedes_the_encrypted_door(self) -> None:
+        """A10's two-tier order, pinned at the binding (the finding:
+        binding-level shape refusals — pages=[], negatives, non-index
+        types — precede the door, measured pre-fix on a locked document:
+        pages=[] answered the shape refusal, not the encryption refusal,
+        and the old docstrings claimed the door first without the tier).
+        The docstrings state the full order now: binding shape refusals
+        → door → core range validation."""
+        locked = _encrypted_pdf()
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_images(data=locked, pages=[])
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_layout(data=locked, pages=[])
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_tables(data=locked, pages=[])
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_text_chars(data=locked, pages=[])
+        # the RANGE refusal is the core's, junior to the door: locked +
+        # out-of-range answers the encryption refusal
+        with pytest.raises(ValueError, match="encrypted"):
+            page_images(data=locked, pages=[9])
+
 
 class TestPageTextChars:
     """The char-boxes probe's Python pins (§2.6's Python half): the join
