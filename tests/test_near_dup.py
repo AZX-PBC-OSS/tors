@@ -1662,43 +1662,20 @@ class TestDedupWidthMixingAndTokenFree:
 
 
 class TestGilHeartbeat:
-    @staticmethod
-    async def _worst_gap(op) -> tuple[float, float]:
-        """Run ``op`` as a task while the loop pings every 10ms; return
-        (worst tick gap, total wall)."""
-        gaps: list[float] = []
-        started = monotonic()
-        last = started
-
-        async def heartbeat() -> None:
-            nonlocal last
-            while True:
-                await asyncio.sleep(0.01)
-                now = monotonic()
-                gaps.append(now - last)
-                last = now
-
-        hb = asyncio.create_task(heartbeat())
-        try:
-            await op()
-        finally:
-            hb.cancel()
-            try:
-                await hb
-            except asyncio.CancelledError:
-                pass
-        wall = monotonic() - started
-        return (max(gaps) if gaps else 0.0), wall
-
     def test_aio_dedup_near_dup_keeps_the_loop_responsive(self) -> None:
         corpus = [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(8_000)]
 
+        from test_gil_release import _assert_loop_stays_responsive
+
         async def run() -> None:
-            gap, wall = await self._worst_gap(
+            # The shared verdict machinery, not a bare ratio band: the pass
+            # is GIL-free, but on a loaded 2-core runner the heartbeat
+            # thread can lose multi-second windows to CPU starvation
+            # (measured 2929ms of 3166ms here, once), which the machinery's
+            # runqueue-wait account separates from a lost detach — the bare
+            # band this replaced convicted that starvation as a regression.
+            await _assert_loop_stays_responsive(
                 lambda: tors.aio.dedup_near_dup(corpus, threshold=0.9, method="simhash")
-            )
-            assert gap < max(0.05, 0.3 * wall), (
-                f"loop blocked {gap * 1e3:.0f}ms of {wall * 1e3:.0f}ms"
             )
 
         asyncio.run(run())
@@ -1707,12 +1684,14 @@ class TestGilHeartbeat:
         text_a = ("the quarterly oil sample interval for field outages " * 8_000).strip()
         text_b = text_a.replace("quarterly", "QUARTERLY", 1)
 
+        from test_gil_release import _assert_loop_stays_responsive
+
         async def run() -> None:
-            gap, wall = await self._worst_gap(
+            # Same machinery port as the dedup cell above: the starvation
+            # excuse is the point — a shingle pass is GIL-free, and a loaded
+            # runner's scheduling of the heartbeat thread is not evidence.
+            await _assert_loop_stays_responsive(
                 lambda: tors.aio.shingle_jaccard(text_a, text_b)
-            )
-            assert gap < max(0.05, 0.3 * wall), (
-                f"loop blocked {gap * 1e3:.0f}ms of {wall * 1e3:.0f}ms"
             )
 
         asyncio.run(run())
