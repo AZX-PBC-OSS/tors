@@ -1585,6 +1585,49 @@ def generate_docx_blocks(count: int) -> bytes:
     )
 
 
+def generate_docx_cells(cells: int) -> bytes:
+    """A document whose ONE table carries `cells` `<w:tc>` cells (one
+    row per cell — the grid is rows × 1): the entry cap's NESTED-entry
+    fixture. A cell is an entry object the cap must count; pre-fix the
+    cells rode inside ONE table block (blocks=1, marker false, the full
+    cell list in the payload), post-fix the running budget stops the
+    build and flips `entries_truncated`."""
+    rows = "".join(
+        '<w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>'
+        for _ in range(cells)
+    )
+    document = (
+        _XML_DECL
+        + f'<w:document xmlns:w="{_W_NS}"><w:body>'
+        + '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>'
+        + rows
+        + "</w:tbl>"
+        + "</w:body></w:document>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", DOCX_CONTENT_TYPES.encode("utf-8")),
+            ("_rels/.rels", DOCX_RELS.encode("utf-8")),
+            ("word/document.xml", document.encode("utf-8")),
+        ]
+    )
+
+
+def generate_html_grid_cells(cells: int) -> bytes:
+    """A document whose ONE table carries `cells` `<td>` cells (one row
+    per cell): the html leg's nested-entry fixture — pre-fix the cells
+    rode inside ONE table node (nodes=1), post-fix the running budget
+    stops the mapping and flips `entries_truncated`."""
+    rows = "<tr><td>x</td></tr>" * cells
+    document = (
+        "<!DOCTYPE html>\n"
+        "<html><head><title>Big grid</title></head><body>"
+        f"<table>{rows}</table>"
+        "</body></html>\n"
+    )
+    return document.encode("utf-8")
+
+
 def generate_html_nodes(count: int) -> bytes:
     """A document with `count` `<p>` nodes: the entry cap's html
     boundary fixture (one node per paragraph, no headings so no

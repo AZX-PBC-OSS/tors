@@ -3491,8 +3491,12 @@ impl TextChar {
 /// for the structure lane, which also holds the node array). Zero is
 /// refused core-side, sequenced after the capability refusal. The entry
 /// cap is separate and honest: [`MAX_STRUCTURE_ENTRIES`] — 200,000 —
-/// bounds the PAYLOAD's entry lists in document order, with
-/// `entries_truncated` on the affected payload and all sheet/range/merge/name
+/// bounds the PAYLOAD's entry lists in document order as ONE RUNNING
+/// BUDGET that counts every materialized entry object: docx blocks AND
+/// their table cells, xlsx cells, html nodes AND their grid cells (a
+/// cell is an entry object — pre-fix the cap let 1M docx cells and 300k
+/// html cells ride inside one entry), with `entries_truncated` on the
+/// affected payload and all sheet/range/merge/name
 /// metadata complete — a marshalling bound, never a refusal.
 ///
 /// Errors: `OSError` for a missing/unreadable file; `ValueError` for

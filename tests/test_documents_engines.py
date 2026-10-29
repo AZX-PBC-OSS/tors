@@ -5640,6 +5640,41 @@ class TestDocumentStructure:
         assert docx.blocks[-1].index == 199_999
         assert docx.sections == 1
 
+    def test_the_entry_cap_counts_the_nested_cells(self) -> None:
+        """The cap counts every materialized entry OBJECT, not just the
+        top-level list's elements (the finding: a 1M-cell docx table rode
+        inside ONE block — blocks=1, marker False, 1M cell objects in the
+        payload; 300k html grid cells rode inside ONE node). The running
+        budget stops the BUILD: the docx table keeps its grid metadata,
+        its kept cells row-major, marker True; the html walk's kept
+        prefix stays index-sound (parents before children — cells inside
+        a stopped table drop with the table)."""
+        from documents import generate_docx_cells, generate_html_grid_cells
+
+        report = document_structure(data=generate_docx_cells(1_000_000))
+        docx = report.payload
+        assert docx.entries_truncated is True
+        assert len(docx.blocks) == 1
+        # the block spent 1 of the 200,000; its cells the rest — a
+        # BOUNDED payload, the pre-fix 1,000,000
+        total_cells = sum(len(block.table.cells) for block in docx.blocks if block.table)
+        assert total_cells == 200_000 - 1
+        # the kept cells stay row-major (a stopped prefix of the row walk)
+        table = docx.blocks[0].table
+        assert table.rows == 1_000_000  # the grid metadata stays complete
+        assert [cell.row for cell in table.cells] == list(range(200_000 - 1))
+
+        report = document_structure(data=generate_html_grid_cells(300_000))
+        html = report.payload
+        assert html.entries_truncated is True
+        assert len(html.nodes) == 1
+        grid = html.nodes[0].grid
+        assert grid.rows == 300_000 and grid.cols == 1  # metadata complete
+        assert len(grid.cells) == 200_000 - 1
+        # the kept prefix is index-sound: the one node has no parent
+        assert html.nodes[0].parent is None
+        assert html.nodes[0].children == []
+
     # --- the html payload -------------------------------------------------
 
     def test_html_payload_pins(self) -> None:

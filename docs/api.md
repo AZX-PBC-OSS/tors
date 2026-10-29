@@ -9140,8 +9140,11 @@ capability; html's forced backends are conversion's own
 with the legacy-xls-or-encrypted-xlsx union message. There is NO
 `password=` parameter: no served format accepts one. An explicit
 `max_bytes=` binds pre-read; `None` keeps the 32 MiB default ceiling on
-every served row; the 200,000-entry payload cap truncates with
-`entries_truncated` (metadata stays complete), never refusing.
+every served row; the 200,000-entry payload cap is one running budget
+over every materialized entry OBJECT (docx blocks and their table cells,
+xlsx cells, html nodes and their grid cells — a cell is an entry object)
+that truncates with `entries_truncated` (metadata stays complete; the
+kept prefix keeps the reading-order invariants), never refusing.
 `format=` is trusted and never re-sniffed — the fix-it is
 [`sniff`](#torsdocumentssniff).
 
@@ -9192,7 +9195,9 @@ section), `section_breaks: list[int]` (verbatim; section i covers body
 elements `[prev_break, section_breaks[i])`), `footnotes`/`endnotes`/
 `comments: int` (body counts; v1 keeps note BODIES out),
 `unreadable_parts: list[str]` (the raw layer's cannot-parse records,
-verbatim — the report-the-loss law), and `entries_truncated: bool`.
+verbatim — the report-the-loss law), and `entries_truncated: bool`
+(the running entry budget counts blocks AND their table cells — a cell
+is an entry object).
 
 ## `tors.documents.DocxBlock`
 
@@ -9303,8 +9308,11 @@ Attributes: `cell_ref: str`, `author: str | None`, `text: str`.
 The html payload; `==` is structural (both fields). Attributes:
 `nodes: list[HtmlNode]` (the flat array, reading order, parents before
 children — the auto-built Group tree IS the heading tree) and
-`entries_truncated: bool` (the kept prefix stays index-sound; children
-filtered to kept indices). No second tables list: the Table nodes carry
+`entries_truncated: bool` (the running entry budget counts nodes AND
+their grid cells — a cell is an entry object; the kept prefix stays
+index-sound; children
+filtered to kept indices; cells inside a stopped table drop with the
+table). No second tables list: the Table nodes carry
 the grids.
 
 ## `tors.documents.HtmlNode`

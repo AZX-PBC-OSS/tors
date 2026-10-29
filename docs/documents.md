@@ -637,9 +637,17 @@ The surface-wide laws:
   and `XlsxStructure.unreadable_sheets` carry the raw layers' own
   cannot-parse records verbatim; the intact parts are served.
 - **One entry cap, truncate-with-marker.** `MAX_STRUCTURE_ENTRIES`
-  (200,000) bounds the payload's entry lists (docx blocks, xlsx cells,
-  html nodes) in document order, with `entries_truncated: true` on the
-  affected payload and all sheet/range/merge/name metadata complete. It
+  (200,000) bounds the payload's entry lists in document order as ONE
+  running budget that counts every materialized entry OBJECT: docx
+  blocks AND the table cells inside a table block, xlsx cells, html
+  nodes AND the grid cells inside a table node — a cell is an entry
+  object (pre-fix the cap let a 1M-cell docx table ride inside one
+  block and 300k html cells inside one node). The walk stops building
+  at zero remaining: the kept prefix stays in document order
+  (parents-before-children holds on html; a stopped table keeps its
+  grid metadata, its kept cells row-major; cells inside a stopped table
+  drop with the table), `entries_truncated: true` marks the affected
+  payload, and all sheet/range/merge/name metadata stays complete. It
   bounds PAYLOAD MARSHALLING, not the parse — the engine has already
   materialized everything by the time the cap applies — and it never
   refuses.

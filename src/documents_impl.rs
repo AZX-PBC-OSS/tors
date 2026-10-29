@@ -2629,18 +2629,32 @@ pub fn page_text_chars(
 }
 
 /// The most entries one structure payload materializes: 200,000, applied
-/// in document order to ALL THREE entry lists (xlsx cells, docx blocks,
-/// html nodes — the same O(N)-Python-objects class). The honest statement
-/// of what this bounds: PAYLOAD CONSTRUCTION, not the parse — office_oxide
-/// has already materialized every Cell and every docx block by the time
-/// the seam sees them, so nothing here can un-spend the parse, and the
-/// html collector has already built the node array. A marshalling bound
-/// with a marker (`entries_truncated`), never a refusal: sheet/range/
-/// merge/name metadata stays complete past the cap, and per-object Python
-/// overhead (>> string bytes) is what a big workbook costs past this
-/// point. Truncate-with-marker, never refuse — and never
-/// `page_tables`' `tables_refused` shape, which is an engine-cost
-/// bail-out with per-page semantics, not a truncation precedent.
+/// in document order to ALL THREE entry lists as ONE RUNNING BUDGET —
+/// the cap counts every materialized entry object: docx BLOCKS and the
+/// TABLE CELLS inside a table block (a cell is an entry object: 1M cells
+/// rode inside ONE block pre-fix — blocks=1, marker false, 1M cell
+/// objects in the payload), xlsx CELLS, html NODES and the GRID CELLS
+/// inside a table node (300k cells rode inside ONE node pre-fix). The
+/// walk stops building at zero remaining (xlsx's sheet walk has always
+/// enforced the running budget; docx and html do now — the pre-fix
+/// truncate-after-build let the cell lists through whole). The honest
+/// statement of what this bounds: PAYLOAD CONSTRUCTION, not the parse —
+/// office_oxide has already materialized every Cell and every docx block
+/// by the time the seam sees them, so nothing here can un-spend the
+/// parse, and the html collector has already built the node array. A
+/// marshalling bound with a marker (`entries_truncated`), never a
+/// refusal: sheet/range/merge/name metadata stays complete past the cap,
+/// and per-object Python overhead (>> string bytes) is what a big
+/// workbook costs past this point. Truncate-with-marker, never refuse —
+/// and never `page_tables`' `tables_refused` shape, which is an
+/// engine-cost bail-out with per-page semantics, not a truncation
+/// precedent. The stopped prefix keeps the reading-order invariants: a
+/// docx table cut mid-cells keeps its grid metadata (rows/cols/widths),
+/// its kept cells row-major; an html walk stopped at the budget keeps
+/// parents-before-children (a parent is always earlier, so the kept
+/// prefix is closed under `parent`), and cells inside a stopped table
+/// drop WITH the table (a kept node's grid cells are its own, below its
+/// own budget spend).
 pub const MAX_STRUCTURE_ENTRIES: usize = 200_000;
 
 /// Which engine lane a structure surface runs on. Derived, never stored:
@@ -2899,9 +2913,12 @@ pub struct DocxStructure {
     /// report-the-loss law, `XlsxStructure.unreadable_sheets`' twin (the
     /// asymmetry the review flagged was a bug, not a choice).
     pub unreadable_parts: Vec<String>,
-    /// True when `blocks` stopped at [`MAX_STRUCTURE_ENTRIES`] (the
+    /// True when the budget stopped the build at
+    /// [`MAX_STRUCTURE_ENTRIES`] — blocks OR the table cells inside a
+    /// table block (a cell is an entry object; the pre-fix
+    /// truncate-after-build let 1M cells ride inside one block) — the
     /// marshalling bound; sheet/section metadata above stays complete —
-    /// never a refusal).
+    /// never a refusal.
     pub entries_truncated: bool,
 }
 
@@ -3237,9 +3254,13 @@ pub struct HtmlStructure {
     /// child). The auto-built `Group` tree IS the heading tree; the flat
     /// `Heading` nodes are the entries.
     pub nodes: Vec<HtmlNode>,
-    /// True when nodes stopped at [`MAX_STRUCTURE_ENTRIES`]: the kept
-    /// prefix stays index-sound (parents are always earlier) and every
-    /// kept node's `children` is filtered to kept indices.
+    /// True when the budget stopped the build at
+    /// [`MAX_STRUCTURE_ENTRIES`] — nodes OR the grid cells inside a
+    /// table node (a cell is an entry object; the pre-fix
+    /// truncate-after-build let 300k cells ride inside one node): the
+    /// kept prefix stays index-sound (parents are always earlier) and
+    /// every kept node's `children` is filtered to kept indices; cells
+    /// inside a stopped table drop with the table.
     pub entries_truncated: bool,
 }
 
@@ -3520,33 +3541,51 @@ fn structure_html(bytes: &[u8]) -> Result<HtmlStructure, DocumentError> {
     let document = result.document.ok_or_else(|| {
         Convert("html-to-markdown-rs: the structure collector returned no document".into())
     })?;
+    // The entry budget ([`MAX_STRUCTURE_ENTRIES`]): nodes AND the grid
+    // cells inside a table node both spend it (a cell is an entry
+    // object), the mapping stops building at zero remaining, `truncated`
+    // flips once anything was dropped. The kept prefix is the reading
+    // order's prefix — parents are always earlier, so it stays closed
+    // under `parent`; children are filtered to kept indices; cells inside
+    // a stopped table drop with the table.
+    let mut budget = MAX_STRUCTURE_ENTRIES;
+    let mut truncated = false;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
-        nodes.push(html_node(node)?);
+        if budget == 0 {
+            truncated = true;
+            break;
+        }
+        budget -= 1;
+        nodes.push(html_node(node, &mut budget, &mut truncated)?);
     }
-    // The entry cap: keep the reading-order prefix. Parents are always
-    // earlier (the collector pushes the container before its child), so
-    // every kept node's parent is kept; children are filtered to kept
-    // indices so no kept node points past the array.
-    let entries_truncated = nodes.len() > MAX_STRUCTURE_ENTRIES;
-    if entries_truncated {
-        nodes.truncate(MAX_STRUCTURE_ENTRIES);
-        let kept = MAX_STRUCTURE_ENTRIES as u32;
+    // The kept prefix stays index-sound: children indices are always
+    // LATER than the parent's, so a kept node's children beyond the cut
+    // are filtered away (no kept node points past the array).
+    let kept = nodes.len() as u32;
+    if truncated {
         for node in &mut nodes {
             node.children.retain(|&child| child < kept);
         }
     }
     Ok(HtmlStructure {
         nodes,
-        entries_truncated,
+        entries_truncated: truncated,
     })
 }
 
-/// One collector node into the payload's own type. An unreachable node
-/// kind (the `tl`-based builder's variants: definition lists, raw
-/// blocks, metadata blocks — nothing in the convert path pushes them)
-/// is a typed `Convert` error, never a silent `kind=None`.
-fn html_node(node: &html_to_markdown_rs::DocumentNode) -> Result<HtmlNode, DocumentError> {
+/// One collector node into the payload's own type. `budget` is the
+/// structure payload's shared entry budget (the node itself was already
+/// spent by the caller); the node's grid cells spend it (a cell is an
+/// entry object), `truncated` flips once anything was dropped. An
+/// unreachable node kind (the `tl`-based builder's variants: definition
+/// lists, raw blocks, metadata blocks — nothing in the convert path
+/// pushes them) is a typed `Convert` error, never a silent `kind=None`.
+fn html_node(
+    node: &html_to_markdown_rs::DocumentNode,
+    budget: &mut usize,
+    truncated: &mut bool,
+) -> Result<HtmlNode, DocumentError> {
     let (kind, text, level, ordered, language, label, src, alt, grid) = match &node.content {
         html_to_markdown_rs::NodeContent::Heading { level, text } => (
             "heading",
@@ -3593,7 +3632,7 @@ fn html_node(node: &html_to_markdown_rs::DocumentNode) -> Result<HtmlNode, Docum
             None,
             None,
             None,
-            Some(html_grid(grid)),
+            Some(html_grid(grid, budget, truncated)),
         ),
         html_to_markdown_rs::NodeContent::Image {
             description,
@@ -3700,34 +3739,59 @@ fn html_node(node: &html_to_markdown_rs::DocumentNode) -> Result<HtmlNode, Docum
     })
 }
 
-/// The crate's grid, verbatim shape.
-fn html_grid(grid: &html_to_markdown_rs::TableGrid) -> HtmlGrid {
+/// The crate's grid, verbatim shape, under the shared entry budget:
+/// each materialized cell spends 1, the walk stops at zero remaining
+/// (a stopped table keeps rows/cols, its kept cells (row, col)-ordered),
+/// `truncated` flips once cells were dropped.
+fn html_grid(
+    grid: &html_to_markdown_rs::TableGrid,
+    budget: &mut usize,
+    truncated: &mut bool,
+) -> HtmlGrid {
+    let mut cells = Vec::new();
+    for cell in &grid.cells {
+        if *budget == 0 {
+            *truncated = true;
+            break;
+        }
+        *budget -= 1;
+        cells.push(HtmlGridCell {
+            content: cell.content.clone(),
+            row: cell.row,
+            col: cell.col,
+            row_span: cell.row_span,
+            col_span: cell.col_span,
+            is_header: cell.is_header,
+        });
+    }
     HtmlGrid {
         rows: grid.rows,
         cols: grid.cols,
-        cells: grid
-            .cells
-            .iter()
-            .map(|cell| HtmlGridCell {
-                content: cell.content.clone(),
-                row: cell.row,
-                col: cell.col,
-                row_span: cell.row_span,
-                col_span: cell.col_span,
-                is_header: cell.is_header,
-            })
-            .collect(),
+        cells,
     }
 }
 
 /// The DOCX structure builder: the raw layer's body walked once — the
 /// heading ladder re-derived (F1's two-rung markdown lane + the
 /// converter's convention rung), list membership on the EFFECTIVE
-/// properties, the block-text walk, and the table grids.
+/// properties, the block-text walk, and the table grids. `budget` is the
+/// shared entry budget ([`MAX_STRUCTURE_ENTRIES`]): blocks AND the table
+/// cells inside a table block both spend it (a cell is an entry object),
+/// the walk stops building at zero remaining, and `truncated` flips once
+/// anything was dropped.
 fn structure_docx(raw: &office_oxide::docx::DocxDocument) -> DocxStructure {
     let styles = raw.styles.as_ref();
     let mut blocks = Vec::with_capacity(raw.body.elements.len());
+    let mut budget = MAX_STRUCTURE_ENTRIES;
+    let mut truncated = false;
     for (index, element) in raw.body.elements.iter().enumerate() {
+        // Stop building at zero remaining: the kept prefix is in document
+        // order, the marker set.
+        if budget == 0 {
+            truncated = true;
+            break;
+        }
+        budget -= 1;
         let section = raw
             .body
             .section_breaks
@@ -3804,16 +3868,20 @@ fn structure_docx(raw: &office_oxide::docx::DocxDocument) -> DocxStructure {
                 ilvl: None,
                 list_format: None,
                 start_number: None,
-                table: Some(docx_prose::table_structure(table, styles)),
+                // The cells spend the SAME budget (a cell is an entry
+                // object): a table cut mid-cells keeps its grid metadata
+                // and its kept cells row-major.
+                table: Some(docx_prose::table_structure_budgeted(
+                    table,
+                    styles,
+                    &mut budget,
+                    &mut truncated,
+                )),
                 links: Vec::new(),
                 images: Vec::new(),
             },
         };
         blocks.push(block);
-    }
-    let entries_truncated = blocks.len() > MAX_STRUCTURE_ENTRIES;
-    if entries_truncated {
-        blocks.truncate(MAX_STRUCTURE_ENTRIES);
     }
     DocxStructure {
         blocks,
@@ -3825,7 +3893,7 @@ fn structure_docx(raw: &office_oxide::docx::DocxDocument) -> DocxStructure {
         endnotes: raw.endnotes.len(),
         comments: raw.comments.len(),
         unreadable_parts: raw.unreadable_parts.clone(),
-        entries_truncated,
+        entries_truncated: truncated,
     }
 }
 
@@ -4327,8 +4395,17 @@ mod docx_prose {
 
     /// One table's grid: rows/columns from the raw layer's own numbers,
     /// cells in row-major order with gridSpan-accumulated columns and
-    /// vMerge-walked row spans.
-    pub fn table_structure(table: &Table, styles: Option<&StyleSheet>) -> super::DocxTable {
+    /// vMerge-walked row spans. `budget` is the structure payload's
+    /// shared entry budget — each materialized cell spends 1 (a cell is
+    /// an entry object), the walk stops at zero remaining, and `truncated`
+    /// flips once cells were dropped. The grid metadata (rows/cols/
+    /// widths/caption) stays complete; the KEPT cells stay row-major.
+    pub fn table_structure_budgeted(
+        table: &Table,
+        styles: Option<&StyleSheet>,
+        budget: &mut usize,
+        truncated: &mut bool,
+    ) -> super::DocxTable {
         // Each row's cells' starting columns: the gridSpan accumulation
         // (the raw layer's `grid_starts` walk, re-derived with the same
         // clamp).
@@ -4348,8 +4425,13 @@ mod docx_prose {
             })
             .collect();
         let mut cells = Vec::new();
-        for (row_index, row) in table.rows.iter().enumerate() {
+        'outer: for (row_index, row) in table.rows.iter().enumerate() {
             for (cell_index, cell) in row.cells.iter().enumerate() {
+                if *budget == 0 {
+                    *truncated = true;
+                    break 'outer;
+                }
+                *budget -= 1;
                 let col = starts[row_index][cell_index];
                 // A vMerge Restart spans the same-column Continue cells
                 // below it; a Continue cell is emitted as its own cell
