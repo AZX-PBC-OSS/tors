@@ -740,7 +740,10 @@ _CRED_PARAM_NAMES = ("password", "passphrase", "passwd", "pwd", "sslpassword")
 #: ``pw`` inside ``pwd``, detect-secrets' own spelling -- off the
 #: backtracking path).
 _CRED_PARAM_NAMES_EXTENDED = (
+    "refresh_token",
+    "access_token",
     "sslpassword",
+    "oauth_token",
     "passphrase",
     "access_key",
     "sas_token",
@@ -1035,15 +1038,17 @@ def _secret_match_end_at(s: str, i: int) -> int | None:
     """The six grammars at one boundary-clean position, the scanner's own
     order (first hit wins): aws_access_key, slack_token, stripe_key,
     github_token (modern, then legacy), pem_key. The match END, or None."""
-    # aws_access_key: AKIA/ASIA + a maximal [0-9A-Z] run of EXACTLY 16
-    # (a longer run is a longer word, the near-miss the exact width
-    # exists to refuse). The first matching prefix decides: a wrong tail
+    # aws_access_key: AKIA/ASIA + a maximal [0-9A-Z] run of AT LEAST 16,
+    # consumed MAXIMALLY (one long key -- the keys rule's own doctrine;
+    # a shorter run is the near-miss the minimum refuses). POSTURE
+    # CHANGE: the old exact-width refusal leaked a real key glued to one
+    # more tail char. The first matching prefix decides: a wrong tail
     # is a non-match, never a fall-through (the prefixes are mutually
     # exclusive at one position anyway).
     for prefix in _SECRET_AWS_PREFIXES:
         if s.startswith(prefix, i):
             tail = _secret_run_end(s, i + 4, _SECRET_AWS_TAIL)
-            return tail if tail - i == 20 else None
+            return tail if tail - (i + 4) >= 16 else None
     # slack_token: case-insensitive xox[abprso]- (digit-run + -)+ alnum+
     # The dash at +4 opens the arm; a non-xox head there (PEM's own dash
     # head included) falls through to the other grammars. Once the head
@@ -1075,11 +1080,13 @@ def _secret_match_end_at(s: str, i: int) -> int | None:
         if s.startswith(prefix, i):
             tail = _secret_run_end(s, i + len(prefix), _SECRET_B62)
             return tail if tail - (i + len(prefix)) >= 24 else None
-    # github_token, modern: one of the five prefixes + EXACTLY 36 base62.
+    # github_token, modern: one of the five prefixes + a maximal base62
+    # run of AT LEAST 36, consumed maximally (the aws posture: one long
+    # key; a shorter run is the near-miss refusal).
     for prefix in _SECRET_GITHUB_PREFIXES:
         if s.startswith(prefix, i):
             tail = _secret_run_end(s, i + 4, _SECRET_B62)
-            return tail if tail - i == 40 else None
+            return tail if tail - (i + 4) >= 36 else None
     # github_token, legacy: a maximal hex run of EXACTLY 40 whose before
     # AND after chars are not word chars (the word-boundary form the
     # prefixless class needs; the before check is the class's OWN, on top

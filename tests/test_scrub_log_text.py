@@ -67,13 +67,18 @@ from tors import scrub_log_text
 
 # The extended credential-key set's names (the uri_query_creds_extended
 # rule), one spelling for the per-name vectors and the completeness lanes
-# below (src/scrub_impl.rs carries the sources and the judicious cuts).
+# below (src/scrub_impl.rs carries the sources and the judicious cuts;
+# the evidenced `_token` trio — access_token, refresh_token, oauth_token —
+# joined the set in the closed-set widening).
 EXTENDED_RULE_NAMES = (
     "sig",
     "api_key",
     "apikey",
     "key",
     "access_key",
+    "access_token",
+    "refresh_token",
+    "oauth_token",
     "sas_token",
     "token",
     "secret",
@@ -426,6 +431,18 @@ class TestUriQueryCredsExtended:
         assert scrub_log_text("?sig=abc&api_key=x") == "?sig=***&api_key=***"
         assert scrub_log_text("?password=x&token=y") == "?password=***&token=***"
 
+    def test_the_default_chain_masks_access_token_end_to_end(self) -> None:
+        # CWE-598's canonical leak shape, through the FULL chain (no
+        # rule named): the query value lands in access logs, proxy
+        # logs, browser history, and the Referer header, so the
+        # default scrubber owes it the mask.
+        assert scrub_log_text(
+            "GET https://idp.example.com/sso?client_id=abc&access_token=supersecret123 HTTP/1.1"
+        ) == "GET https://idp.example.com/sso?client_id=abc&access_token=*** HTTP/1.1"
+        assert scrub_log_text("?refresh_token=rt99&oauth_token=ot77") == (
+            "?refresh_token=***&oauth_token=***"
+        )
+
     def test_the_base_rule_still_answers_only_the_shared_five(self) -> None:
         # uri_query_creds's own contract does not widen: sig/api_key/
         # sas_token/key are invisible to it (an explicit-rules caller
@@ -443,7 +460,11 @@ class TestUriQueryCredsExtended:
         assert scrub_log_text("??key=v", ["uri_query_creds_extended"]) == "??key=***"
         assert scrub_log_text("?xkey=v", ["uri_query_creds_extended"]) == "?xkey=v"
         assert scrub_log_text("xkey=v", ["uri_query_creds_extended"]) == "xkey=v"
-        assert scrub_log_text("?oauth_token=v", ["uri_query_creds_extended"]) == "?oauth_token=v"
+        # POSTURE CHANGE (the closed-set widening): `oauth_token=` masked
+        # the seam this pin once documented (the evidenced `_token` trio
+        # — `access_token=` the canonical CWE-598 shape — joined the
+        # set; `auth_token=` remains the open-ended tail).
+        assert scrub_log_text("?oauth_token=v", ["uri_query_creds_extended"]) == "?oauth_token=***"
         # The `#`-fragment and host splits are the caller's URL parsing:
         # the grammar sees only the query-string text it is given.
         assert scrub_log_text("https://h/p?sig=abc", ["uri_query_creds_extended"]) == (
@@ -533,7 +554,10 @@ class TestConninfoPassRedteam:
             "secrets",
             "apikey2",
             "authorize",
-            "oauth_token",
+            # `oauth_token` was once the documented near-miss here; the
+            # evidenced `_token` trio joined the extended set (the
+            # closed-set widening) and it masks now.
+            "auth_token",
             "xkey",
             "pwx",
             "pw2",

@@ -7,7 +7,13 @@
 //!
 //! Five grammars, one rule name each:
 //!
-//! * `aws_access_key`: `AKIA`/`ASIA` + exactly 16 chars of `[0-9A-Z]`.
+//! * `aws_access_key`: `AKIA`/`ASIA` + at least 16 chars of `[0-9A-Z]`,
+//!   the tail consumed MAXIMALLY (a key glued to further tail-class
+//!   material is one long key — the keys rule's own doctrine, and what
+//!   keeps the pass strictly idempotent: a width-cut residue glued
+//!   behind the token's own 12-hex digest composes the prefixless
+//!   legacy class's 40-hex shape, a fuzz-proven break); a shorter run
+//!   is a near-miss non-match.
 //!   The two prefixes are the access-key-ID heads AWS's own docs spell
 //!   (the `AKIA` + `IOSFODNN7EXAMPLE` example, IAM's "Manage access
 //!   keys" page); the tail
@@ -15,10 +21,13 @@
 //!   both `I` and `O`, so there is no I/O exclusion to implement (the
 //!   base32-ish folklore is not in Amazon's docs and is not pinned
 //!   here). detect-secrets' AWS detector
-//!   (`(?:A3T[A-Z0-9]|ABIA|ACCA|AKIA|ASIA)[0-9A-Z]{16}`) and trufflehog's
-//!   (`\b(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}\b`) bracket the class; tors pins
-//!   the two live/temporary credential prefixes and the exact 16-char
-//!   width. AWS documents no checksum for access key IDs, so none is
+//!   (`(?:A3T[A-Z0-9]|ABIA|ACCA|AKIA|ASIA)[0-9A-Z]{16}`) has no
+//!   trailing boundary and tors's maximal tail redacts a SUPERSET of
+//!   its span; trufflehog's
+//!   (`\b(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}\b`) brackets the
+//!   exact-width spellings the same way. tors pins
+//!   the two live/temporary credential prefixes and the 16-char
+//!   minimum. AWS documents no checksum for access key IDs, so none is
 //!   validated and none is claimed.
 //! * `slack_token`: case-insensitive `xox[abprso]-` + one or more
 //!   digit-run/dash sections + a final alphanumeric run. Slack's docs
@@ -48,8 +57,10 @@
 //!   secrets by Stripe's own table and scrub anyway (over-redaction,
 //!   safe direction). Stripe's organization key prefix `sk_org_` (no
 //!   live/test half in Stripe's docs) stays a documented exclusion.
-//! * `github_token`: `(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}`, exactly
-//!   36, plus the pre-2021 legacy class: a maximal hex run of exactly 40
+//! * `github_token`: `(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}` — at
+//!   least 36, the tail consumed maximally (the aws posture) — plus the
+//!   pre-2021 legacy
+//!   class: a maximal hex run of exactly 40
 //!   chars at a word boundary. GitHub's token-format post pins the five
 //!   prefixes, the `_` separator, the base62 random portion, and the
 //!   old formats it replaced ("hex-encoded 40 character strings that
@@ -233,14 +244,15 @@ pub struct SecretRules(u8);
 impl SecretRules {
     /// The empty selection: `rules=[]`, the identity.
     pub const EMPTY: Self = Self(0);
-    /// `AKIA`/`ASIA` + exactly 16 uppercase-alphanumeric chars.
+    /// `AKIA`/`ASIA` + at least 16 uppercase-alphanumeric chars, the
+    /// tail consumed maximally.
     pub const AWS_ACCESS_KEY: Self = Self(1);
     /// Case-insensitive `xox[abprso]-` + digit sections + alnum tail.
     pub const SLACK_TOKEN: Self = Self(2);
     /// The six `(?:sk|rk|pk)_(?:live|test)_` prefixes + 24+ alnum.
     pub const STRIPE_KEY: Self = Self(4);
-    /// The five modern `gh?_` prefixes + exactly 36 base62, and the
-    /// legacy exactly-40 hex class.
+    /// The five modern `gh?_` prefixes + at least 36 base62 (maximal
+    /// tail), and the legacy exactly-40 hex class.
     pub const GITHUB_TOKEN: Self = Self(8);
     /// The PEM private-key block span.
     pub const PEM_KEY: Self = Self(16);
@@ -328,12 +340,15 @@ fn is_legacy_glue_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// The AWS grammar at `pos`: `AKIA`/`ASIA` + exactly 16 chars of
-/// `[0-9A-Z]`. The tail run is walked to its end once; the candidate
-/// holds only when the run is EXACTLY 16 (a longer run is a longer
-/// word, the near-miss the exact width exists to refuse; a shorter one
-/// is not the shape). The walk cost is one run per run start: the
-/// caller's boundary gate puts every anchor at a run start.
+/// The AWS grammar at `pos`: `AKIA`/`ASIA` + at least 16 chars of
+/// `[0-9A-Z]`, the tail consumed MAXIMALLY (a key glued to further
+/// tail-class material is one long key — the keys rule's own doctrine,
+/// and what keeps the pass strictly idempotent: a width-cut residue
+/// glued behind the token's own 12-hex digest composes the prefixless
+/// legacy class's 40-hex shape, a fuzz-proven break). A shorter run is
+/// not the shape (the near-miss refusal). The walk cost is one run per
+/// run start: the caller's boundary gate puts every anchor at a run
+/// start.
 fn aws_match_at(bytes: &[u8], pos: usize) -> Option<usize> {
     const PREFIXES: [&[u8]; 2] = [b"AKIA", b"ASIA"];
     for prefix in PREFIXES {
@@ -345,7 +360,7 @@ fn aws_match_at(bytes: &[u8], pos: usize) -> Option<usize> {
         while end < bytes.len() && is_aws_tail_byte(bytes[end]) {
             end += 1;
         }
-        return (end - tail_start == 16).then_some(end);
+        return (end - tail_start >= 16).then_some(end);
     }
     None
 }
@@ -452,11 +467,12 @@ fn stripe_match_at(bytes: &[u8], pos: usize) -> Option<(usize, SecretKind)> {
 }
 
 /// The modern GitHub grammar at `pos`: one of the five documented
-/// `gh?_` prefixes + exactly 36 chars of base62 (the token-format
+/// `gh?_` prefixes + at least 36 chars of base62 (the token-format
 /// post's own length pin: 30 random base62 chars plus the 6-char
 /// checksum tail, whose exact CRC32/base62 construction GitHub does not
-/// publish, so no checksum is validated here). The tail run is walked
-/// once; exactly 36 holds, longer and shorter are near-miss non-matches.
+/// publish, so no checksum is validated here), the tail consumed
+/// MAXIMALLY (the aws grammar's doctrine — one long key, idempotent);
+/// a shorter run is a near-miss non-match.
 fn github_modern_match_at(bytes: &[u8], pos: usize) -> Option<usize> {
     const PREFIXES: [&[u8]; 5] = [b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_"];
     for prefix in PREFIXES {
@@ -468,7 +484,7 @@ fn github_modern_match_at(bytes: &[u8], pos: usize) -> Option<usize> {
         while end < bytes.len() && is_b62_byte(bytes[end]) {
             end += 1;
         }
-        return (end - tail_start == 36).then_some(end);
+        return (end - tail_start >= 36).then_some(end);
     }
     None
 }
@@ -478,6 +494,11 @@ fn github_modern_match_at(bytes: &[u8], pos: usize) -> Option<usize> {
 /// (`[A-Za-z0-9_]`; the prefixless class extends by any word char, the
 /// word-boundary form). The caller's shared gate already refused a
 /// dash/underscore-glued head; the after check here is the class's own.
+/// The exact-width refusal is deliberate and UNCHANGED by the glued
+/// posture: the class has no fixed prefix to anchor a minimum on, and
+/// a 41-plus hex run is a longer word (a SHA-256, an identifier) — the
+/// near-miss guard the prefixed grammars get from their own maximal
+/// tail.
 fn github_legacy_match_at(bytes: &[u8], pos: usize) -> Option<usize> {
     let mut end = pos;
     while end < bytes.len() && is_hex_byte(bytes[end]) {
@@ -694,6 +715,48 @@ mod tests {
     }
 
     #[test]
+    fn glued_width_cuts_redact_the_pinned_width() {
+        // POSTURE CHANGE (the glued-credential fix): a maximal run
+        // matching a prefixed grammar's prefix structure at more than
+        // the pinned width refused WHOLE — and the refusal leaked the
+        // credential. The tail is now consumed MAXIMALLY (the keys
+        // rule's own doctrine: one long key, over-redaction in the
+        // safe direction — and what keeps the pass strictly
+        // idempotent, a width-cut residue glued behind the token's own
+        // digest composing the legacy class's 40-hex shape was
+        // fuzz-proven); a SHORTER run still refuses.
+        let glued_aws = concat!("AKIA", "IOSFODNN7EXAMPLE", "X");
+        assert_eq!(
+            scrub(glued_aws, SecretRules::AWS_ACCESS_KEY),
+            format!("AKIA~{}", digest(glued_aws))
+        );
+        let glued_gh = concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "x");
+        assert_eq!(
+            scrub(glued_gh, SecretRules::GITHUB_TOKEN),
+            format!("ghp_~{}", digest(glued_gh))
+        );
+        for near_miss in [
+            concat!("AKIA", "IOSFODNN7EXAMPL"), // 15 tail chars
+            concat!("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh"), // 35
+        ] {
+            assert_eq!(scrub(near_miss, SecretRules::ALL), near_miss);
+        }
+    }
+
+    #[test]
+    fn the_width_cut_residue_never_composes_the_legacy_class() {
+        // The fuzz-found shape this posture closes: a width-cut residue
+        // of all-hex tail chars glued behind the token's own 12-hex
+        // digest spelled the prefixless legacy class's exactly-40 hex
+        // run on the SECOND pass — the pass was not a fixed point. The
+        // maximal tail consumes the residue into the span; the second
+        // pass is the identity.
+        let s = "k-\\E-\\U45EEXG ghp_ABCdeAMU45EEXG ghp_ABCdeAMaaaaaaaaaaaaaaaaaaaaaaaaa267aaaaaaaaaaaaaaaaaaaaaaaaa2671\u{65c}Xll";
+        let once = scrub(s, SecretRules(31));
+        assert_eq!(scrub(&once, SecretRules(31)), once);
+    }
+
+    #[test]
     fn clean_input_is_identity() {
         let text = "plain prose, café, emoji \u{1f600}, numbers 4096 and 1200, \
                     refs deadbeef and 0123456789abcdef";
@@ -734,14 +797,18 @@ mod tests {
     #[test]
     fn aws_near_misses_are_anchored() {
         let key = format!("AKIA{}", aws_tail());
-        // The tail's run extended: a longer [0-9A-Z] word, never a match.
+        // POSTURE CHANGE (the glued-credential fix): a tail extension of
+        // the tail class no longer refuses the whole candidate — the old
+        // exact-width refusal leaked a real key glued to one more class
+        // char. The tail consumes the extension maximally (one long
+        // key, the keys rule's own doctrine).
         assert_eq!(
             scrub(&format!("{key}X"), SecretRules::AWS_ACCESS_KEY),
-            format!("{key}X")
+            format!("AKIA~{}", digest(&format!("{key}X")))
         );
         assert_eq!(
             scrub(&format!("{key}9"), SecretRules::AWS_ACCESS_KEY),
-            format!("{key}9")
+            format!("AKIA~{}", digest(&format!("{key}9")))
         );
         // Glued to a preceding word char: mid-token, never a match.
         assert_eq!(
@@ -935,10 +1002,13 @@ mod tests {
         let body36 = "aB3xY9kL2mN5pQ7rS4tU8vW1xY6zA0bC3dEF";
         assert_eq!(body36.len(), 36);
         let token = format!("ghp_{body36}");
-        // A longer base62 run is a longer word: never a match.
+        // POSTURE CHANGE (the glued-credential fix), the aws grammar's
+        // own: a longer base62 run consumes the extension maximally
+        // (one long key) instead of refusing whole and leaking the
+        // token.
         assert_eq!(
             scrub(&format!("{token}x"), SecretRules::GITHUB_TOKEN),
-            format!("{token}x")
+            format!("ghp_~{}", digest(&format!("{token}x")))
         );
         assert_eq!(
             scrub(&format!("{token}_suffix"), SecretRules::GITHUB_TOKEN),
