@@ -2671,7 +2671,12 @@ are correct with no rewriting); bare words and Python literals repair
 casing, the strict special floats `NaN`/`Infinity`/`-Infinity` kept at
 their exact spellings); numbers follow the engine's run-and-rollback
 lanes (`1e+` heals to `"1e"`, `1,000` to `"1,000"`, `12abc` to
-`"12abc"`); comments skip (top-level ones exactly like the engine);
+`"12abc"`); an object-lane number run that absorbed a comma and rewound
+at an alphabetic char splits at the `:` proving the post-comma text a
+key — the value renders up to the comma, the post-comma text re-enters
+the key lane (`{"a": 1,7Z: 8}` to `{"a": "1", "7Z": 8}`, the engine's
+own classify_object_value_comma split); comments skip (top-level ones
+exactly like the engine);
 tuples and groupings split the engine's own way (`(1)` to `1`, `(1,)` to
 `[1]`, `{"a": (1, 2)}` to `{"a": [1, 2]}`); a closer matching a frame
 below the innermost one closes the levels between (`{"a": [1, 2}` to
@@ -2798,9 +2803,18 @@ strips the newline and `[NaN, 1` quotes the float — the stream keeps the
 strict spelling mid-document and matches only the tail-of-stream cases:
 the string last before the cut, the word still in flight); the paren-with-
 colon conversion (the engine turns a colon inside the parenthesized
-container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`);
-the mismatched-closer garbage where the engine's whole-text close-up
-re-decides earlier structure (both outputs valid); the word-swallow (a
+container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`); the
+mismatched-closer garbage where the engine's whole-text close-up
+re-decides earlier structure (both outputs valid); the comma-glue split's
+optimistic residual (the object-lane comma-glue rewind SPLITS at the `:`
+proving the post-comma text a key — `{"a": 1,7Z: 8}` to
+`{"a": "1", "7Z": 8}`, the engine's own classify split — but the engine's
+recoverable-value check needs the post-colon value's own tail to the
+object's `}`, which a linear machine has not seen: a bare-word value whose
+tail holds a quote before the close, or a cut before the close, keeps the
+comma on the engine's side where the stream split — `{"a": 1,b: x"y}` to
+the engine's `{"a": "1,b: x"}`, the stream `{"a": "1", "b": "x\"y"}`); the
+word-swallow (a
 bare word born at an array position runs past a mismatched closer in the
 engine's reparse: `[1e}` to `[1, "e}"]`, the stream `[1, "e"]`); the
 unquoted-value run's absorption (the engine's unquoted-value lane eats
