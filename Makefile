@@ -126,17 +126,20 @@ bench:
 fmt:
 	cargo fmt
 
-# The licensing gate (the ci.yml lint job's two Cargo deny steps): the
+# The licensing gate (the ci.yml lint job's three Cargo deny steps): the
 # permissive-only license allowlist, the advisory policy, and the ban
-# policy live in deny.toml. BOTH lockfiles are gated: tors-documents
+# policy live in deny.toml. ALL THREE lockfiles are gated: tors-documents
 # resolves its own independent Cargo.lock (not a workspace member; its
 # Cargo.toml's header) whose package set is not a subset of the root
 # lock's (deny.toml's [graph] comment), so the payload manifest gets its
-# own pass. Requires cargo-deny on PATH
+# own pass; fuzz/ likewise resolves its own fuzz/Cargo.lock (the
+# libFuzzer tree's advisories), which neither of the other passes reads.
+# Requires cargo-deny on PATH
 # (`cargo install cargo-deny --locked`, ~1min).
 deny:
 	cargo deny check licenses advisories bans
 	cargo deny --manifest-path tors-documents/Cargo.toml check licenses advisories bans
+	cargo deny --manifest-path fuzz/Cargo.toml check licenses advisories bans
 
 # Regenerate src/html_table.rs from the RUNNING interpreter's html module
 # (tools/gen_html_table.py; the provenance line lives in the generated header).

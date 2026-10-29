@@ -2,7 +2,7 @@
 
 The license gate is `cargo deny check licenses advisories bans` (`make deny`;
 the same three checks run in CI's lint job). The allowlist in `deny.toml` is
-permissive-only: MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, plus four
+permissive-only: MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, plus five
 documented additions, all permissive grants inside the gate's intent:
 
 - `Apache-2.0 WITH LLVM-exception` (target-lexicon, a pyo3 build dependency:
@@ -17,6 +17,11 @@ documented additions, all permissive grants inside the gate's intent:
   jsonschema crate's `referencing` $ref machinery, the json_repair port's
   validation engine: MIT No Attribution is plain MIT with the attribution
   obligation removed, the same family as 0BSD; recorded in `deny.toml`)
+- `NCSA` (libfuzzer-sys, `(MIT OR Apache-2.0) AND NCSA`: the AND conjunct is
+  LLVM's embedded libFuzzer C++ sources under the University of
+  Illinois/NCSA Open Source License — LLVM's own license, a BSD-style
+  permissive grant; caught the first time the fuzz crate's own lock was
+  deny-gated)
 
 No GPL/LGPL/AGPL/MPL, no unlicensed. Dual/tri-licensed crates are consumed via
 an allowed branch: notably r-efi (a getrandom dependency, dev tree only)
@@ -197,6 +202,16 @@ resolves its own independent `tors-documents/Cargo.lock` whose package set
 carries crates and versions the root lock never resolves (measured:
 payload-only names, plus version-skewed pairs), so both lockfiles are gated
 (`deny.toml`'s `[graph]` comment records the same).
+
+The fuzz crate resolves a THIRD independent lock (`fuzz/Cargo.lock`,
+fuzz/Cargo.toml's header), gated by its own pass — `cargo deny
+--manifest-path fuzz/Cargo.toml check licenses advisories bans` — in the
+same lint job and in `make deny`: the libFuzzer tree's advisories gate like
+every other lock's (that lock is never version-synced by
+release-lock-sync.yml, which is exactly why it needs its own advisory
+pass). First pass over that lock caught two real entries: the `NCSA`
+allowlist addition above, and the fuzz crate itself declaring no `license`
+field (now `MIT`, the repo's own).
 
 Two documents-tree entries the engine tree forced into `deny.toml`:
 `CC0-1.0` is allowlisted (`tiny-keccak` 2.0.2, public-domain-equivalent,
