@@ -9,7 +9,19 @@
 # packages self-heal on the next `cargo build`, and release-lock-sync.yml refreshes
 # them on the release PR itself — publish.yml's wheel builds pass `--locked`, so the
 # tag's locks must already be fresh (that sync is what makes them so).
-
+#
+# Release-cut policy (recorded here because release-please-config.json is JSON and
+# cannot carry a comment): the config's `changelog-sections` mirrors the python
+# release type's built-in sections with ONE delta — `chore` is un-hidden. Under the
+# built-in sections a chore-only stream (the chore(deps)/chore(deps-rust)/
+# chore(deps-py) dependency revs) renders an empty changelog, and an empty changelog
+# means NO release PR at all, so a deps rev would sit unreleased until the next
+# feat/fix happened to land. With the section visible, those revs cut patch releases
+# of their own. `perf` needs no override: it is already a visible "Performance
+# Improvements" section in the python type's defaults and bumps the patch version
+# (the lsh perf commit shipped in 0.16.0's changelog). style/refactor/test/build/ci
+# stay hidden on purpose — internal-hygiene commits do not ship.
+#
 # GitHub does not start workflow runs from events raised with the default GITHUB_TOKEN, so
 # a tag released this way will not auto-trigger publish.yml's `push: tags` step; see that
 # workflow's header. The App path below is optional; without it, run publish.yml manually
