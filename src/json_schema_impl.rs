@@ -39,6 +39,19 @@
 //!   gate in `schema_bigint_refusal`, since the lossy compile of a
 //!   constraint silently accepts neighboring values); `format` is never
 //!   asserted (upstream passes no `format_checker` either: parity).
+//! - **Top-level scalars and the sentinel operand**: the repair parser's
+//!   grammar skips top-level digits outside containers (and unwinds a
+//!   scalar whose inline repair failed), so when the fast path's value
+//!   already failed the root schema and the in-place repair cannot win,
+//!   the fall-through parse yields the `Str("")` "nothing recoverable"
+//!   sentinel. The final validate's refusal then names the REAL value
+//!   (mod.rs re-validates the strict fast path's scalar for the message:
+//!   the enum/const/pattern miss, or `1e400`'s not-JSON-compatible
+//!   overflow refusal — a >f64-max document refuses in schema mode with
+//!   that message, where the schema-less spelling repairs to `inf`);
+//!   without a strict fast-path value (prose, `skip_json_loads`) the
+//!   sentinel's own message stands, and `skip_json_loads` keeps the
+//!   repair parser's verdict even for a scalar the schema would accept.
 //! - **tors-native repairs** (all recorded as diagnostics, all opt-out by
 //!   simply not using schema mode): the key-normalization ladder
 //!   (case/`snake`/`kebab`/`spaces` folding to an exact property) ahead of
@@ -46,8 +59,10 @@
 //!   array recovery that wins only when it validates and upstream's wrap
 //!   does not; digit-group-separator tolerance in numeric coercion; enum
 //!   "did you mean" suggestions; RFC 3339 date normalization behind
-//!   `format: date`/`date-time`; enriched validation errors (message plus
-//!   instance path).
+//!   `format: date`/`date-time` (validity-gated: a rewrite the node's own
+//!   `enum`/`const`/`pattern` refuses is skipped — a schema-valid raw
+//!   spelling survives, normalize_keys' own rename invariant); enriched
+//!   validation errors (message plus instance path).
 //! - **Pydantic** models are accepted by the py layer (it calls
 //!   `model_json_schema()`), not by this module: by the time a schema
 //!   arrives here it is a plain JSON `Value`.
@@ -827,6 +842,24 @@ impl SchemaRepairer {
                 if let Some(date_format) = date_format_of(format) {
                     match normalize_date(text, date_format) {
                         DateOutcome::Normalized(normalized) if normalized != *text => {
+                            // The validity gate (normalize_keys' rename
+                            // shape): this pass runs on input that may
+                            // already validate, so a rewrite the resolved
+                            // node refuses must not fire -- the raw
+                            // spelling an `enum`/`const` member pins, or
+                            // one a `pattern` asserts, would FAIL what
+                            // the raw spelling passed ("March 5, 2024"
+                            // under enum ["March 5, 2024"]; "13/05/2024"
+                            // under ^[0-9]{2}/[0-9]{2}/[0-9]{4}$). The
+                            // probe is the node's own constraints on the
+                            // PROPOSED spelling (validation never asserts
+                            // the format keyword itself), so a
+                            // canonicalizing rewrite that LANDS in an
+                            // enum still fires (enum ["2024-03-05"]
+                            // accepts the normalized spelling it names).
+                            if !self.is_valid(&Value::Str(normalized.clone()), resolved) {
+                                return;
+                            }
                             self.record(
                                 "format_date",
                                 path,
@@ -2465,6 +2498,24 @@ impl SchemaRepairer {
                                         DateOutcome::Normalized(normalized)
                                             if normalized != *text =>
                                         {
+                                            // The validity gate (the
+                                            // prenormalize_dates arm's
+                                            // shape): a rewrite the node's
+                                            // own constraints refuse (the
+                                            // raw spelling an enum/const
+                                            // member pins, or one a
+                                            // pattern asserts) must not
+                                            // replace a spelling that
+                                            // validated. The probe reads
+                                            // the node's constraints on the
+                                            // PROPOSED spelling, so a
+                                            // rewrite that LANDS in an enum
+                                            // still fires.
+                                            if !self
+                                                .is_valid(&Value::Str(normalized.clone()), schema)
+                                            {
+                                                return Ok(value);
+                                            }
                                             self.record(
                                                 "format_date",
                                                 path,

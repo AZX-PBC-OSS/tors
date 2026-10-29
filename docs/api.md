@@ -1496,8 +1496,10 @@ uncatchable allocator abort). The ceiling applies before the identity contract's
 borrowed return, so a replace whose output would exceed it raises even when the
 net effect would be the identity — a >32 MiB "identity" replace is the
 amplification shape wearing a disguise. The masked spelling below is
-length-preserving and has no ceiling (a short key cannot amplify into a long
-output there).
+character-count-preserving and has no ceiling (its byte size is bounded, not
+preserved — at most 4 × the input's character count, one 4-byte character
+per character at worst — so a short key cannot amplify a bounded input into
+an unbounded output there).
 
 ```python
 tors.replace_many("the cat sat in the catalogue", {"cat": "dog", "catalogue": "library"})
@@ -2671,7 +2673,12 @@ are correct with no rewriting); bare words and Python literals repair
 casing, the strict special floats `NaN`/`Infinity`/`-Infinity` kept at
 their exact spellings); numbers follow the engine's run-and-rollback
 lanes (`1e+` heals to `"1e"`, `1,000` to `"1,000"`, `12abc` to
-`"12abc"`); comments skip (top-level ones exactly like the engine);
+`"12abc"`); an object-lane number run that absorbed a comma and rewound
+at an alphabetic char splits at the `:` proving the post-comma text a
+key — the value renders up to the comma, the post-comma text re-enters
+the key lane (`{"a": 1,7Z: 8}` to `{"a": "1", "7Z": 8}`, the engine's
+own classify_object_value_comma split); comments skip (top-level ones
+exactly like the engine);
 tuples and groupings split the engine's own way (`(1)` to `1`, `(1,)` to
 `[1]`, `{"a": (1, 2)}` to `{"a": [1, 2]}`); a closer matching a frame
 below the innermost one closes the levels between (`{"a": [1, 2}` to
@@ -2798,9 +2805,18 @@ strips the newline and `[NaN, 1` quotes the float — the stream keeps the
 strict spelling mid-document and matches only the tail-of-stream cases:
 the string last before the cut, the word still in flight); the paren-with-
 colon conversion (the engine turns a colon inside the parenthesized
-container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`);
-the mismatched-closer garbage where the engine's whole-text close-up
-re-decides earlier structure (both outputs valid); the word-swallow (a
+container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`); the
+mismatched-closer garbage where the engine's whole-text close-up
+re-decides earlier structure (both outputs valid); the comma-glue split's
+optimistic residual (the object-lane comma-glue rewind SPLITS at the `:`
+proving the post-comma text a key — `{"a": 1,7Z: 8}` to
+`{"a": "1", "7Z": 8}`, the engine's own classify split — but the engine's
+recoverable-value check needs the post-colon value's own tail to the
+object's `}`, which a linear machine has not seen: a bare-word value whose
+tail holds a quote before the close, or a cut before the close, keeps the
+comma on the engine's side where the stream split — `{"a": 1,b: x"y}` to
+the engine's `{"a": "1,b: x"}`, the stream `{"a": "1", "b": "x\"y"}`); the
+word-swallow (a
 bare word born at an array position runs past a mismatched closer in the
 engine's reparse: `[1e}` to `[1, "e}"]`, the stream `[1, "e"]`); the
 unquoted-value run's absorption (the engine's unquoted-value lane eats
@@ -6715,8 +6731,10 @@ value). Wrong TYPES raise `TypeError`
 or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
 extraction failure), a non-sequence `weights` (a bare `str` included), a
 non-numeric `weights` entry, an unhashable id, whose error is
-Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
-extracts as its `0`/`1` value, the int-extraction convention). For
+Python's own; a `bool` where an int belongs (`k=True`) extracts as its
+`0`/`1` value, the int-extraction convention, while a `bool` in `gains`
+or `weights` is a `TypeError` (a non-numeric value including `bool` is
+refused: `True`/`False` are not gains or weights). For
 nDCG, legal finite gains can be so large the DCG and
 IDCG sums overflow to `+inf`; the score then saturates instead of
 dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite
