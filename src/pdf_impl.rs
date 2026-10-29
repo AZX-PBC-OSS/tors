@@ -2229,13 +2229,23 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
 /// engine's env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` knob (flate/unpack/
 /// Indexed) merely moves the refusal into the engine's own error — the
 /// docstring says so.
+///
+/// The cap binds on ACTUAL bytes: the chain-aware estimate is the
+/// advisory pre-labour check, and the same cap re-runs on the decode's
+/// real output immediately after the decode, before the bytes enter the
+/// payload (the under-estimate class: a Flate→DCT chain's container is
+/// the INFLATED stream, not the stored bytes — [`decode_estimate`]).
 pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The per-call cumulative decode ceiling (R7): 512 MiB, the family's
 /// `OXIDE_MAX_TOTAL_DECOMPRESSED` / `MAX_INPUT_READ` number. The budget
-/// checks each image's ESTIMATE before its decode and accumulates the
-/// ACTUALS after; the refusal is the typed SizeCap, never a truncation
-/// (a truncated image is a wrong image with no marker).
+/// is checked at decode time — each image's ESTIMATE before its decode,
+/// each ACTUAL after it — and the refusal is the typed SizeCap, never a
+/// truncation (a truncated image is a wrong image with no marker). The
+/// honest bound of what that buys: an under-estimated chain (an
+/// inflation the estimate did not see) can push the call past budget by
+/// at most one image's inflation — that image is refused (scope `Call`,
+/// the actual counted), entries already served stand.
 pub const MAX_CALL_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The container byte's format (R5): a `Container` arm names what a
@@ -2271,8 +2281,8 @@ pub enum CapScope {
 /// The typed decode failure (`ImageBytes::Error`'s payload): the engine's
 /// decode() failure (`Decode`), a filter this build cannot decode
 /// (`Unsupported` — retrying cannot fix it; R2), or this seam's own
-/// ceiling refusing BEFORE the labour (`SizeCap` — with the numbers a
-/// bare limit cannot be acted on; R7).
+/// ceiling refusing (`SizeCap` — with the numbers a bare limit cannot be
+/// acted on; R7).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ImageDataError {
     /// The engine's decode() failed. The payload is the error's Display —
@@ -2283,19 +2293,26 @@ pub enum ImageDataError {
     /// feature-naming string verbatim, or the composed refusal F1 rules
     /// for an encrypted image whose container cannot be served.
     Unsupported(String),
-    /// The seam's ceiling refused before decoding. `limit_bytes` is the
-    /// ceiling that fired (`Image`: the per-image cap — the default
+    /// The seam's ceiling refused. `limit_bytes` is the ceiling that
+    /// fired (`Image`: the per-image cap — the default
     /// [`DEFAULT_MAX_IMAGE_BYTES`] or the `max_image_bytes=` override;
-    /// `Call`: [`MAX_CALL_IMAGE_BYTES`]); `needed_bytes` is the estimate
-    /// that exceeds it (`Image`), or the call's cumulative total had the
-    /// image been served (`Call`).
+    /// `Call`: [`MAX_CALL_IMAGE_BYTES`]); `needed_bytes` is the byte
+    /// count that exceeded it. The caps bind on ACTUAL bytes, checked
+    /// twice: `needed_bytes` is this image's chain-aware ESTIMATE when
+    /// the pre-labour check fired, or the decode's ACTUAL output size
+    /// when the post-decode check fired (an under-estimated chain — a
+    /// Flate→DCT container's inflated stream — is caught there). For
+    /// `Call`, the cumulative total (`spent` + this image's estimate or
+    /// actual). A saturated estimate arithmetic reports `u64::MAX` (the
+    /// true product does not fit u64; no cap admits it).
     SizeCap {
         /// Which ceiling fired.
         scope: CapScope,
         /// The ceiling, in bytes.
         limit_bytes: u64,
-        /// The bytes the work needed (`Image`: this image's estimate;
-        /// `Call`: the spent total plus this image's estimate).
+        /// The bytes the work needed (`Image`: this image's estimate or
+        /// actual; `Call`: the spent total plus this image's estimate or
+        /// actual).
         needed_bytes: u64,
     },
 }
@@ -2588,8 +2605,20 @@ fn sniff_jpx_container(bytes: &[u8]) -> Option<ContainerFormat> {
 ///   16-bit image → 4 bytes, bpc 8).
 /// - **Sub-byte** unpacks to one byte per component.
 ///
-/// The estimate feeds the caps BEFORE the labour (R7); the cumulative
-/// budget accumulates ACTUALS after each decode.
+/// The estimate is ADVISORY (R7, restated): a dictionary number is not a
+/// byte count, and one chain class under-estimates by construction — a
+/// Flate→DCT chain (`/Filter [/FlateDecode /DCTDecode]`) is applied
+/// innermost-first, so the container the DCT arm returns is the INFLATED
+/// stream (measured: 3,898 stored bytes → 4,000,000 container bytes)
+/// while `byte_size_compressed` reads the STORED size. The estimate
+/// still feeds the pre-labour check (cheap refusals stay cheap); the
+/// GUARANTEE is the actual-bytes check immediately after the decode
+/// ([`image_bytes_for`]) — the caps bind on ACTUAL bytes. Every product
+/// here is saturating: a dictionary that overflows u64
+/// (2^31 × 2^31 × 4 components) saturates the estimate at `u64::MAX`,
+/// which no cap can admit — the arithmetic never wraps the cap away
+/// (the pre-fix `u64` multiply wrapped 2^31² CMYK to ≈0 and served the
+/// decode unchecked).
 fn decode_estimate(handle: &PdfImageHandle<'_>) -> u64 {
     let filters: Vec<String> = handle.filter_chain.iter().map(filter_name).collect();
     // DCT anywhere: the decode returns the container, never pixels.
@@ -2600,7 +2629,7 @@ fn decode_estimate(handle: &PdfImageHandle<'_>) -> u64 {
     if filters.len() == 1 && filters[0] == "JPXDecode" {
         return handle.byte_size_compressed;
     }
-    let dims = u64::from(handle.width.max(1)) * u64::from(handle.height.max(1));
+    let dims = u64::from(handle.width.max(1)).saturating_mul(u64::from(handle.height.max(1)));
     let is_ccitt = filters.iter().any(|name| name == "CCITTFaxDecode");
     if is_ccitt {
         // Stays packed: 1-bit fax samples, the packed-bit estimate.
@@ -2637,11 +2666,13 @@ fn decode_estimate(handle: &PdfImageHandle<'_>) -> u64 {
     let representable = components == stride && !matches!(handle.color_space, ColorSpace::Lab);
     if !representable {
         // Packed at the dictionary depth.
-        return dims * components * u64::from(handle.bits_per_component.div_ceil(8));
+        return dims
+            .saturating_mul(components)
+            .saturating_mul(u64::from(handle.bits_per_component.div_ceil(8)));
     }
     // Unpacked/reduced to one byte per component (8 bpc unchanged, 16→8
     // reduced, sub-byte unpacked, Indexed expanded).
-    dims * components
+    dims.saturating_mul(components)
 }
 
 /// Map the engine's decode() error to the typed arm: a filter this build
@@ -2658,8 +2689,42 @@ fn image_error(error: PdfError) -> ImageDataError {
 /// One image's decode, under the caps (R7) and the F1 byte-source ruling:
 /// the containers-only selection first, then the chain-aware pre-decode
 /// estimate against the per-image cap and the call's cumulative budget,
-/// then the decode itself. `spent` accumulates the ACTUALS (container
-/// bytes or pixels) of every successful decode.
+/// then the decode itself, THEN the same two checks on the decode's
+/// ACTUAL bytes before the result enters the payload. `spent` accumulates
+/// the ACTUALS (container bytes or pixels) of every successful decode.
+///
+/// Why twice: the estimate is advisory (a dictionary number is not a
+/// byte count), and one chain class under-estimates by construction —
+/// a Flate→DCT chain is applied innermost-first, so the container the
+/// DCT arm returns is the INFLATED stream (measured: 3,898 stored bytes
+/// → 4,000,000 container bytes) while the estimate reads the stored
+/// size. The actual check is the guarantee: the caps bind on ACTUAL
+/// bytes, and an over-cap decode is refused as the typed SizeCap before
+/// its bytes are served — never truncated.
+///
+/// The call budget is checked at decode time with actuals accumulating:
+/// an under-estimated chain can push the call past budget by at most one
+/// image's inflation (the budget check saw estimate, the decode
+/// delivered actual). Entries already served stand; entries after the
+/// inflation see the inflated `spent` and refuse.
+fn actual_size_cap(actual: u64, max_image_bytes: u64, spent: u64) -> Option<ImageDataError> {
+    if actual > max_image_bytes {
+        return Some(ImageDataError::SizeCap {
+            scope: CapScope::Image,
+            limit_bytes: max_image_bytes,
+            needed_bytes: actual,
+        });
+    }
+    if spent.saturating_add(actual) > MAX_CALL_IMAGE_BYTES {
+        return Some(ImageDataError::SizeCap {
+            scope: CapScope::Call,
+            limit_bytes: MAX_CALL_IMAGE_BYTES,
+            needed_bytes: spent.saturating_add(actual),
+        });
+    }
+    None
+}
+
 fn image_bytes_for(
     handle: &PdfImageHandle<'_>,
     doc: &PdfDocument,
@@ -2700,8 +2765,14 @@ fn image_bytes_for(
         Ok(image) => match image.data() {
             // The engine's container passthrough (DCT anywhere — the
             // engine's own classification): decryption applied, no pixel
-            // decode, no re-encode (F1: NEVER raw_compressed_bytes).
+            // decode, no re-encode (F1: NEVER raw_compressed_bytes). The
+            // ACTUAL check runs on the container's bytes before they are
+            // served: on a Flate→DCT chain this is the inflated stream
+            // (the estimate read the stored size).
             ImageData::Jpeg(bytes) => {
+                if let Some(cap) = actual_size_cap(bytes.len() as u64, max_image_bytes, *spent) {
+                    return ImageBytes::Error(cap);
+                }
                 *spent = spent.saturating_add(bytes.len() as u64);
                 ImageBytes::Container {
                     bytes: bytes.clone(),
@@ -2709,6 +2780,9 @@ fn image_bytes_for(
                 }
             }
             ImageData::Raw { pixels, format } => {
+                if let Some(cap) = actual_size_cap(pixels.len() as u64, max_image_bytes, *spent) {
+                    return ImageBytes::Error(cap);
+                }
                 *spent = spent.saturating_add(pixels.len() as u64);
                 // The buffer's component count: the resolved space's —
                 // EXCEPT Indexed, whose expansion wrote the BASE space's
@@ -2755,6 +2829,11 @@ fn image_bytes_for(
                     return match handle.raw_compressed_bytes() {
                         Ok(bytes) => match sniff_jpx_container(&bytes) {
                             Some(container) => {
+                                if let Some(cap) =
+                                    actual_size_cap(bytes.len() as u64, max_image_bytes, *spent)
+                                {
+                                    return ImageBytes::Error(cap);
+                                }
                                 *spent = spent.saturating_add(bytes.len() as u64);
                                 ImageBytes::Container { bytes, container }
                             }
@@ -2802,10 +2881,18 @@ fn image_bytes_for(
 /// `Unsupported` verbatim, feature-gated (R2); a `rendering`/`jpeg2000`
 /// build decodes them: build-dependent, documented).
 ///
-/// Caps (R7): 256 MiB per image (chain-aware pre-decode estimate —
-/// [`decode_estimate`]), 512 MiB per call cumulative (estimates checked
-/// before each decode, actuals accumulated after), over-capped images
-/// typed `SizeCap{scope, limit, needed}` — refused, never truncated.
+/// Caps (R7): 256 MiB per image, 512 MiB per call cumulative — the caps
+/// bind on ACTUAL bytes: the chain-aware pre-decode estimate
+/// ([`decode_estimate`]) is the advisory pre-labour check (cheap
+/// refusals stay cheap), and the same caps re-run on each decode's
+/// ACTUAL output immediately after it, before the bytes enter the
+/// payload — the under-estimate class (a Flate→DCT chain's container is
+/// the INFLATED stream, measured 3,898 stored bytes → 4,000,000
+/// container bytes) is caught there. Over-capped images are typed
+/// `SizeCap{scope, limit, needed}` — refused, never truncated. The call
+/// budget is a budget checked at decode time: an under-estimated chain
+/// can push the call past it by at most one image's inflation (that
+/// entry refuses, scope `Call`; entries already served stand).
 /// `max_image_bytes` overrides the per-image ceiling; raising it past
 /// the engine's env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` (the flate/unpack/
 /// Indexed ceilings it governs) cannot make the ENGINE decode more — the
@@ -8322,6 +8409,169 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The caps bind on ACTUAL bytes (the estimate is advisory): a
+    /// Flate→DCT chain is applied innermost-first, so the container the
+    /// DCT arm returns is the INFLATED stream — the measured probe shape
+    /// is 3,898 stored bytes → 4,000,000 container bytes. The estimate
+    /// reads the STORED size and sails under `max_image_bytes=1_000_000`;
+    /// the post-decode actual check refuses the RESULT as
+    /// `SizeCap{scope: Image, needed: actual}` before the bytes enter the
+    /// payload (the pre-fix behavior served the 4 MB container — and at
+    /// the documented 512 MiB/call budget, three such images from one
+    /// 584 KB PDF served 572 MiB, the pre-check having seen estimates
+    /// only).
+    #[test]
+    fn images_the_actual_bytes_refuse_when_the_estimate_under_estimates() {
+        // A 4,000,000-byte JPEG-shaped container (magic + filler),
+        // deflated to a few KB of stored stream — the probe's shape.
+        let mut container = Vec::with_capacity(4_000_000);
+        container.extend_from_slice(b"\xff\xd8\xff\xe0");
+        container.resize(4_000_000, 0x42);
+        let stored = zlib_flow(&container);
+        assert!(stored.len() < 100_000, "the fixture must compress");
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+                 /Filter [/FlateDecode /DCTDecode]",
+                &stored,
+            )],
+        );
+        // The container mode: the inflated container is refused on ACTUAL
+        // (the estimate read the stored bytes and passed; the override is
+        // 1,000,000 — the measured probe's own knob).
+        let entry = page_images(
+            bytes.clone(),
+            None,
+            None,
+            "pdf",
+            ImageDecode::Container,
+            Some(1_000_000),
+        )
+        .unwrap()
+        .remove(0)
+        .images
+        .remove(0);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope,
+                limit_bytes,
+                needed_bytes,
+            }) => {
+                assert_eq!(*scope, CapScope::Image);
+                assert_eq!(*limit_bytes, 1_000_000);
+                assert_eq!(*needed_bytes, 4_000_000, "the ACTUAL bytes, not the estimate");
+            }
+            other => panic!("expected the post-decode SizeCap, got {other:?}"),
+        }
+        // Pixels mode: the chain ends in DCT, so the decode is the same
+        // container arm — the same refusal on actuals.
+        let entry = page_images(bytes, None, None, "pdf", ImageDecode::Pixels, Some(1_000_000))
+            .unwrap()
+            .remove(0)
+            .images
+            .remove(0);
+        assert!(matches!(
+            entry.data,
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope: CapScope::Image,
+                ..
+            })
+        ));
+    }
+
+    /// The call budget is a decode-time budget on ACTUALS: the pure
+    /// refusal arithmetic (`actual_size_cap`) — over the per-image cap →
+    /// Image scope; over the call budget once spent accumulates → Call
+    /// scope naming `spent + actual`. (The end-to-end cumulative
+    /// measurement — three inflating images from one small PDF serving
+    /// past budget pre-fix — is the subprocess cell's job:
+    /// test_documents_hardening.py.)
+    #[test]
+    fn images_the_call_budget_refuses_on_actuals() {
+        // Per-image: the actual over the cap wins the scope.
+        let cap = actual_size_cap(4_000_000, 1_000_000, 0);
+        assert!(matches!(
+            cap,
+            Some(ImageDataError::SizeCap {
+                scope: CapScope::Image,
+                limit_bytes: 1_000_000,
+                needed_bytes: 4_000_000,
+            })
+        ));
+        // Call: the actual fits per-image, spent + actual passes budget.
+        let cap = actual_size_cap(200_000_000, 256 * 1024 * 1024, MAX_CALL_IMAGE_BYTES - 100);
+        assert!(matches!(
+            cap,
+            Some(ImageDataError::SizeCap {
+                scope: CapScope::Call,
+                limit_bytes: MAX_CALL_IMAGE_BYTES,
+                ..
+            })
+        ));
+        // Under both: no refusal.
+        assert!(actual_size_cap(1_000, 1_000_000, 0).is_none());
+    }
+
+    /// The estimate's multiply is saturating (the unchecked-multiply
+    /// finding): 2^31 × 2^31 dims on DeviceCMYK (×4 components)
+    /// overflowed u64 pre-fix — the wrap landed the estimate at ≈0, no
+    /// SizeCap ever fired, and the decode itself answered (a decode
+    /// error in release; a panic in debug builds, surfaced as
+    /// InvalidPdf). Post-fix the product saturates to `u64::MAX`, which
+    /// no cap can admit: the typed Image-scope SizeCap with
+    /// `needed_bytes = u64::MAX`. The RGB twin (×3) does not overflow:
+    /// the same fixture pins the sane-multiply refusal with the exact
+    /// product.
+    #[test]
+    fn images_estimate_multiplication_saturates_never_wraps() {
+        let cmyk = image_xobject(
+            "/Type /XObject /Subtype /Image /Width 2147483648 /Height 2147483648 \
+             /ColorSpace /DeviceCMYK /BitsPerComponent 8 /Filter /FlateDecode",
+            b"\x00\x01\x02",
+        );
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            std::slice::from_ref(&cmyk),
+        );
+        let entry = first_image(bytes, ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope,
+                limit_bytes,
+                needed_bytes,
+            }) => {
+                assert_eq!(*scope, CapScope::Image);
+                assert_eq!(*limit_bytes, DEFAULT_MAX_IMAGE_BYTES);
+                assert_eq!(*needed_bytes, u64::MAX, "the saturated product");
+            }
+            other => panic!("expected the saturation SizeCap, got {other:?}"),
+        }
+        // The RGB twin: 2^62 × 3 fits u64 — the exact product, refused.
+        let rgb = image_xobject(
+            "/Type /XObject /Subtype /Image /Width 2147483648 /Height 2147483648 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+            b"\x00\x01\x02",
+        );
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            std::slice::from_ref(&rgb),
+        );
+        let entry = first_image(bytes, ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope: CapScope::Image,
+                needed_bytes,
+                ..
+            }) => assert_eq!(*needed_bytes, 3u64 << 62, "the exact product"),
+            other => panic!("expected the RGB twin's SizeCap, got {other:?}"),
+        }
     }
 
     /// The ~96 MiB 600-dpi letter-size RGB scan (5100×6600×3 =

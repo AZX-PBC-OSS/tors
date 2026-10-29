@@ -617,7 +617,8 @@ def test_a_400mb_data_call_keeps_the_gil_at_heartbeat_granularity() -> None:
 
 
 _ROMAN_OVERFLOW_PROBE = r"""
-import os, time
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
 from documents import generate_pdf_page_labels_value
 from tors_documents import pdf_page_labels
 
@@ -660,7 +661,7 @@ def test_the_page_label_render_is_bounded_in_time_and_space() -> None:
         )
 
     report = first_clean(
-        lambda: _run_or_fail(_ROMAN_OVERFLOW_PROBE, timeout=120),
+        lambda: _run_or_fail(_ROMAN_OVERFLOW_PROBE, str(Path(__file__).parent), timeout=120),
         check,
         samples=2,
         label="the page-label bound probe",
@@ -669,6 +670,63 @@ def test_the_page_label_render_is_bounded_in_time_and_space() -> None:
     assert peak < 300_000, (
         f"peak RSS reached {peak} kB — the bounded-out render must cost "
         f"O(1) per page, not the pre-fix 1.67 GiB:\n{report}"
+    )
+
+
+# --- the image caps: the actual-bytes law, memory-guarded -------------------
+
+
+_FLATE_DCT_CHAIN_PROBE = r"""
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from documents import generate_pdf_layout_flate_dct_chain
+from tors_documents import page_images
+
+# The measured probe's own shape: three Flate→DCT images in one ~584 KB
+# PDF, each inflating to 200 MB. The estimate reads the STORED bytes (a
+# few KB per image), so the pre-check saw spent+estimate <= 512 MiB and
+# SERVED all three — 572 MiB against the documented 512 MiB/call budget
+# (pre-fix). Post-fix the budget is a decode-time check on ACTUALS:
+# entries 1-2 stand, the third is refused scope="call".
+data = generate_pdf_layout_flate_dct_chain(images=3, container_size=200_000_000)
+entries = page_images(data=data, decode="pixels")[0].images
+kinds = [entry.data.kind for entry in entries]
+assert kinds == ["container", "container", "error"], kinds
+assert entries[2].data.error_kind == "size_cap", entries[2].data.error_kind
+assert entries[2].data.scope == "call", entries[2].data.scope
+assert entries[2].data.needed_bytes == 600_000_000, entries[2].data.needed_bytes
+print("ok")
+if os.path.exists("/proc/self/status"):
+    hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
+    print(hwm.strip())
+"""
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/status").exists(), reason="the VmHWM half of the probe is Linux-shaped"
+)
+def test_the_cumulative_image_budget_refuses_on_actuals() -> None:
+    """The image-cap fix's cumulative cell, subprocess + VmHWM (the
+    finding's measured before: three 200 MB inflations from one 584 KB
+    PDF served 572 MiB against the documented 512 MiB/call — the
+    pre-check saw spent+estimate=400 MB ≤ 512 MiB and never refused).
+    Green: the third entry is the typed scope='call' refusal, and the
+    child's peak RSS stays bounded by the two SERVED containers plus one
+    transient inflation (the refused decode's bytes never enter the
+    payload)."""
+    def check(report: str) -> None:
+        assert "ok" in report, report
+
+    report = first_clean(
+        lambda: _run_or_fail(_FLATE_DCT_CHAIN_PROBE, str(Path(__file__).parent), timeout=300),
+        check,
+        samples=2,
+        label="the cumulative image-budget probe",
+    )
+    peak = _hwm_kb(report)
+    assert peak < 2_000_000, (
+        f"peak RSS reached {peak} kB — the refused decode's bytes must not "
+        f"accumulate in the payload:\n{report}"
     )
 
 

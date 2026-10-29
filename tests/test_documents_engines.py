@@ -4645,6 +4645,34 @@ class TestPageImages:
         served = page_images(data=giant_dct, decode="pixels")[0].images[0]
         assert served.data.kind == "container", served.data.error_kind
 
+    def test_the_caps_bind_on_actual_bytes_not_the_estimate(self) -> None:
+        """The Flate→DCT under-estimate (measured: 3,898 stored bytes →
+        4,000,000 container bytes — the engine applies the filters
+        innermost-first, so the container is the INFLATED stream while
+        the estimate reads the STORED bytes): max_image_bytes=1_000_000
+        SERVED the 4 MB container pre-fix. The estimate is advisory; the
+        ACTUAL check refuses the result before it enters the payload —
+        per-image here, scope 'image', needed the real bytes."""
+        from documents import generate_pdf_layout_flate_dct
+
+        entry = page_images(
+            data=generate_pdf_layout_flate_dct(), decode="container", max_image_bytes=1_000_000
+        )[0].images[0]
+        assert entry.data.kind == "error"
+        assert entry.data.error_kind == "size_cap"
+        assert entry.data.scope == "image"
+        assert entry.data.limit_bytes == 1_000_000
+        assert entry.data.needed_bytes == 4_000_000
+        assert "actual" in entry.data.message, entry.data.message
+
+    # The call budget's own end-to-end pin is the subprocess cell
+    # (test_documents_hardening.py::test_the_cumulative_image_budget_refuses_on_actuals):
+    # an honest refusal needs the payload to HOLD over-budget actuals
+    # (three 200 MB inflations from one ~584 KB PDF, the measured
+    # probe's shape), and that is subprocess work by this suite's own
+    # convention. The refusal arithmetic is pinned Rust-side
+    # (images_the_call_budget_refuses_on_actuals).
+
     def test_the_ccitt_payload_carries_all_seven_params(self) -> None:
         """The packed codestream verbatim (in == out, measured), and the
         seven /DecodeParms fields — without them the consumer could not

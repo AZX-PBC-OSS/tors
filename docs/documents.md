@@ -499,10 +499,19 @@ decode is the engine's `Unsupported` verbatim, feature-gated).
 (`"not_requested" | "container" | "raw" | "error"`); every arm getter is
 `None` unless `kind` names it — "no bytes" is never two different things.
 A decode failure is a **visible typed entry**, siblings intact. Caps: 256
-MiB per image (the chain-aware pre-decode estimate), 512 MiB per call
-cumulative, the over-cap image a typed `size_cap` entry
+MiB per image, 512 MiB per call cumulative — the caps bind on **actual
+bytes**: the chain-aware pre-decode estimate is the advisory pre-labour
+check, and the same caps re-run on each decode's ACTUAL output
+immediately after it, before the bytes enter the payload (one chain class
+under-estimates by construction: a Flate→DCT chain is applied
+innermost-first, so the container is the INFLATED stream, measured
+3,898 stored bytes → 4,000,000 container bytes — caught post-decode). The
+over-cap image is a typed `size_cap` entry
 (`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated (a
-truncated image is a wrong image with no marker); `max_image_bytes=`
+truncated image is a wrong image with no marker); the call budget is a
+budget checked at decode time, so an under-estimated chain can push the
+call past it by at most one image's inflation (that entry refuses, scope
+`call`; entries already served stand); `max_image_bytes=`
 overrides the per-image ceiling (raising it past the engine's env-read
 `PDF_OXIDE_MAX_DECOMPRESS_MB` cannot make the ENGINE decode more). The
 payload describes itself (`components`/`bpc` are the buffer's stride;

@@ -3159,7 +3159,9 @@ impl ImageBytes {
 
     /// The failure's message (the engine's own text, or the composed F1
     /// refusal for an encrypted image whose container cannot be served) —
-    /// None unless `kind == "error"`.
+    /// None unless `kind == "error"`. The size-cap message names the
+    /// scope (finding 11: a call-scope refusal is not an image-size
+    /// story — the two ceilings are different sentences).
     #[getter]
     fn message(&self) -> Option<String> {
         use tors::pdf_impl::ImageBytes as IB;
@@ -3168,9 +3170,22 @@ impl ImageBytes {
             | IB::Error(tors::pdf_impl::ImageDataError::Unsupported(message)) => {
                 Some(message.clone())
             }
-            IB::Error(tors::pdf_impl::ImageDataError::SizeCap { .. }) => {
-                Some("the image's decode estimate exceeded the ceiling".to_string())
-            }
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap {
+                scope: tors::pdf_impl::CapScope::Image,
+                ..
+            }) => Some(
+                "the image's decoded size exceeded the per-image ceiling \
+                 (the caps bind on actual bytes)"
+                    .to_string(),
+            ),
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap {
+                scope: tors::pdf_impl::CapScope::Call,
+                ..
+            }) => Some(
+                "serving this image would push the call past the cumulative \
+                 decode budget (the caps bind on actual bytes)"
+                    .to_string(),
+            ),
             _ => None,
         }
     }
@@ -3210,9 +3225,10 @@ impl ImageBytes {
         }
     }
 
-    /// The bytes the work needed: the image's own estimate for `scope ==
-    /// "image"`, the call's cumulative total had the image been served
-    /// for `scope == "call"` — None unless `error_kind == "size_cap"`.
+    /// The bytes the work needed: the image's own estimate OR ACTUAL
+    /// size (whichever check fired) for `scope == "image"`, the call's
+    /// cumulative total had the image been served for `scope == "call"`
+    /// — None unless `error_kind == "size_cap"`.
     #[getter]
     fn needed_bytes(&self) -> Option<u64> {
         use tors::pdf_impl::ImageBytes as IB;

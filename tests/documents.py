@@ -2135,6 +2135,74 @@ def generate_pdf_layout_dct(*, garbage: bool = False) -> bytes:
     )
 
 
+def generate_pdf_layout_flate_dct(container_size: int = 4_000_000) -> bytes:
+    """The Flate→DCT chain fixture: `/Filter [/FlateDecode /DCTDecode]`
+    on a stream whose INFLATED body is a `container_size`-byte
+    JPEG-shaped container (magic + filler) stored in a few KB. The
+    engine applies the filters innermost-first, so the container decode()
+    returns is the INFLATED stream while byte_size_compressed reads the
+    STORED bytes — the under-estimate class the actual-bytes cap check
+    exists for (measured: 3,898 stored → 4,000,000 container;
+    max_image_bytes=1_000_000 SERVED the 4 MB container pre-fix)."""
+    container = b"\xff\xd8\xff\xe0" + b"\x42" * (container_size - 4)
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8"
+                " /Filter [/FlateDecode /DCTDecode]",
+                zlib.compress(container),
+            )
+        ],
+    )
+
+
+def _flate_bomb_stream(target: int) -> bytes:
+    """The deflate stream of `target` zero bytes, built chunked (no
+    target-sized allocation in the builder — the bombs' cumulative cell
+    builds three 200 MB inflations from a ~584 KB file, and the builder
+    must not hold three 200 MB buffers to do it)."""
+    compressor = zlib.compressobj()
+    out = bytearray()
+    chunk = bytes(1 << 20)
+    left = target
+    while left > 0:
+        step = min(left, len(chunk))
+        out += compressor.compress(chunk[:step])
+        left -= step
+    out += compressor.flush()
+    return bytes(out)
+
+
+def generate_pdf_layout_flate_dct_chain(
+    images: int = 3, container_size: int = 200_000_000
+) -> bytes:
+    """`images` Flate→DCT image streams each inflating to
+    `container_size` bytes (zeros — maximal compression), drawn on one
+    page: the cumulative-budget probe's fixture. Measured shape: three
+    200 MB inflations ride in a ~584 KB PDF; the stored bytes' estimates
+    sail under every cap, so the per-call budget was pushed to 572 MiB
+    served against the documented 512 MiB/call (pre-fix) — the actuals
+    law refuses the third entry, scope `call`."""
+    content = b"".join(
+        b"q 100 0 0 100 50 600 cm /Im%d Do Q\n" % (index + 1) for index in range(images)
+    )
+    stream = _flate_bomb_stream(container_size)
+    return generate_pdf_layout(
+        content,
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8"
+                " /Filter [/FlateDecode /DCTDecode]",
+                stream,
+            )
+            for _ in range(images)
+        ],
+    )
+
+
 def generate_pdf_layout_gradient(size: int = 64) -> bytes:
     """The scanned-page fixture for the pixels decode: a `size`×`size`
     DeviceGray FlateDecode image whose samples are the row-major gradient
