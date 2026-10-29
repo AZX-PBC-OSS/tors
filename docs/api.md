@@ -1496,8 +1496,10 @@ uncatchable allocator abort). The ceiling applies before the identity contract's
 borrowed return, so a replace whose output would exceed it raises even when the
 net effect would be the identity — a >32 MiB "identity" replace is the
 amplification shape wearing a disguise. The masked spelling below is
-length-preserving and has no ceiling (a short key cannot amplify into a long
-output there).
+character-count-preserving and has no ceiling (its byte size is bounded, not
+preserved — at most 4 × the input's character count, one 4-byte character
+per character at worst — so a short key cannot amplify a bounded input into
+an unbounded output there).
 
 ```python
 tors.replace_many("the cat sat in the catalogue", {"cat": "dog", "catalogue": "library"})
