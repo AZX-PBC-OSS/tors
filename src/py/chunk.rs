@@ -8,7 +8,10 @@ use crate::chunk_hierarchical_impl;
 use crate::chunk_impl;
 use crate::chunk_quality_impl;
 use crate::parse_boundary;
-use crate::py::_borrow::{bounded_str_list, convert_str_arg, validate_count_overlap};
+use crate::py::_borrow::{
+    MAX_QUALITY_SPANS, bounded_str_list, bounded_str_list_capped, convert_str_arg,
+    validate_count_overlap,
+};
 use crate::py::eager_iter_class;
 
 /// `tors.chunk_cdc(data: bytes, *, min_size=4096, avg_size=16384,
@@ -714,6 +717,13 @@ pub fn chunk_overlap_cost(_py: Python<'_>, overlap: f64) -> PyResult<f64> {
 /// boundary crosses anything, vacuously; no sentence-chunk pair exists,
 /// the conservative 0/0 pin). A span out of `text`'s range or with
 /// `start > end` raises `ValueError`; `tau < 0` raises `ValueError`.
+/// The `chunks` walk is capped at `MAX_QUALITY_SPANS` (2,000,000 spans,
+/// the documents-scale bound — a 9.9 MB document at a 50-codepoint
+/// budget is ~220,000 spans, well inside it): past the cap the walk
+/// refuses with a catchable `ValueError`, the DoS backstop, not a
+/// config-list ceiling (the #112 cap's 100,000 — sized for caller-typed
+/// rule/separator lists — refused the chunk family's own document-scale
+/// output here).
 ///
 /// GIL model: the `chunks` walk and the `tau` validation under the GIL,
 /// the whole segment/shingle/score pass under one `py.detach`, the
@@ -730,25 +740,38 @@ pub fn chunk_quality(
             "tau must be >= 0, got {tau}"
         )));
     }
-    // The bounded manual walk (`bounded_str_list`, the #112 class's fix):
-    // never a `Vec<(i64, i64)>` extraction, which would size from a
-    // lying `__len__`, and a bare `str` is refused up front (it would
-    // otherwise launder into per-character 2-sequences).
+    // The bounded manual walk (`bounded_str_list_capped`, the #112
+    // class's fix): never a `Vec<(i64, i64)>` extraction, which would
+    // size from a lying `__len__`, and a bare `str` is refused up front
+    // (it would otherwise launder into per-character 2-sequences). The
+    // cap is the documents-scale `MAX_QUALITY_SPANS`, not the
+    // config-list `MAX_LIST_ITEMS`: the honest population here is the
+    // chunk family's own output at document scale (a 9.9 MB document at
+    // a 50-codepoint budget is ~220,000 spans), and the walk itself
+    // never reads `__len__` nor reserves from one — the DoS class the
+    // config-list cap exists for does not apply to a push-one-at-a-time
+    // data walk, only the runaway-iterator backstop does.
     let mut spans: Vec<(usize, usize)> = Vec::new();
     // The spans are codepoint offsets (the chunk family's units), so the
     // range bound is the char count, never the byte length.
     let text_len = text.chars().count();
-    bounded_str_list("chunk_quality", "chunks", &chunks, |handle| {
-        let (start, end) = handle.extract::<(i64, i64)>()?;
-        if start < 0 || end < start || end as usize > text_len {
-            return Err(PyValueError::new_err(format!(
-                "chunk_quality: every chunk span must satisfy 0 <= start <= end <= \
+    bounded_str_list_capped(
+        "chunk_quality",
+        "chunks",
+        &chunks,
+        MAX_QUALITY_SPANS,
+        |handle| {
+            let (start, end) = handle.extract::<(i64, i64)>()?;
+            if start < 0 || end < start || end as usize > text_len {
+                return Err(PyValueError::new_err(format!(
+                    "chunk_quality: every chunk span must satisfy 0 <= start <= end <= \
                  len(text) (len {text_len}), got ({start}, {end})"
-            )));
-        }
-        spans.push((start as usize, end as usize));
-        Ok(())
-    })?;
+                )));
+            }
+            spans.push((start as usize, end as usize));
+            Ok(())
+        },
+    )?;
     let quality = py.detach(|| chunk_quality_impl::chunk_quality(&spans, text, tau as usize));
     let out = PyDict::new(py);
     out.set_item("integrity", quality.integrity)?;

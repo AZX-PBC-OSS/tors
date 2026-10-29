@@ -333,8 +333,14 @@ pub fn chunk_to_offsets(
     // hanging.
     const MAX_TOKEN_SPANS: usize = 1 << 26;
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    let iterator = token_offsets.try_iter().map_err(|_| {
-        PyTypeError::new_err("token_offsets must be a sequence of (start, end) int pairs")
+    let iterator = token_offsets.try_iter().map_err(|err| {
+        // The type is normalized (the existing arm's TypeError), the
+        // original exception's text rides inline (the debuggability
+        // rule: a caller iterable's own failure should name itself, not
+        // vanish into a canned message).
+        PyTypeError::new_err(format!(
+            "token_offsets must be a sequence of (start, end) int pairs: {err}"
+        ))
     })?;
     for (index, item) in iterator.enumerate() {
         if index >= MAX_TOKEN_SPANS {
@@ -342,8 +348,12 @@ pub fn chunk_to_offsets(
                 "token_offsets has more than {MAX_TOKEN_SPANS} entries"
             )));
         }
-        let item = item.map_err(|_| {
-            PyValueError::new_err("token_offsets must be a sequence of (start, end) int pairs")
+        let item = item.map_err(|err| {
+            // Same carry: the ValueError type normalized, the raising
+            // iterator's own message kept.
+            PyValueError::new_err(format!(
+                "token_offsets must be a sequence of (start, end) int pairs: {err}"
+            ))
         })?;
         let (start, end) = item.extract::<(i64, i64)>().map_err(|_| {
             PyValueError::new_err(
