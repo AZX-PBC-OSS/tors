@@ -138,7 +138,7 @@ The rules in brief:
   from a scan), `.pages_needing_ocr` (the 0-based indices of image-only pages,
   excluding blanks), and the derived `.has_text` / `.image_only`. Encrypted
   documents fail closed on every entry (`ValueError` without `password=`;
-  the carve-out is `pdf_security`, which reports state instead — above).
+  the carve-out is `pdf_security`, which reports state instead — below).
 - `pdf_page_labels` returns the page label a reader displays, per page
   (`"i"`, `"A-1"`, `"12"`): the ISO 32000 §12.4.2 numbering tree. `None` means
   the page declares no label (no tree, or before the tree's first range) — the

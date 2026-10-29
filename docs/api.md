@@ -8025,7 +8025,8 @@ every entry: the door check raises at open, `ValueError`, "PDF is encrypted and
 requires a password", never empty output masquerading as "no content" (the
 pre-fix shape, measured on an RC4-128 fixture: `to_markdown`/`pdf_extract` returned
 `""` on a locked document while `pdf_classify` raised, the two entries disagreeing
-about the same bytes; the check now raises at open for all). A wrong password is its
+about the same bytes; the check now raises at open for all — the one carve-out is
+`pdf_security`, which reports the state instead of raising). A wrong password is its
 own clean `ValueError`, "the password did not unlock this PDF". The unlock rides
 the pdf_oxide lane, the default `auto` and forced `oxide` both; `backend="anydoc"`
 on a PDF has no unlock and refuses encrypted documents outright.
@@ -8527,7 +8528,8 @@ no rasterization. The answer to "does this PDF have a text layer, or is it an im
 we can do nothing with locally", as a `PdfClassification` (below): every page's
 `PageKind` verdict, the pages needing OCR, and the two derived routing booleans.
 Encrypted documents fail closed on every entry (`ValueError` at open, pdf_oxide's
-security rule: a security state is never masked as "all pages empty");
+security rule: a security state is never masked as "all pages empty" — the one
+carve-out is `pdf_security`, which reports the state instead of raising);
 `password=` unlocks one. `backend=`/`max_bytes=` follow the family's shared lane
 note in the [`pdf_extract`](#torsdocumentspdf_extract) section above: auto/oxide
 run pdf_oxide byte-identically, `backend="anydoc"` the capability refusal
