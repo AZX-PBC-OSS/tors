@@ -28,6 +28,7 @@ from tors_documents import (
     Format,
     PageGeometry,
     PageLayout,
+    PageTables,
     PdfClassification,
 )
 
@@ -94,3 +95,12 @@ async def page_layout(
     pages: int | list[int] | tuple[int, int] | None = ...,
     max_bytes: int | None = ...,
 ) -> list[PageLayout]: ...
+async def page_tables(
+    path: str | os.PathLike[str] | None = ...,
+    data: bytes | None = ...,
+    format: Format | str | None = ...,
+    password: str | None = ...,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = ...,
+) -> list[PageTables]: ...

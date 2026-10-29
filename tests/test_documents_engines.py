@@ -85,6 +85,21 @@ from documents import (
     generate_pdf_media_origin,
     generate_pdf_pages,
     generate_pdf_rotate,
+    generate_pdf_table_cap,
+    generate_pdf_table_cluster_shared_x,
+    generate_pdf_table_crop_survivor,
+    generate_pdf_table_crop_vanished,
+    generate_pdf_table_mixed_spans,
+    generate_pdf_table_multi,
+    generate_pdf_table_pages,
+    generate_pdf_table_prose,
+    generate_pdf_table_ruled,
+    generate_pdf_table_sideways_ruled,
+    generate_pdf_table_sideways_text_only,
+    generate_pdf_table_stack_disjoint,
+    generate_pdf_table_symmetric,
+    generate_pdf_table_text_only,
+    generate_pdf_table_toc,
     generate_pdf_zero_pages,
     generate_pptx_empty,
     generate_pptx_sldsz,
@@ -93,15 +108,20 @@ from documents import (
 
 try:  # the payload wheel (tors[documents])
     from tors_documents import (
+        Cell,
         ImageBox,
         NeedsOcrError,
         PageGeometry,
         PageLayout,
+        PageTables,
+        Row,
+        Table,
         TextLine,
         TextSpan,
         Word,
         page_geometry,
         page_layout,
+        page_tables,
         pdf_classify,
         pdf_extract,
         pdf_page_count,
@@ -112,15 +132,20 @@ try:  # the payload wheel (tors[documents])
 except ImportError:  # pragma: no cover - the in-base wiring alternative
     try:
         from tors import (  # type: ignore[attr-defined]  # noqa: F401
+            Cell,
             ImageBox,
             NeedsOcrError,
             PageGeometry,
             PageLayout,
+            PageTables,
+            Row,
+            Table,
             TextLine,
             TextSpan,
             Word,
             page_geometry,
             page_layout,
+            page_tables,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -1545,7 +1570,14 @@ class TestPdfFamilyBackendAndBudget:
         type-correct, value-absurd: the too-large ValueError."""
         from tors_documents import pdf_link_uris
 
-        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris, page_layout):
+        for call in (
+            pdf_extract,
+            pdf_page_count,
+            pdf_classify,
+            pdf_link_uris,
+            page_layout,
+            page_tables,
+        ):
             for bad in (-1,):
                 with pytest.raises(ValueError, match="positive"):
                     call(data=b"junk bytes", max_bytes=bad)
@@ -1555,10 +1587,10 @@ class TestPdfFamilyBackendAndBudget:
             with pytest.raises(ValueError, match="too large"):
                 call(data=b"junk bytes", max_bytes=10**30)
         # the ZERO value: the PDF-only probes refuse it at the binding
-        # (their family's parse), while page_layout threads it through to
-        # the CORE's sequenced check (§6: after resolve/capability/
-        # password-kind) — on resolvable bytes it is the zero refusal, on
-        # junk the resolve error (resolve first)
+        # (their family's parse), while page_layout/page_tables thread it
+        # through to the CORE's sequenced check (§6: after resolve/
+        # capability/password-kind) — on resolvable bytes it is the zero
+        # refusal, on junk the resolve error (resolve first)
         for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
             with pytest.raises(ValueError, match="positive"):
                 call(data=b"junk bytes", max_bytes=0)
@@ -1566,6 +1598,10 @@ class TestPdfFamilyBackendAndBudget:
             page_layout(data=generate_docx_pgsz(), max_bytes=0)
         with pytest.raises(ValueError, match="(?i)unrecognized"):
             page_layout(data=b"junk bytes", max_bytes=0)
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_tables(data=generate_docx_pgsz(), max_bytes=0)
+        with pytest.raises(ValueError, match="(?i)unrecognized"):
+            page_tables(data=b"junk bytes", max_bytes=0)
 
     def test_an_explicit_budget_binds_the_pdf_family_pre_read(self, tmp_path: Path) -> None:
         """The shared source-spine gate, extended to the pdf family: the
@@ -1837,15 +1873,15 @@ class TestEncryptedPdfs:
     access"; the door check now sits in front of every engine lane)."""
 
     def test_every_entry_fails_closed_without_a_password(self) -> None:
-        """All eight entries (both convert modes, all four PDF-only
-        calls, and the two geometry-lane probes) refuse a locked PDF with
+        """All nine entries (both convert modes, all four PDF-only
+        calls, and the three geometry-lane probes) refuse a locked PDF with
         pdf_oxide's ValueError naming the encryption, before any engine
         work. The defect this gate makes
         impossible to regress: the pre-fix wheel's to_markdown/pdf_extract
         returned EMPTY output on these same bytes (the empty-string
         masking: indistinguishable from a blank document); today no entry
         returns at all."""
-        from tors_documents import page_geometry, page_layout, pdf_link_uris
+        from tors_documents import page_geometry, page_layout, page_tables, pdf_link_uris
 
         locked = _encrypted_pdf()
         entries = (
@@ -1853,6 +1889,7 @@ class TestEncryptedPdfs:
             to_text,
             page_geometry,
             page_layout,
+            page_tables,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -3200,6 +3237,589 @@ class TestPageLayout:
             )
 
 
+class TestPageTables:
+    """The per-cell table-box probe's contract (issue #204; the spec's
+    A1-A13 rulings): every Some bbox in the page's declared render space
+    (the same frame `page_layout` maps; unclipped), the A1 frame-coherence
+    gate (three coherent classes served; the incoherent /Rotate
+    combinations refused with `tables_refused`), the A6 primitive edge
+    cap, the per-cell goldens (probe crate's out.txt/out2-out7.txt are
+    the preserved measurement oracle), the A11 merge/cluster row-order
+    pins, the A9 refused-marker reading rule, pages='s byte-pinned
+    refusals and reorder-with-page_index law, auto==oxide as plain `==`,
+    the office rows' capability statement, and the shared refusal spine."""
+
+    def test_the_rot0_intersection_golden(self) -> None:
+        """The ruled 2×2 at rotation 0: the engine's cells are the RULING
+        rectangles (measured out.txt — A (100,700,200,100) etc.), one
+        table, col_count 2, the table bbox the ruled rectangle, and
+        has_header FALSE (the intersection branch never sets it — the
+        pinned engine limitation). The boxes ride past the 792pt page
+        (the y=800 rule): unclipped, the cell-boxes-are-geometry law."""
+        (entry,) = page_tables(data=generate_pdf_table_ruled())
+        assert entry.page_index == 0 and entry.format == "pdf"
+        assert not entry.tables_refused
+        assert (entry.geometry.width_pt, entry.geometry.height_pt) == (612.0, 792.0)
+        assert len(entry.tables) == 1
+        table = entry.tables[0]
+        assert (table.col_count, table.has_header) == (2, False)
+        _box_near(table.bbox, (100.0, 600.0, 400.0, 200.0))
+        assert [len(row.cells) for row in table.rows] == [2, 2]
+        assert not any(row.is_header for row in table.rows), (
+            "the intersection branch's has_header limitation, pinned"
+        )
+        expected = [
+            ("A", (100.0, 700.0, 200.0, 100.0)),
+            ("B", (300.0, 700.0, 200.0, 100.0)),
+            ("C", (100.0, 600.0, 200.0, 100.0)),
+            ("D", (300.0, 600.0, 200.0, 100.0)),
+        ]
+        got = [(cell.text, cell.bbox) for row in table.rows for cell in row.cells]
+        assert got == [
+            (text, pytest.approx(box, abs=_LAYOUT_TOL)) for (text, box) in expected
+        ]
+        # the merge-span pass-through (the flagged pin: the measured
+        # engine never merges in these fixtures)
+        assert all(
+            cell.colspan == 1 and cell.rowspan == 1 for row in table.rows for cell in row.cells
+        )
+
+    def test_the_frame_incoherent_classes_are_refused(self) -> None:
+        """The A1 refusals, pinned with the A9 marker: a ruled 2×2 on
+        /Rotate 180 (the engine detects NOTHING — measured out.txt) and
+        the 180-SYMMETRIC grid on /Rotate 180 (the engine DOES detect it
+        with every cell's text 180°-swapped — measured out2: r0c0 = "D"
+        where the raw top-left held "A") both answer `tables: []` +
+        `tables_refused: true` with the geometry intact; sideways text
+        under rulings at 90/270 refuses the same way. The control: the
+        symmetric grid at rotation 0 SERVES with the upright cells."""
+        for fixture in (
+            generate_pdf_table_ruled(rotate=180),
+            generate_pdf_table_symmetric(rotate=180),
+        ):
+            (entry,) = page_tables(data=fixture)
+            assert entry.tables == []
+            assert entry.tables_refused is True, "the A9 marker on every refusal"
+            assert entry.geometry is not None and entry.geometry.rotation == 180
+            assert entry.format == "pdf"
+        for rotate in (90, 270):
+            (entry,) = page_tables(data=generate_pdf_table_sideways_ruled(rotate))
+            assert entry.tables == []
+            assert entry.tables_refused is True
+            assert entry.geometry.rotation == rotate
+        # the control: the symmetric grid at 0 serves upright
+        (served,) = page_tables(data=generate_pdf_table_symmetric())
+        assert not served.tables_refused
+        assert [cell.text for cell in served.tables[0].rows[0].cells] == ["A", "B"]
+
+    def test_the_mixed_span_classes_are_refused(self) -> None:
+        """The A12 mixed-span refusals: a pathless page whose spans MIX
+        engine-mapped (sideways) and raw (upright) runs — the detector
+        would compare two text frames — refuses at 90 and 270, fail-closed
+        (the unlisted combination), geometry intact."""
+        for rotate in (90, 270):
+            (entry,) = page_tables(data=generate_pdf_table_mixed_spans(rotate))
+            assert entry.tables == []
+            assert entry.tables_refused is True
+            assert entry.geometry.rotation == rotate
+
+    def test_the_90_270_upright_classes_forward_map_exactly(self) -> None:
+        """The coherent 90/270 class (upright text): the raw boxes
+        forward-map exactly — the ruled grid's cells (ruling rects) and
+        the text-only table's span-union cells both land on the forward
+        rule's goldens (derived from the probe's measured raw boxes,
+        out.txt)."""
+        (ruled,) = page_tables(data=generate_pdf_table_ruled(rotate=90))
+        assert not ruled.tables_refused
+        assert ruled.geometry.rotation == 90
+        assert (ruled.geometry.width_pt, ruled.geometry.height_pt) == (792.0, 612.0)
+        _box_near(ruled.tables[0].bbox, (600.0, 112.0, 200.0, 400.0))
+        _box_near(ruled.tables[0].rows[0].cells[0].bbox, (700.0, 312.0, 100.0, 200.0))
+
+        (text_only,) = page_tables(data=generate_pdf_table_text_only(rotate=90))
+        assert not text_only.tables_refused
+        _box_near(text_only.tables[0].bbox, (550.0, 281.32, 162.0, 230.684))
+        _box_near(text_only.tables[0].rows[0].cells[0].bbox, (700.0, 473.98, 12.0, 38.016))
+
+        (flipped,) = page_tables(data=generate_pdf_table_text_only(rotate=270))
+        assert not flipped.tables_refused
+        _box_near(flipped.tables[0].bbox, (80.0, 100.0, 162.0, 230.684))
+        _box_near(flipped.tables[0].rows[0].cells[0].bbox, (80.0, 100.0, 12.0, 38.016))
+
+    def test_the_sideways_text_only_class_serves_via_unmap_then_forward(self) -> None:
+        """The A12 served class: a pathless page whose every span is
+        engine-mapped — the sideways text-only table at 270 (measured
+        out3: a 4×4 grid with None-padded cells) serves through
+        unmap→forward, the identity here (no crop: the frames coincide),
+        so the boxes are the engine's mapped numbers verbatim. The 90 arm
+        is coherent too and the detector finds NOTHING there (measured
+        out3) — served empty, `tables_refused` FALSE (the detector's
+        sideways limit at 90, not a refusal)."""
+        (entry,) = page_tables(data=generate_pdf_table_sideways_text_only(270))
+        assert not entry.tables_refused
+        assert entry.geometry.rotation == 270
+        assert len(entry.tables) == 1
+        table = entry.tables[0]
+        assert (table.col_count, table.has_header) == (4, False)
+        _box_near(table.bbox, (80.0, 100.0, 174.012, 230.684))
+        r0 = table.rows[0].cells
+        assert [(c.text, c.bbox is None) for c in r0] == [
+            ("Value", False),
+            ("", True),
+            ("", True),
+            ("", True),
+        ]
+        _box_near(r0[0].bbox, (80.0, 300.0, 30.684, 30.684))
+        r1 = table.rows[1].cells
+        assert r1[0].text == "" and r1[0].bbox is None
+        _box_near(r1[1].bbox, (130.0, 300.0, 20.016, 20.016))
+        _box_near(r1[3].bbox, (230.0, 300.0, 20.016, 20.016))
+        # the pads' shape: the None cells INSIDE the detected table (A2)
+        assert table.rows[2].cells[0].text == "Region"
+        _box_near(table.rows[2].cells[0].bbox, (80.0, 100.0, 38.016, 38.016))
+
+        # the 90 arm: coherent, served, the detector declines
+        (empty,) = page_tables(data=generate_pdf_table_sideways_text_only(90))
+        assert not empty.tables_refused
+        assert empty.tables == []
+
+    def test_the_crop_laws(self) -> None:
+        """The unclipped law and the text-side asymmetry (both measured
+        out2): under the [110 550 550 800] crop the ruled grid survives
+        with cell A's box OUTSIDE the visible box ((100−110, 700−550,
+        200, 100) = (−10, 150, 200, 100) — a negative x on a 440-wide
+        page), returned unclipped, the consumer clips; under [150 600 550
+        800] the crop drops the LEFT column's text (the TEXT side IS
+        crop-filtered) and the table VANISHES — `tables: []` with
+        `tables_refused` FALSE (no tables found ≠ a refusal)."""
+        (survivor,) = page_tables(data=generate_pdf_table_crop_survivor())
+        assert not survivor.tables_refused
+        assert len(survivor.tables) == 1
+        assert (survivor.geometry.width_pt, survivor.geometry.height_pt) == (440.0, 242.0)
+        _box_near(survivor.tables[0].rows[0].cells[0].bbox, (-10.0, 150.0, 200.0, 100.0))
+        assert survivor.tables[0].rows[0].cells[0].bbox[0] < 0.0, (
+            "the box lies outside the page box: the consumer clips"
+        )
+
+        (vanished,) = page_tables(data=generate_pdf_table_crop_vanished())
+        assert vanished.tables == []
+        assert not vanished.tables_refused, "a vanished table is the engine's answer"
+        assert vanished.geometry is not None
+
+    def test_no_tables_pages_serve_empty_not_refused(self) -> None:
+        """The no-tables law: prose pages (the two-page fixture; the
+        three-line page) and the inline-leader TOC answer `tables: []`
+        with `tables_refused` FALSE — never an error, never a refusal
+        (the detector-limit pins: these two filters are engine
+        heuristics, so the FIXTURE BYTES are pinned, not the rule — all
+        three measured out3; the measured boundary stated in
+        documents.py: a TWO-column TOC shape IS detected by the same
+        engine)."""
+        for fixture in (
+            ENGINES_CORPUS["pdf_two_page"],
+            generate_pdf_table_prose(),
+            generate_pdf_table_toc(),
+        ):
+            for entry in page_tables(data=fixture):
+                assert entry.tables == []
+                assert entry.tables_refused is False
+                assert entry.geometry is not None
+
+    def test_a_multi_table_page_returns_two_tables_bottom_first(self) -> None:
+        """The multi-table pin (measured out4): two ruled grids stacked
+        far apart (disjoint x, a 100pt gap) come back as TWO tables in
+        the engine's own order — the BOTTOM grid first — each a clean 2×2
+        of ruling-rect cells."""
+        (entry,) = page_tables(data=generate_pdf_table_multi())
+        assert not entry.tables_refused
+        assert len(entry.tables) == 2
+        assert [cell.text for cell in entry.tables[0].rows[0].cells] == ["B1", "B2"]
+        _box_near(entry.tables[0].bbox, (350.0, 300.0, 200.0, 200.0))
+        assert [cell.text for cell in entry.tables[1].rows[0].cells] == ["T1", "T2"]
+        _box_near(entry.tables[1].bbox, (100.0, 600.0, 200.0, 200.0))
+
+    def test_the_disjoint_x_vertical_merge_is_bottom_group_first(self) -> None:
+        """A11's merge-path pin (measured out2): two disjoint-x ruled
+        grids with a 20pt gap merge into ONE table whose rows are
+        BOTTOM-GROUP-FIRST (the merge sorts by top-y ascending and
+        appends; the engine never re-sorts after merging), every cell a
+        ruling-rect box. Branch-deterministic, pinned as documented
+        engine behaviour."""
+        (entry,) = page_tables(data=generate_pdf_table_stack_disjoint())
+        assert not entry.tables_refused
+        assert len(entry.tables) == 1
+        table = entry.tables[0]
+        assert table.col_count == 2
+        _box_near(table.bbox, (100.0, 380.0, 450.0, 420.0))
+        assert [len(row.cells) for row in table.rows] == [2, 2, 2, 2]
+        assert [
+            [cell.text for cell in row.cells] for row in table.rows
+        ] == [
+            ["B1", "B2"],
+            ["B3", "B4"],
+            ["T1", "T2"],
+            ["T3", "T4"],
+        ], "bottom group first, measured"
+        _box_near(table.rows[0].cells[0].bbox, (350.0, 480.0, 100.0, 100.0))
+        _box_near(table.rows[2].cells[0].bbox, (100.0, 700.0, 100.0, 100.0))
+
+    def test_the_shared_x_cluster_path_is_top_first_with_none_pads(self) -> None:
+        """A11's cluster-path pin + A13's cluster goldens (measured out2):
+        two SHARED-x grids (2-col over 3-col, gap 20) route to the
+        line-cluster branch — one table, TOP-GROUP-FIRST, has_header TRUE
+        (the cluster branch's second header source), the table bbox the
+        cluster's LINE-EXTENT × ROW-EXTENT (99.75/400.5 — the 0.5pt
+        stroke widths included, NOT the member-span union), and the
+        2-col group's rows padded to the 3-col grid with `"" None`
+        cells."""
+        (entry,) = page_tables(data=generate_pdf_table_cluster_shared_x())
+        assert not entry.tables_refused
+        assert len(entry.tables) == 1
+        table = entry.tables[0]
+        assert table.col_count == 3
+        assert table.has_header is True
+        _box_near(table.bbox, (99.75, 380.0, 400.5, 333.0))
+        assert [[cell.text for cell in row.cells] for row in table.rows] == [
+            ["T1", "T2", ""],
+            ["B1", "B2", "B3"],
+        ], "top group first, measured"
+        assert table.rows[0].cells[2].bbox is None, "the None pad, measured"
+        assert table.rows[0].is_header is True
+        _box_near(table.rows[1].cells[1].bbox, (250.0, 480.0, 14.676, 12.0))
+
+    def test_the_shape_invariants_hold_on_every_served_fixture(self) -> None:
+        """A2's shape invariants, swept over the served fixtures:
+        `col_count` is the grid's column count and a row is never LONGER
+        than it (merges only shorten — the measured pad shape keeps
+        length equality); every cell carries colspan/rowspan ≥ 1. The
+        colspan>1/rowspan>1 merge itself is flagged (spec §6's "fixture
+        still to build"): six fixture shapes aimed at the detector's two
+        merge triggers all either declined detection or came back
+        colspan-1 (probe out5/out6/out7) — the pass-through fields are
+        pinned == 1 so an engine bump that starts merging cannot arrive
+        silently."""
+        served = (
+            generate_pdf_table_ruled(),
+            generate_pdf_table_stack_disjoint(),
+            generate_pdf_table_cluster_shared_x(),
+            generate_pdf_table_text_only(),
+            generate_pdf_table_text_only(rotate=90),
+            generate_pdf_table_sideways_text_only(270),
+            generate_pdf_table_crop_survivor(),
+            generate_pdf_table_symmetric(),
+        )
+        for fixture in served:
+            for entry in page_tables(data=fixture):
+                for table in entry.tables:
+                    assert table.col_count >= 2
+                    assert table.bbox is not None, "Some on every returned table (A2)"
+                    for row in table.rows:
+                        assert len(row.cells) <= table.col_count
+                        for cell in row.cells:
+                            assert cell.colspan >= 1 and cell.rowspan >= 1
+                            assert (cell.colspan, cell.rowspan) == (1, 1), (
+                                "the flagged merge pin: a drift re-opens the fixture question"
+                            )
+
+    def test_above_the_primitive_cap_skips_detection_and_refuses(self) -> None:
+        """The A6 cap: a page with 1502 table primitives (one past the
+        markdown lane's own MAX_TABLE_EDGES bail-out) skips detection —
+        `tables: []`, `tables_refused: true`, GEOMETRY INTACT. The A9
+        reading rule's second half: true at ROTATION 0 names the cap,
+        not frame incoherence."""
+        (entry,) = page_tables(data=generate_pdf_table_cap())
+        assert entry.tables == []
+        assert entry.tables_refused is True
+        assert entry.geometry is not None and entry.geometry.rotation == 0, (
+            "rotation 0 distinguishes the cap from the frame refusals"
+        )
+        assert (entry.geometry.width_pt, entry.geometry.height_pt) == (612.0, 792.0)
+
+    def test_content_failures_are_empty_not_errors_and_not_refusals(self) -> None:
+        """The A6 content-failure law: a page whose content stream fails
+        to decode (the broken-Flate fixture) answers `tables: []` with
+        the geometry INTACT and `tables_refused` FALSE — the failure is
+        UNKNOWABLE (indistinguishable from a no-tables page, by design)."""
+        (entry,) = page_tables(data=generate_pdf_layout_broken_flate())
+        assert entry.geometry is not None
+        assert entry.tables == []
+        assert entry.tables_refused is False
+
+    def test_pages_selection_normalizes_and_carries_page_index(self) -> None:
+        """The pages= law (page_layout's twin): pages=[2, 0] normalizes to
+        document order and every entry carries its page_index; duplicates
+        normalize away; the empty and out-of-range selections raise the
+        byte-pinned markdown_pages error strings."""
+        data = generate_pdf_layout_pages(3)
+        whole = page_tables(data=data)
+        assert [entry.page_index for entry in whole] == [0, 1, 2]
+        assert page_tables(data=data, pages=[2, 1, 0]) == page_tables(data=data, pages=[0, 1, 2])
+        assert page_tables(data=data, pages=[1, 0]) == page_tables(data=data, pages=[0, 1])
+        subset = page_tables(data=data, pages=[2, 0])
+        assert [entry.page_index for entry in subset] == [0, 2]
+        with pytest.raises(ValueError) as raised:
+            page_tables(data=data, pages=[])
+        assert str(raised.value) == "pages= selected no pages: pass None for the whole document"
+        with pytest.raises(ValueError) as raised:
+            page_tables(data=data, pages=[3])
+        assert (
+            str(raised.value)
+            == "page index 3 is out of range for a 3-page document (pages= is 0-based)"
+        )
+
+    def test_the_encrypted_door_precedes_the_pages_validation(self) -> None:
+        """A10's PDF-leg order, pinned: the encrypted door (open)
+        precedes the pages= validation, so an encrypted document with a
+        MALFORMED selection answers the encryption refusal first; the
+        right password lets the range error through; unlocked, the entry
+        serves."""
+        locked = _encrypted_pdf()
+        with pytest.raises(ValueError, match="encrypted and requires a password"):
+            page_tables(data=locked, pages=[99])
+        with pytest.raises(ValueError, match="did not unlock"):
+            page_tables(data=locked, password="not-the-password", pages=[99])
+        entries = page_tables(data=locked, password="torque")
+        assert len(entries) == 1
+        assert entries[0].geometry.width_pt > 0
+        assert entries[0].tables == [] and not entries[0].tables_refused
+
+    def test_page_tables_geometry_is_page_geometry_s_entry(self) -> None:
+        """A5's cross-surface identity pin, extended: ``page_tables(x)[i].
+        geometry`` IS ``page_geometry(x)[i]`` AND ``page_layout(x)[i].
+        geometry`` — structural ``==`` — on the PDF lane (the probe's
+        PageBox through the shared map) and on an office fixture (the
+        office PageGeometry→PageBox back-map: no field drop)."""
+        data = generate_pdf_layout_crop()
+        tables_entry = page_tables(data=data)[0]
+        geometry_entry = page_geometry(data=data)[0]
+        layout_entry = page_layout(data=data)[0]
+        assert tables_entry.geometry == geometry_entry == layout_entry.geometry
+        office = generate_docx_pgsz()
+        tables_office = page_tables(data=office)[0]
+        assert tables_office.geometry == page_geometry(data=office)[0]
+        assert tables_office.geometry == page_layout(data=office)[0].geometry
+
+    def test_the_office_rows_are_the_capability_statement(self) -> None:
+        """The office rows (A9's third false case): the declared geometry
+        with `tables: []` and `tables_refused` FALSE — the per-format
+        capability statement (tables are PDF-only in v1), the entry's
+        `format` field the marker; the no-geometry row answers one
+        geometry-None entry the same way; and the row-count parity with
+        `page_geometry`/`page_layout` holds over the corpus."""
+        (sized,) = page_tables(data=generate_docx_pgsz())
+        assert (sized.geometry.width_pt, sized.geometry.height_pt) == (612.0, 792.0)
+        assert sized.geometry.rotation == 0 and sized.geometry.crop is None
+        assert sized.tables == [] and sized.tables_refused is False
+        assert sized.format == "docx"
+        (flow,) = page_tables(data=ENGINES_CORPUS["html_rich"])
+        assert flow.geometry is None
+        assert flow.tables == [] and flow.tables_refused is False
+        assert flow.format == "html"
+        assert page_tables(data=ENGINES_CORPUS["html_rich"], backend="anydoc") == [flow]
+
+    def test_capability_refusals_are_byte_pinned(self, tmp_path: Path) -> None:
+        """The capability refusal is the geometry table's own — byte-
+        identical to page_geometry's/page_layout's — on the pdf row and
+        the office row, and it precedes the pages=/password-kind/zero
+        refusals."""
+        path = _materialize(tmp_path, "pdf_two_page")
+        with pytest.raises(ValueError) as raised:
+            page_tables(path, backend="anydoc")
+        assert (
+            str(raised.value)
+            == 'backend "anydoc" cannot serve the declared page-box geometry (no per-page box '
+            "surface): anydoc's PDF surface is whole-document conversion only — "
+            "to_markdown/to_text with backend=\"anydoc\" (NeedsOcrError is that lane's "
+            "scanned-page signal); use backend='auto' or 'oxide' here"
+        )
+        docx = _materialize(tmp_path, "docx_rich")
+        with pytest.raises(ValueError) as raised:
+            page_tables(docx, backend="anydoc")
+        assert str(raised.value) == (
+            'backend "anydoc" cannot serve page geometry for docx: anydoc has no '
+            "geometry surface; use backend='auto' or 'oxide' here"
+        )
+        # the refusal precedes the password-kind and zero refusals
+        with pytest.raises(ValueError, match="cannot serve page geometry"):
+            page_tables(data=generate_docx_pgsz(), backend="anydoc", password="torque")
+        with pytest.raises(ValueError, match="cannot serve page geometry"):
+            page_tables(data=generate_docx_pgsz(), backend="anydoc", max_bytes=0)
+        # the password-kind refusal precedes the zero refusal
+        with pytest.raises(ValueError, match="password= applies to PDF documents only"):
+            page_tables(data=generate_docx_pgsz(), password="torque", max_bytes=0)
+        # pages= is PDF-only (page_layout's own typed refusal, byte-pinned)
+        with pytest.raises(ValueError) as raised:
+            page_tables(data=generate_docx_pgsz(), pages=[0])
+        assert str(raised.value) == 'pages= applies to PDF documents only, not "docx"'
+
+    def test_auto_equals_oxide_with_plain_equality(self) -> None:
+        """auto == oxide compared with `==` DIRECTLY — the native
+        pyclasses' Rust-side structural __eq__, lists elementwise (the
+        geometry lane is a property of the format, not a choice, on the
+        tables surface too)."""
+        data = generate_pdf_table_ruled()
+        assert page_tables(data=data) == page_tables(data=data, backend="oxide")
+        docx = generate_docx_pgsz()
+        assert page_tables(data=docx) == page_tables(data=docx, backend="oxide")
+        assert page_tables(data=data) != page_tables(data=generate_pdf_table_text_only())
+
+    def test_the_double_reporting_overlap_is_stated_as_fact(self) -> None:
+        """A3's double-reporting pin, stated as fact: on the ruled
+        fixture `page_layout` STILL returns the four cell texts as spans
+        (the drop is the markdown assembly's consumer filter, not the
+        core) and `page_tables` returns them as cells — the surfaces
+        overlap; neither de-dups the other and there is no identity
+        join. Asserted as the overlap, never a de-dup."""
+        data = generate_pdf_table_ruled()
+        laid = page_layout(data=data)[0]
+        tabled = page_tables(data=data)[0]
+        span_texts = {span.text for span in laid.spans}
+        cell_texts = {cell.text for row in tabled.tables[0].rows for cell in row.cells}
+        assert {"A", "B", "C", "D"} <= span_texts, "page_layout still serves the members"
+        assert {"A", "B", "C", "D"} == cell_texts, "page_tables serves them as cells"
+        assert span_texts & cell_texts == {"A", "B", "C", "D"}, "the overlap, as fact"
+
+    def test_aio_carries_the_tables_lane(self, tmp_path: Path) -> None:
+        """The awaitable spellings (both aio modules) wrap the typed
+        wrapper: the same entries through the thread hop, the same
+        refusals."""
+        from tors_documents import aio as payload_aio
+
+        from tors.documents import aio as shim_aio
+
+        path = tmp_path / "tables_aio.pdf"
+        path.write_bytes(generate_pdf_table_ruled())
+        expected = page_tables(str(path))
+        for aio_module in (payload_aio, shim_aio):
+            assert asyncio.run(aio_module.page_tables(str(path))) == expected
+            assert asyncio.run(aio_module.page_tables(str(path), backend="oxide")) == expected
+            with pytest.raises(ValueError, match="cannot serve the declared page-box geometry"):
+                asyncio.run(aio_module.page_tables(str(path), backend="anydoc"))
+            with pytest.raises(ValueError, match="ceiling"):
+                asyncio.run(aio_module.page_tables(str(path), max_bytes=1))
+
+    def test_concurrent_tables_calls_are_identical(self) -> None:
+        """The concurrency identity on the tables surface: 8 threads over
+        the same bytes, every answer equal to the single-threaded one."""
+        data = generate_pdf_table_ruled()
+        expected = page_tables(data=data)
+        results: list[object] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(8)
+
+        def worker() -> None:
+            try:
+                barrier.wait()
+                results.append(page_tables(data=data))
+            except BaseException as exc:  # noqa: BLE001 -- recorded, asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert all(result == expected for result in results)
+
+    def test_office_row_count_parity_over_the_corpus(self) -> None:
+        """A5's office row-count parity: over the corpus's office and
+        single-flow kinds, page_tables' entry count equals
+        page_geometry's equals page_layout's — one geometry lane, three
+        surfaces."""
+        for kind in ("docx_rich", "docm_rich", "pptx_rich", "xlsx", "xlsm", "csv_rich", "rtf"):
+            data = ENGINES_CORPUS[kind]
+            if kind in _REFUSES_ON_THE_GEOMETRY_LANE:
+                continue
+            tables_entries = page_tables(data=data)
+            assert len(tables_entries) == len(page_geometry(data=data)), kind
+            assert len(tables_entries) == len(page_layout(data=data)), kind
+            assert {entry.format for entry in tables_entries} == {_FORMAT_NAMES[kind]}, kind
+
+    @pytest.mark.timing
+    def test_page_tables_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+        self, tmp_path: Path
+    ) -> None:
+        """The GIL cell, tables side: the post-detach marshalling is
+        O(pages) entry construction and the getter access is O(pages ×
+        tables × cells) nested construction (read through every getter,
+        the realistic consumer). The fixture: the cap-adjacent ruled page
+        × 300 pages (the native walk makes the call's wall several
+        heartbeat ticks, the sibling cells' regime), and the whole
+        read+parse pass must keep the 10ms heartbeat alive in a to_thread
+        wrap."""
+        from test_gil_release import _assert_loop_stays_responsive
+
+        builder = generate_pdf_table_pages(2000)
+        path = tmp_path / "tables_2000x.pdf"
+        path.write_bytes(builder)
+        entries = page_tables(data=builder)
+        assert len(entries) == 2000
+        assert all(len(entry.tables) == 1 for entry in entries)
+
+        def op() -> None:
+            for entry in page_tables(str(path)):
+                # the nested marshalling: every table, row, and cell, every
+                # entry — the O(pages × tables × cells) construction
+                _ = entry.geometry.rotation
+                for table in entry.tables:
+                    _ = (table.col_count, table.has_header, table.bbox)
+                    for row in table.rows:
+                        _ = row.is_header
+                        for cell in row.cells:
+                            _ = (cell.text, cell.bbox, cell.colspan, cell.rowspan)
+
+        asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
+
+
+    def test_the_docstring_carries_the_space_law_the_marker_and_the_warning(self) -> None:
+        """The tables surface's docstring laws, both layers: the NATIVE
+        function's docstring (tors_documents._tors_documents) carries the
+        full contract — the coordinate-space law, the tables_refused
+        reading rule with the edge cap's number, the geometry-not-
+        ownership law, the markdown divergence, the double-reporting
+        overlap — and the typed WRAPPER's carries the caller-facing law
+        and the ⚠ sandbox warning; the box-bearing getters carry the
+        unclipped/clip law; the data classes' own docstrings stay law-only
+        (the warning is the FUNCTION's per-call contract)."""
+        import re
+
+        from tors_documents import _tors_documents as native
+
+        def states(doc: str | None, law: str) -> bool:
+            return re.sub(r"\s+", " ", doc or "").find(re.sub(r"\s+", " ", law)) >= 0
+
+        native_doc = native.page_tables.__doc__
+        assert states(native_doc, "sandbox untrusted PDFs")
+        assert states(native_doc, "bottom-left origin")
+        assert states(native_doc, "unclipped")
+        assert states(native_doc, "tables_refused")
+        assert "1500" in (native_doc or ""), "the edge cap names its number"
+        assert states(native_doc, "GEOMETRY, not ownership"), (
+            "the geometry-not-ownership law is the native docstring's"
+        )
+        assert states(native_doc, "renders a different"), (
+            "the markdown divergence is stated on the surface"
+        )
+        assert states(native_doc, "neither de-dups the other"), (
+            "the double-reporting overlap is stated on the surface"
+        )
+        # the typed wrapper: the caller-facing law + the warning
+        assert states(page_tables.__doc__, "sandbox untrusted PDFs")
+        assert states(page_tables.__doc__, "unclipped")
+        assert states(page_tables.__doc__, "tables_refused")
+        # the box-bearing getters carry the unclipped/clip law
+        for getter in (Table.bbox, Cell.bbox):
+            doc = re.sub(r"\s+", " ", getter.__doc__ or "")
+            assert "unclipped" in doc and "consumer's clip" in doc, getter
+            assert "GEOMETRY, not ownership" in doc or "NOT the table's ink extent" in doc, getter
+        # the data classes' own docstrings carry no warning of their own
+        for klass in (PageTables, Table, Row, Cell):
+            assert "sandbox untrusted PDFs" not in (klass.__doc__ or ""), (
+                "the ⚠ warning is the FUNCTION's (per-call), not the data classes'"
+            )
+
+
 class TestLayoutClassContracts:
     """The five layout classes' surface pins (§9 item 13 + D6's field
     bar): each class's getter set is EXACTLY the §5/D6 field list
@@ -3222,6 +3842,10 @@ class TestLayoutClassContracts:
             (TextLine, ["text", "bbox", "words"]),
             (Word, ["text", "bbox"]),
             (ImageBox, ["bbox", "width_px", "height_px", "rotation_degrees", "paint_order"]),
+            (PageTables, ["page_index", "format", "geometry", "tables", "tables_refused"]),
+            (Table, ["rows", "has_header", "col_count", "bbox"]),
+            (Row, ["cells", "is_header"]),
+            (Cell, ["text", "bbox", "colspan", "rowspan"]),
         ],
     )
     def test_the_getter_set_is_exactly_the_field_list_and_read_only(
@@ -3235,17 +3859,23 @@ class TestLayoutClassContracts:
             (klass.__name__, sorted(vars(klass)))
         )
         # read-only, on a live instance (the ImageBox from an image-bearing
-        # fixture — the baseline page carries none). pyo3's getters are the
-        # native type's own descriptors (not `property` objects); the
-        # read-only half is the setattr refusal.
+        # fixture — the baseline page carries none; the tables classes from
+        # the ruled fixture). pyo3's getters are the native type's own
+        # descriptors (not `property` objects); the read-only half is the
+        # setattr refusal.
         page = page_layout(data=generate_pdf_layout_baseline())[0]
         image_page = page_layout(data=generate_pdf_layout_image())[0]
+        tabled = page_tables(data=generate_pdf_table_ruled())[0]
         samples: dict[type, object] = {
             PageLayout: page,
             TextSpan: page.spans[0],
             TextLine: page.lines[0],
             Word: page.lines[0].words[0],
             ImageBox: image_page.images[0],
+            PageTables: tabled,
+            Table: tabled.tables[0],
+            Row: tabled.tables[0].rows[0],
+            Cell: tabled.tables[0].rows[0].cells[0],
         }
         live = samples[klass]
         for field in fields:
@@ -3265,12 +3895,30 @@ class TestLayoutClassContracts:
         assert page.lines[0].words[0] == same.lines[0].words[0]
         assert page.geometry == same.geometry
         assert page is not same
+        # the tables classes: the same structural equality, nested
+        tables_entry = page_tables(data=generate_pdf_table_ruled())[0]
+        tables_same = page_tables(data=generate_pdf_table_ruled())[0]
+        assert tables_entry == tables_same
+        assert tables_entry.tables[0] == tables_same.tables[0]
+        assert tables_entry.tables[0].rows[0] == tables_same.tables[0].rows[0]
+        assert tables_entry.tables[0].rows[0].cells[0] == tables_same.tables[0].rows[0].cells[0]
+        assert tables_entry.geometry == tables_same.geometry
         # repr: the class name and no crash
         for value in (page, page.spans[0], page.lines[0], page.lines[0].words[0], page.geometry):
+            assert type(value).__name__ in repr(value)
+        for value in (
+            tables_entry,
+            tables_entry.tables[0],
+            tables_entry.tables[0].rows[0],
+            tables_entry.tables[0].rows[0].cells[0],
+        ):
             assert type(value).__name__ in repr(value)
         # the format marker rides the repr (the provenance is surface, not
         # a hidden field)
         assert 'format="pdf"' in repr(page), repr(page)
+        assert 'format="pdf"' in repr(tables_entry), repr(tables_entry)
+        # the refused marker rides the repr too
+        assert "tables_refused=False" in repr(tables_entry), repr(tables_entry)
 
 
 # --- the anydoc input ceiling (max_bytes=) ---------------------------------------

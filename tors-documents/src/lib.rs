@@ -27,6 +27,11 @@
 //!   PDF pages, text spans/lines (words nested) and image boxes, all in
 //!   the page's declared render space, one transform owned here, one
 //!   open per call (`pages=` subsets like the conversion pair)
+//! - [`page_tables`]: the per-cell table-box probe — geometry plus, for
+//!   PDF pages, the spatial detector's tables with per-cell text and
+//!   boxes in the same render space (`pages=` subsets; office rows serve
+//!   geometry only — tables are PDF-only in v1), with the frame-coherence
+//!   gate's refused marker (`tables_refused`) on every entry
 //!
 //! GIL model (the crate-wide discipline, applied per function): the
 //! argument borrow of the path string plus argument validation happen
@@ -1316,6 +1321,478 @@ impl PageLayout {
             spans,
             lines,
             images
+        )
+    }
+}
+
+/// `tors.documents.page_tables(path, data=None, format=None, password=None,
+/// backend=None, pages=None, max_bytes=None) -> list[PageTables]` (or
+/// `page_tables(data=...)`): the per-cell table-box probe — one entry per
+/// selected page, the page's detected tables with per-cell text and boxes,
+/// all in the page's declared render space. Builds on #203 (`page_layout`):
+/// the SAME render space, the SAME transform, the SAME spine.
+///
+/// The boxes: every `Some` bbox rides the one forward rule
+/// (`map_box_forward` — translate to the visible box, rotate, swap), the
+/// same frame `page_geometry` declares and `page_layout` maps into:
+/// points, the bottom-left origin of the page's declared render space,
+/// y-up. Engine-premapped boxes (the span-union branches on a mapped
+/// page) are inverse-mapped first, exactly as `page_layout` treats its
+/// spans. Boxes are unclipped — cell boxes may lie outside the page box
+/// (ruling lines are not crop-filtered; the TEXT side is, so a grid can
+/// also lose enough cells to vanish) — the page box is the consumer's
+/// clip. `Table.bbox` is the engine's own union (Some on every returned
+/// table; not the table's ink extent — it includes empty grid cells); a
+/// cell's box is the engine's box for that cell and its regime is
+/// per-branch (intersection: ruling rectangles, always Some, empty cells
+/// included; cluster/band/text: span unions, None when empty; a vertical
+/// merge pads merged rows with None cells) — and it is GEOMETRY, not
+/// ownership: an empty cell's box is declared grid geometry, not a claim
+/// on the text inside it.
+///
+/// `tables_refused` (A9): TRUE iff the surface deliberately declined to
+/// serve a page whose inputs indicate possible table content — the
+/// frame-incoherent `/Rotate` classes or the table-primitive edge cap.
+/// Reading rule: `tables_refused: true` with `geometry.rotation != 0` →
+/// frame incoherence (`/Rotate` and the drawn content disagree — notably
+/// /Rotate 180 with ruled tables, where the detector compares text in one
+/// frame against rulings in another); `true` at rotation 0 → the edge
+/// cap (a page with more table primitives than the markdown lane's own
+/// 1500-edge bail-out; detection skipped). FALSE for no-tables pages,
+/// for content-stream failures (unknowable — `tables: []` stays
+/// indistinguishable from a no-tables page, like `page_layout`'s empty
+/// lists), and on office rows (there `tables: []` is the per-format
+/// capability statement — tables are PDF-only in v1 — and the entry's
+/// `format` field is the marker, `tables_refused` false: not a per-page
+/// content judgment).
+///
+/// The frame-coherence gate (A1): the detector's inputs live in two
+/// frames — text spans inherit the engine's page-rotation mapping, ruling
+/// paths never do — and three page classes are coherent (served exactly):
+/// rotation 0; 90/270 with NO engine-mapped span (upright text); a
+/// pathless page whose every span is engine-mapped (unmap → forward).
+/// Every other combination — /Rotate 180 with rulings (a ruled table
+/// vanishes upstream; a 180-symmetric one comes back 180°-SWAPPED, the
+/// measured qualitative failure), 90/270 with sideways text under rulings,
+/// mixed mapped/raw spans — refuses: `tables: []`, `tables_refused: true`,
+/// geometry intact (fail-closed: the unlisted combinations refuse too).
+///
+/// Two documented divergences a consumer must read before joining
+/// surfaces: the table set is the PUBLIC spatial detector's answer
+/// (spatial-only, unconsolidated) — `to_markdown` renders a different,
+/// private pipeline (structure-tree-first for tagged PDFs, fragment
+/// consolidation, the RTL guard, the edge cap, the relaxed wide-table
+/// retry), so the sets can differ on ANY PDF; and content inside a
+/// detected table's area may appear in BOTH this surface and
+/// `page_layout` (the latter serves `extract_spans`, which returns table
+/// members) — neither de-dups the other, there is no identity join, and
+/// cell bboxes must NOT be used to subtract from `page_layout`'s output.
+///
+/// The spine, capability table, refusal order, `backend=`/`format=`/
+/// `password=`/`max_bytes=` contracts, the unit table, and the `pages=`
+/// semantics are `page_layout`'s exactly (A8): same capability refusal
+/// (byte-identical), `pages=` PDF-only and normalized with the same
+/// byte-pinned error strings, output parallel to the NORMALIZED selection
+/// with `page_index` on every entry, the office leg's 32 MiB ceiling
+/// binding even though `tables` is always `[]` there, and the encrypted
+/// door preceding the `pages=` validation on the PDF lane (A10: an
+/// encrypted document with a malformed selection answers the encryption).
+/// A10's door-first order also means `max_bytes` is inert on the PDF lane
+/// except the zero-value refusal (pdf_oxide's own limits govern there).
+///
+/// GIL model: page_layout's shape — argument marshalling under the GIL,
+/// the capability refusal (on `backend="anydoc"`) under the GIL before
+/// the detach, the whole read+resolve+tables pass under one `py.detach`,
+/// then the O(pages) entry construction (the nested tables are the
+/// getters', on access, post-detach). ⚠ A malformed PDF can crash the
+/// process (uncatchable native stack exhaustion in the pdf_oxide engine):
+/// sandbox untrusted PDFs (docs/documents.md, SECURITY.md).
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    format = None,
+    password = None,
+    backend = None,
+    pages = None,
+    max_bytes = None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn page_tables(
+    py: Python<'_>,
+    path: Option<&Bound<'_, PyAny>>,
+    data: Option<&Bound<'_, PyAny>>,
+    format: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    pages: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PageTables>> {
+    let source = parse_source(path, data, "page_tables")?;
+    let format = parse_format(format)?;
+    let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    // The capability refusal fires HERE — the geometry capability table's
+    // own refusal, byte-identical to page_geometry's/page_layout's (one
+    // table, one message), under the GIL, before the detach and before
+    // any byte of the document is read.
+    if backend == Backend::Anydoc
+        && let Some(refusal) = probe_capability_refusal(&source, format, backend)
+    {
+        return Err(document_error(py, refusal)?);
+    }
+    // The zero value threads through (see `parse_max_bytes_on`): the
+    // core's sequenced check is this surface's zero refusal.
+    let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    let pages = parse_pages(pages)?;
+    let entries = match py.detach(move || {
+        let (bytes, hint) = source
+            .into_geometry_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
+        documents_impl::page_tables(
+            bytes,
+            hint.as_deref(),
+            format,
+            backend,
+            pages,
+            &documents_impl::ConvertOptions {
+                password: password.as_deref(),
+                max_bytes,
+            },
+        )
+    }) {
+        Ok(entries) => entries,
+        Err(err) => return Err(document_error(py, err)?),
+    };
+    // O(pages) of pyclass construction here (one PageTables per entry);
+    // the O(pages × tables × cells) nested construction is the getters',
+    // on access, post-detach — the residue class the GIL heartbeat cell
+    // exercises through every field.
+    Ok(entries
+        .into_iter()
+        .map(|inner| PageTables { inner })
+        .collect())
+}
+
+/// The tables classes' shared repr shapes: each class's own Python shape,
+/// never the Rust Debug of the inner structs (page_layout's repr law).
+fn tables_box_repr(bbox: Option<(f32, f32, f32, f32)>) -> String {
+    match bbox {
+        Some(box_) => format!("{box_:?}"),
+        None => "None".to_string(),
+    }
+}
+
+fn tables_cell_repr(cell: &tors::pdf_impl::Cell) -> String {
+    format!(
+        "Cell(text={:?}, bbox={}, colspan={}, rowspan={})",
+        cell.text,
+        tables_box_repr(cell.bbox),
+        cell.colspan,
+        cell.rowspan
+    )
+}
+
+fn tables_row_repr(row: &tors::pdf_impl::Row) -> String {
+    // the cells as their own class's repr — the Row getter's element shape
+    let cells = row
+        .cells
+        .iter()
+        .map(tables_cell_repr)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Row(cells=[{}], is_header={})",
+        cells,
+        if row.is_header { "True" } else { "False" }
+    )
+}
+
+fn tables_table_repr(table: &tors::pdf_impl::TableEntry) -> String {
+    let rows = table
+        .rows
+        .iter()
+        .map(tables_row_repr)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Table(rows=[{}], has_header={}, col_count={}, bbox={})",
+        rows,
+        if table.has_header { "True" } else { "False" },
+        table.col_count,
+        tables_box_repr(table.bbox)
+    )
+}
+
+/// One cell in a [`Table`]
+/// (`PageTables.tables[].rows[].cells[]`): the cell's text, its box, and
+/// the merge spans.
+///
+/// Exposed DIRECTLY (no Python wrapper view) — the `PageGeometry`
+/// deviation note applies to all four tables classes; `==` is structural.
+#[pyclass]
+pub struct Cell {
+    inner: tors::pdf_impl::Cell,
+}
+
+#[pymethods]
+impl Cell {
+    /// The cell's text (verbatim; an empty cell is `""`).
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// The cell's box, `(x, y, w, h)`: points, bottom-left origin of the
+    /// page's render space, y-up. Its regime is the engine's, per branch
+    /// (never re-normalized here): intersection-branch cells are RULING
+    /// rectangles (always Some, empty cells included); cluster/band/text
+    /// cells are span unions (None when empty); a vertical merge pads
+    /// merged rows with None cells inside an otherwise ruling-rect table.
+    /// GEOMETRY, not ownership: an empty cell's box is declared grid
+    /// geometry, not a claim on the text inside it — do not subtract cell
+    /// boxes from other surfaces' text. Boxes are unclipped — a cell box
+    /// may lie outside the page box (ruling lines are not crop-filtered;
+    /// the TEXT side is, so a grid can lose enough cells to vanish) —
+    /// the page box is the consumer's clip, and "cell box present" is
+    /// never "cell is visible". Coordinates are single-precision f32;
+    /// expect ~1e-4 pt quantization.
+    #[getter]
+    fn bbox(&self) -> Option<(f32, f32, f32, f32)> {
+        self.inner.bbox
+    }
+
+    /// The column span (the engine's; 1 unless a merge covers this cell).
+    #[getter]
+    fn colspan(&self) -> u32 {
+        self.inner.colspan
+    }
+
+    /// The row span (the engine's; 1 unless a merge covers this cell).
+    #[getter]
+    fn rowspan(&self) -> u32 {
+        self.inner.rowspan
+    }
+
+    /// Structural equality (all four fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        tables_cell_repr(&self.inner)
+    }
+}
+
+/// One row in a [`Table`]: the row's cells and the engine's own header
+/// verdict.
+#[pyclass]
+pub struct Row {
+    inner: tors::pdf_impl::Row,
+}
+
+#[pymethods]
+impl Row {
+    /// The row's cells, grid order. `len` may be LESS than the table's
+    /// `col_count` when a colspan/rowspan merge covers cells (the
+    /// cluster-branch merge): lay cells out by walking `colspan`, never
+    /// by `cells[i]`-as-column-i.
+    #[getter]
+    fn cells(&self) -> Vec<Cell> {
+        self.inner
+            .cells
+            .iter()
+            .map(|c| Cell { inner: c.clone() })
+            .collect()
+    }
+
+    /// Whether the engine judged this row a header row (boldness/
+    /// font-size heuristics; ALWAYS false on the intersection branch —
+    /// the pinned engine limitation).
+    #[getter]
+    fn is_header(&self) -> bool {
+        self.inner.is_header
+    }
+
+    /// Structural equality (both fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        tables_row_repr(&self.inner)
+    }
+}
+
+/// One detected table in a [`PageTables`] entry: the engine's grid.
+#[pyclass]
+pub struct Table {
+    inner: tors::pdf_impl::TableEntry,
+}
+
+#[pymethods]
+impl Table {
+    /// The grid's rows, the engine's order (branch-deterministic, never
+    /// re-sorted here: a vertical merge emits its merged groups
+    /// bottom-group-first, the cluster path top-first).
+    #[getter]
+    fn rows(&self) -> Vec<Row> {
+        self.inner
+            .rows
+            .iter()
+            .map(|r| Row { inner: r.clone() })
+            .collect()
+    }
+
+    /// Whether the engine found a header section (boldness/font-size
+    /// heuristics; ALWAYS false on the intersection branch — the pinned
+    /// engine limitation).
+    #[getter]
+    fn has_header(&self) -> bool {
+        self.inner.has_header
+    }
+
+    /// The engine's grid column count. Rows may be shorter under merges
+    /// (see `Row.cells`): a consumer lays cells out by walking
+    /// `colspan`, never by `cells[i]`-as-column-i.
+    #[getter]
+    fn col_count(&self) -> usize {
+        self.inner.col_count
+    }
+
+    /// The table's box, `(x, y, w, h)`: points, bottom-left origin of the
+    /// page's render space, y-up — the ENGINE's own union (cell boxes on
+    /// the intersection branch, member spans on the other branches, the
+    /// cluster grid's line-extent × row-extent, the two prior boxes after
+    /// a vertical merge), never re-derived from the cells here. Some on
+    /// every table the engine returns; NOT the table's ink extent — it
+    /// includes empty grid cells. The box is unclipped: it can lie
+    /// outside the page box, and the page box is the consumer's clip.
+    /// Coordinates are single-precision f32; expect ~1e-4 pt quantization.
+    #[getter]
+    fn bbox(&self) -> Option<(f32, f32, f32, f32)> {
+        self.inner.bbox
+    }
+
+    /// Structural equality (all four fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        tables_table_repr(&self.inner)
+    }
+}
+
+/// One `page_tables` entry: the page's geometry plus its detected tables,
+/// per-cell boxes in the page's render space.
+///
+/// Provenance rides ON the entry (page_layout's law): `format` is the
+/// resolved format's vocabulary name, and it — not the entry's shape —
+/// tells you why `tables` may be empty. On an OFFICE row `tables: []` is
+/// the per-format capability statement (tables are PDF-only in v1: the
+/// office engines' tables carry no coordinates), so `format` marks
+/// "unsupported here", not "no tables", and `tables_refused` is FALSE
+/// there (not a per-page content judgment). On the pdf lane
+/// `tables: []` with `tables_refused: false` means "no tables / content
+/// unreadable" (deliberately indistinguishable); `tables_refused: true`
+/// means THIS SURFACE declined the page — see the getter.
+///
+/// Exposed DIRECTLY (the `PageGeometry` deviation note applies); `==` is
+/// structural (the five fields).
+#[pyclass]
+pub struct PageTables {
+    inner: tors::pdf_impl::PageTablesData,
+}
+
+#[pymethods]
+impl PageTables {
+    /// The 0-based page this entry describes — mandatory on every entry,
+    /// because the `pages=` normalization reorders.
+    #[getter]
+    fn page_index(&self) -> usize {
+        self.inner.page_index
+    }
+
+    /// The resolved format's vocabulary name (`to_markdown`'s spelling):
+    /// the entry's provenance marker — on an office row it is what marks
+    /// `tables: []` as "unsupported here" rather than "no tables".
+    #[getter]
+    fn format(&self) -> &str {
+        &self.inner.format
+    }
+
+    /// The page's declared render box (the `page_geometry` entry): `None`
+    /// where the page's box cannot be read or declares no positive extent
+    /// — then `tables` is empty too (no frame to map into). THE READING
+    /// RULE for refusals: `tables_refused` with `geometry.rotation != 0`
+    /// is frame incoherence (`/Rotate` vs the drawn content); `true` at
+    /// rotation 0 is the edge cap.
+    #[getter]
+    fn geometry(&self) -> Option<PageGeometry> {
+        self.inner.geometry.map(|box_| PageGeometry {
+            inner: documents_impl::PageGeometry::from_page_box(box_),
+        })
+    }
+
+    /// The page's detected tables (PDF pages only; office units carry
+    /// empty lists — tables are PDF-only in v1, the entry's `format`
+    /// field is the marker; a no-tables or content-failed PDF page is
+    /// the same empty shape with `tables_refused` false).
+    #[getter]
+    fn tables(&self) -> Vec<Table> {
+        self.inner
+            .tables
+            .iter()
+            .map(|t| Table { inner: t.clone() })
+            .collect()
+    }
+
+    /// TRUE iff this surface deliberately declined to serve a page whose
+    /// inputs indicate possible table content: the frame-incoherent
+    /// `/Rotate` classes (the detector's text and ruling inputs disagree
+    /// about the frame there — notably /Rotate 180 with ruled tables) or
+    /// the table-primitive edge cap (a page with more than the markdown
+    /// lane's own 1500-primitive bail-out). FALSE for no-tables pages,
+    /// for content-stream failures (unknowable — `tables: []` stays
+    /// indistinguishable from a no-tables page by design), and on office
+    /// rows (their marker is `format`). Reading rule: `true` +
+    /// `geometry.rotation != 0` → frame incoherence; `true` at rotation
+    /// 0 → the edge cap.
+    #[getter]
+    fn tables_refused(&self) -> bool {
+        self.inner.tables_refused
+    }
+
+    /// Structural equality (all five fields).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        // each list formatted via its class's own Python shape — never
+        // the Rust Debug of the inner structs (page_layout's repr law)
+        let tables = self
+            .inner
+            .tables
+            .iter()
+            .map(tables_table_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "PageTables(page_index={}, format={:?}, geometry={}, tables=[{}], tables_refused={})",
+            self.inner.page_index,
+            self.inner.format,
+            match &self.inner.geometry {
+                Some(box_) =>
+                    page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
+                None => "None".to_string(),
+            },
+            tables,
+            if self.inner.tables_refused {
+                "True"
+            } else {
+                "False"
+            }
         )
     }
 }
@@ -2720,8 +3197,13 @@ fn _tors_documents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TextLine>()?;
     m.add_class::<Word>()?;
     m.add_class::<ImageBox>()?;
+    m.add_class::<PageTables>()?;
+    m.add_class::<Table>()?;
+    m.add_class::<Row>()?;
+    m.add_class::<Cell>()?;
     m.add_function(wrap_pyfunction!(page_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(page_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(page_tables, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_classify, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_extract, m)?)?;
     m.add_function(wrap_pyfunction!(pdf_link_uris, m)?)?;

@@ -307,6 +307,135 @@ class ImageBox:
         """Page-local identity/z-order: the image's index among the
         page's painted images, in content-stream order."""
 
+class PageTables:
+    """One ``page_tables`` entry: the page's geometry plus its detected
+    tables, per-cell boxes in the page's declared render space — the
+    native pyclass exposed directly (the ``PageGeometry`` deviation note
+    applies to all four tables classes); ``==`` is structural (the five
+    fields). Provenance rides on the entry: ``format`` is the resolved
+    format's vocabulary name, and it — not the entry's shape — tells you
+    why ``tables`` may be empty: on an OFFICE row ``tables: []`` is the
+    per-format capability statement (tables are PDF-only in v1), so
+    ``format`` marks "unsupported here", not "no tables"; on the pdf
+    lane ``tables: []`` with ``tables_refused`` false means "no tables /
+    content unreadable" (deliberately indistinguishable)."""
+    @property
+    def page_index(self) -> int:
+        """The 0-based page this entry describes — mandatory on every
+        entry: the ``pages=`` normalization reorders."""
+    @property
+    def format(self) -> str:
+        """The resolved format's vocabulary name (the ``to_markdown``
+        spelling, the container-aware ``xls``/``xlsx`` case included):
+        the entry's provenance marker — on an office row it is what
+        marks ``tables: []`` as "unsupported here" rather than "no
+        tables". Every entry of one call carries the same name."""
+    @property
+    def geometry(self) -> PageGeometry | None:
+        """The page's declared render box (the ``page_geometry`` entry):
+        ``None`` where the page's box cannot be read or declares no
+        positive extent — then ``tables`` is empty too (no frame to map
+        into). THE READING RULE for refusals: ``tables_refused`` with
+        ``geometry.rotation != 0`` is frame incoherence (``/Rotate`` vs
+        the drawn content); ``true`` at rotation 0 is the edge cap."""
+    @property
+    def tables(self) -> list[Table]:
+        """The page's detected tables (PDF pages only; office units carry
+        empty lists — tables are PDF-only in v1, the entry's ``format``
+        field is the marker; a no-tables or content-failed PDF page is
+        the same empty shape with ``tables_refused`` false)."""
+    @property
+    def tables_refused(self) -> bool:
+        """TRUE iff this surface deliberately declined to serve a page
+        whose inputs indicate possible table content: the
+        frame-incoherent ``/Rotate`` classes (the detector's text and
+        ruling inputs disagree about the frame there — notably /Rotate
+        180 with ruled tables) or the table-primitive edge cap (a page
+        with more than the markdown lane's own 1500-primitive bail-out).
+        FALSE for no-tables pages, for content-stream failures
+        (unknowable — ``tables: []`` stays indistinguishable from a
+        no-tables page by design), and on office rows (their marker is
+        ``format``). Reading rule: ``true`` + ``geometry.rotation != 0``
+        → frame incoherence; ``true`` at rotation 0 → the edge cap."""
+
+class Table:
+    """One detected table (``PageTables.tables[]``): the engine's grid;
+    ``==`` is structural (the four fields)."""
+    @property
+    def rows(self) -> list[Row]:
+        """The grid's rows, the engine's order (branch-deterministic,
+        never re-sorted: a vertical merge emits its merged groups
+        bottom-group-first, the cluster path top-first)."""
+    @property
+    def has_header(self) -> bool:
+        """Whether the engine found a header section (boldness/font-size
+        heuristics; ALWAYS false on the intersection branch — the pinned
+        engine limitation)."""
+    @property
+    def col_count(self) -> int:
+        """The engine's grid column count. Rows may be shorter under
+        merges (see ``Row.cells``): a consumer lays cells out by walking
+        ``colspan``, never by ``cells[i]``-as-column-i."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float] | None:
+        """The table's box, ``(x, y, w, h)``: points, bottom-left origin
+        of the page's render space, y-up — the ENGINE's own union (cell
+        boxes on the intersection branch, member spans on the other
+        branches, the cluster grid's line-extent × row-extent, the two
+        prior boxes after a vertical merge), never re-derived from the
+        cells here. Some on every table the engine returns; NOT the
+        table's ink extent — it includes empty grid cells. The box is
+        unclipped: it can lie outside the page box, and the page box is
+        the consumer's clip. Coordinates are single-precision f32;
+        expect ~1e-4 pt quantization."""
+
+class Row:
+    """One row in a ``Table`` (``Table.rows[]``); ``==`` is structural
+    (both fields)."""
+    @property
+    def cells(self) -> list[Cell]:
+        """The row's cells, grid order. ``len`` may be LESS than the
+        table's ``col_count`` when a colspan/rowspan merge covers cells
+        (the cluster-branch merge): lay cells out by walking
+        ``colspan``, never by ``cells[i]``-as-column-i."""
+    @property
+    def is_header(self) -> bool:
+        """Whether the engine judged this row a header row
+        (boldness/font-size heuristics; ALWAYS false on the intersection
+        branch — the pinned engine limitation)."""
+
+class Cell:
+    """One cell in a ``Row`` (``Row.cells[]``): the cell's text, its
+    box, and the merge spans; ``==`` is structural (the four fields)."""
+    @property
+    def text(self) -> str:
+        """The cell's text (verbatim; an empty cell is ``""``)."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float] | None:
+        """The cell's box, ``(x, y, w, h)``: points, bottom-left origin
+        of the page's render space, y-up. Its regime is the engine's,
+        per branch (never re-normalized): intersection-branch cells are
+        RULING rectangles (always Some, empty cells included);
+        cluster/band/text cells are span unions (None when empty); a
+        vertical merge pads merged rows with None cells inside an
+        otherwise ruling-rect table. GEOMETRY, not ownership: an empty
+        cell's box is declared grid geometry, not a claim on the text
+        inside it — do not subtract cell boxes from other surfaces'
+        text. Boxes are unclipped — a cell box may lie outside the page
+        box (ruling lines are not crop-filtered; the TEXT side is, so a
+        grid can lose enough cells to vanish) — the page box is the
+        consumer's clip, and "cell box present" is never "cell is
+        visible". Coordinates are single-precision f32; expect ~1e-4 pt
+        quantization."""
+    @property
+    def colspan(self) -> int:
+        """The column span (the engine's; 1 unless a merge covers this
+        cell)."""
+    @property
+    def rowspan(self) -> int:
+        """The row span (the engine's; 1 unless a merge covers this
+        cell)."""
+
 def to_markdown(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
@@ -498,3 +627,46 @@ def page_layout(
     office leg. Runs GIL-free. ⚠ A malformed PDF can crash the process
     (uncatchable native stack exhaustion in the pdf_oxide engine):
     sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
+
+def page_tables(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = ...,
+    password: str | None = None,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = None,
+) -> list[PageTables]:
+    """The per-cell table-box probe: per unit of the resolved format's
+    geometry lane, the unit's geometry plus — PDF pages only — the
+    page's detected tables with per-cell text and boxes, all in the
+    page's declared render space (the same frame ``page_layout`` maps:
+    points, bottom-left origin, y-up; /Rotate applied; one transform
+    owned by the library; boxes are unclipped — a cell box may lie
+    outside the page box, the consumer clips). ``Table.bbox`` is the
+    engine's own union (Some on every returned table; not the ink
+    extent); a cell's box regime is per-branch (intersection: ruling
+    rectangles, always Some; cluster/band/text: span unions, None when
+    empty; a vertical merge pads with None cells) and is GEOMETRY, not
+    ownership — do not subtract cell boxes from other surfaces' text.
+    The entry's ``tables_refused`` flag: TRUE iff the surface
+    deliberately declined a page whose inputs indicate possible table
+    content — the frame-incoherent ``/Rotate`` classes
+    (``geometry.rotation != 0`` names them) or the table-primitive edge
+    cap (rotation 0); FALSE for no-tables pages, content failures
+    (unknowable, indistinguishable from no-tables), and office rows
+    (tables are PDF-only in v1: an office row's ``tables: []`` is the
+    per-format capability statement, the entry's ``format`` field the
+    marker). The table set is the public spatial detector's answer —
+    ``to_markdown`` renders a different (private, consolidating)
+    pipeline, so the sets can differ on any PDF; and content inside a
+    detected table's area may appear in BOTH this surface and
+    ``page_layout`` (no de-dup, no identity join, no subtraction by
+    cell bbox). The spine, ``pages=`` (PDF-only, byte-pinned errors,
+    output parallel to the NORMALIZED selection with ``page_index`` on
+    every entry), ``backend=``/``password=``/``max_bytes=`` and the
+    refusal order are ``page_layout``'s exactly (the encrypted door
+    precedes the ``pages=`` validation). Runs GIL-free. ⚠ A malformed
+    PDF can crash the process (uncatchable native stack exhaustion in
+    the pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
+    SECURITY.md)."""

@@ -1687,6 +1687,314 @@ def generate_pdf_layout_dangling_contents() -> bytes:
     )
 
 
+# --- the page-tables fixtures (standalone, on demand: the layout
+# --- fixtures' precedent; every content stream is the probe crate's
+# --- measured fixture verbatim — /tmp/opencode/probe-tables out.txt and
+# --- out2-out7.txt are the preserved oracle) --------------------------------
+
+
+def generate_pdf_table_ruled(rotate: int | None = None, cropbox: str | None = None) -> bytes:
+    """The ruled 2×2 intersection grid (the probe's fixture verbatim):
+    verticals x ∈ {100, 300, 500} spanning y 600..800, horizontals
+    y ∈ {600, 700, 800} spanning x 100..500, one glyph per cell (A/B/C/D
+    at (120,750)/(320,750)/(120,650)/(320,650)). The engine's cells are
+    the RULING rectangles — A (100,700,200,100) etc. at rotation 0
+    (measured out.txt) — so the render-anchored oracle checks the cell
+    edges against the rendered ruling positions. The top rule rides 8pt
+    above the 792pt page (y=800): the cells' boxes are unclipped, the
+    unclipped law's own fixture shape."""
+    content = (
+        b"0.5 w 100 600 m 100 800 l S\n"
+        b"0.5 w 300 600 m 300 800 l S\n"
+        b"0.5 w 500 600 m 500 800 l S\n"
+        b"0.5 w 100 600 m 500 600 l S\n"
+        b"0.5 w 100 700 m 500 700 l S\n"
+        b"0.5 w 100 800 m 500 800 l S\n"
+        b"BT /F1 12 Tf 120 750 Td (A) Tj ET\n"
+        b"BT /F1 12 Tf 320 750 Td (B) Tj ET\n"
+        b"BT /F1 12 Tf 120 650 Td (C) Tj ET\n"
+        b"BT /F1 12 Tf 320 650 Td (D) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=rotate, cropbox=cropbox)
+
+
+def generate_pdf_table_symmetric(rotate: int | None = None) -> bytes:
+    """The 180-symmetric ruled 2×2 (the probe's sym_grid verbatim): the
+    grid centered on (306, 396) is invariant under (x, y) → (612−x,
+    792−y), so on /Rotate 180 the detector DOES find a grid — with every
+    cell's text 180°-swapped (measured out2: r0c0 = "D" where the raw
+    top-left cell held "A"). The gate's regression fixture: the refusal
+    is a content law, not the vanished-table accident. At rotation 0
+    (the control) it serves with the upright cells."""
+    content = (
+        b"0.5 w 206 346 m 206 446 l S\n"
+        b"0.5 w 306 346 m 306 446 l S\n"
+        b"0.5 w 406 346 m 406 446 l S\n"
+        b"0.5 w 206 346 m 406 346 l S\n"
+        b"0.5 w 206 396 m 406 396 l S\n"
+        b"0.5 w 206 446 m 406 446 l S\n"
+        b"BT /F1 12 Tf 220 420 Td (A) Tj ET\n"
+        b"BT /F1 12 Tf 320 420 Td (B) Tj ET\n"
+        b"BT /F1 12 Tf 220 370 Td (C) Tj ET\n"
+        b"BT /F1 12 Tf 320 370 Td (D) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=rotate)
+
+
+def generate_pdf_table_sideways_ruled(rotate: int) -> bytes:
+    """Sideways (rotated-Tm) text inside a ruled 2×2 (the probe's
+    sideways_ruled verbatim): the 90/270-with-rulings-and-mapped-spans
+    class — the detector's text and ruling inputs share no frame
+    (measured out2: tables: 0)."""
+    content = (
+        b"0.5 w 100 600 m 100 800 l S\n"
+        b"0.5 w 300 600 m 300 800 l S\n"
+        b"0.5 w 500 600 m 500 800 l S\n"
+        b"0.5 w 100 600 m 500 600 l S\n"
+        b"0.5 w 100 700 m 500 700 l S\n"
+        b"0.5 w 100 800 m 500 800 l S\n"
+        b"BT /F1 12 Tf 0 1 -1 0 130 610 Tm (A) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 330 610 Tm (B) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 130 710 Tm (C) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 330 710 Tm (D) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=rotate)
+
+
+def generate_pdf_table_text_only(rotate: int | None = None) -> bytes:
+    """The text-only 4×2 (the probe's fixture verbatim): two x-columns
+    (100/300), four baselines (700/650/600/550), no rulings anywhere —
+    the text-branch detection (span-union cells)."""
+    content = (
+        b"BT /F1 12 Tf 100 700 Td (Region) Tj ET\n"
+        b"BT /F1 12 Tf 300 700 Td (Value) Tj ET\n"
+        b"BT /F1 12 Tf 100 650 Td (North) Tj ET\n"
+        b"BT /F1 12 Tf 300 650 Td (120) Tj ET\n"
+        b"BT /F1 12 Tf 100 600 Td (South) Tj ET\n"
+        b"BT /F1 12 Tf 300 600 Td (340) Tj ET\n"
+        b"BT /F1 12 Tf 100 550 Td (East) Tj ET\n"
+        b"BT /F1 12 Tf 300 550 Td (560) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=rotate)
+
+
+def generate_pdf_table_sideways_text_only(rotate: int) -> bytes:
+    """The A12 served class: a pathless page whose every span is drawn
+    with `Tm [0 1 -1 0 x y]` — engine-mapped on a 90/270 page
+    (`page_rotation_applied == rotation`). Measured (out3): at 270 the
+    detector finds a 4×4 grid with None-padded cells (the unmap→forward
+    goldens); at 90 it finds NOTHING (the detector's sideways limit —
+    served empty, refused false)."""
+    content = (
+        b"BT /F1 12 Tf 0 1 -1 0 100 700 Tm (Region) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 300 700 Tm (Value) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 100 650 Tm (North) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 300 650 Tm (120) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 100 600 Tm (South) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 300 600 Tm (340) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 100 550 Tm (East) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 300 550 Tm (560) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=rotate)
+
+
+def generate_pdf_table_mixed_spans(rotate: int) -> bytes:
+    """The A12 mixed-span refusal class: a pathless page whose spans MIX
+    engine-mapped (sideways) and raw (upright) runs — the detector would
+    compare two text frames; the fail-closed refusal."""
+    content = (
+        b"BT /F1 12 Tf 100 700 Td (up) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 300 650 Tm (side) Tj ET\n"
+        b"BT /F1 12 Tf 100 600 Td (raw) Tj ET\n"
+        b"BT /F1 12 Tf 0 1 -1 0 300 550 Tm (flip) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=rotate)
+
+
+def generate_pdf_table_stack_disjoint() -> bytes:
+    """Two ruled grids stacked with disjoint x-ranges and a 20pt y gap
+    (the probe's stacked_disjoint verbatim): the vertical MERGE path's
+    fixture — one merged table whose rows are BOTTOM-GROUP-FIRST
+    (measured out2), every cell a ruling-rect box."""
+    content = (
+        b"0.5 w 100 600 m 100 800 l S\n"
+        b"0.5 w 200 600 m 200 800 l S\n"
+        b"0.5 w 300 600 m 300 800 l S\n"
+        b"0.5 w 100 600 m 300 600 l S\n"
+        b"0.5 w 100 700 m 300 700 l S\n"
+        b"0.5 w 100 800 m 300 800 l S\n"
+        b"BT /F1 12 Tf 120 750 Td (T1) Tj ET\n"
+        b"BT /F1 12 Tf 220 750 Td (T2) Tj ET\n"
+        b"BT /F1 12 Tf 120 650 Td (T3) Tj ET\n"
+        b"BT /F1 12 Tf 220 650 Td (T4) Tj ET\n"
+        b"0.5 w 350 380 m 350 580 l S\n"
+        b"0.5 w 450 380 m 450 580 l S\n"
+        b"0.5 w 550 380 m 550 580 l S\n"
+        b"0.5 w 350 380 m 550 380 l S\n"
+        b"0.5 w 350 480 m 550 480 l S\n"
+        b"0.5 w 350 580 m 550 580 l S\n"
+        b"BT /F1 12 Tf 370 530 Td (B1) Tj ET\n"
+        b"BT /F1 12 Tf 470 530 Td (B2) Tj ET\n"
+        b"BT /F1 12 Tf 370 430 Td (B3) Tj ET\n"
+        b"BT /F1 12 Tf 470 430 Td (B4) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_table_cluster_shared_x() -> bytes:
+    """Two ruled grids stacked with SHARED x and a 20pt gap, the bottom
+    one 3-column (the probe's stacked_grids verbatim): the CLUSTER
+    path's fixture — one table, TOP-GROUP-FIRST (measured out2),
+    has_header TRUE (the cluster branch's second header source), the
+    bbox the cluster's line-extent × row-extent, and the 2-col group
+    padded with `"" None` cells."""
+    content = (
+        b"0.5 w 100 600 m 100 800 l S\n"
+        b"0.5 w 300 600 m 300 800 l S\n"
+        b"0.5 w 500 600 m 500 800 l S\n"
+        b"0.5 w 100 600 m 500 600 l S\n"
+        b"0.5 w 100 800 m 500 800 l S\n"
+        b"BT /F1 12 Tf 120 700 Td (T1) Tj ET\n"
+        b"BT /F1 12 Tf 320 700 Td (T2) Tj ET\n"
+        b"0.5 w 100 380 m 100 580 l S\n"
+        b"0.5 w 233 380 m 233 580 l S\n"
+        b"0.5 w 366 380 m 366 580 l S\n"
+        b"0.5 w 500 380 m 500 580 l S\n"
+        b"0.5 w 100 380 m 500 380 l S\n"
+        b"0.5 w 100 580 m 500 580 l S\n"
+        b"BT /F1 12 Tf 120 480 Td (B1) Tj ET\n"
+        b"BT /F1 12 Tf 250 480 Td (B2) Tj ET\n"
+        b"BT /F1 12 Tf 380 480 Td (B3) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_table_crop_survivor() -> bytes:
+    """The crop survivor (measured out2): the ruled 2×2 under the
+    [110 550 550 800] crop — the grid survives with cell boxes that lie
+    OUTSIDE the visible box (cell A's x=100 < the crop's left edge 110),
+    returned unclipped."""
+    return generate_pdf_table_ruled(cropbox="[110 550 550 800]")
+
+
+def generate_pdf_table_crop_vanished() -> bytes:
+    """The crop vanish variant (measured out2): the ruled 2×2 under the
+    [150 600 550 800] crop — the TEXT side is crop-filtered (the 2pt
+    law), the left column's text is dropped, and the table VANISHES:
+    `tables: []`, `tables_refused` false."""
+    return generate_pdf_table_ruled(cropbox="[150 600 550 800]")
+
+
+def generate_pdf_table_prose() -> bytes:
+    """Plain prose (measured out3): three full-width lines — no table."""
+    content = (
+        b"BT /F1 12 Tf 72 700 Td (It was a dark and stormy night; the rain fell) Tj ET\n"
+        b"BT /F1 12 Tf 72 682 Td (over the plain, and the waves dashed against the rocks.) Tj ET\n"
+        b"BT /F1 12 Tf 72 664 Td (The captain stood at the rail and watched the sea.) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_table_toc() -> bytes:
+    """A TOC with INLINE dot leaders (measured out3): one span per entry
+    (single-column) — the detector-limit pin. The measured boundary,
+    stated in the test's docstring: a TWO-column TOC shape (title + page
+    number spans) IS detected as a table by the same engine (out3) —
+    these filters are heuristics; the FIXTURE BYTES are pinned."""
+    content = (
+        b"BT /F1 18 Tf 72 720 Td (Contents) Tj ET\n"
+        b"BT /F1 12 Tf 72 680 Td (Introduction . . . . . . . . . . . . 1) Tj ET\n"
+        b"BT /F1 12 Tf 72 656 Td (Methods and materials . . . . . . . . . . . . 9) Tj ET\n"
+        b"BT /F1 12 Tf 72 632 Td (Results of the study . . . . . . . . . . . . 17) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_table_multi() -> bytes:
+    """Two ruled grids stacked far apart (disjoint x, a 100pt y gap —
+    past the merge's reach; measured out4): TWO tables, in the engine's
+    own order (the BOTTOM grid first)."""
+    content = (
+        b"0.5 w 100 600 m 100 800 l S\n"
+        b"0.5 w 200 600 m 200 800 l S\n"
+        b"0.5 w 300 600 m 300 800 l S\n"
+        b"0.5 w 100 600 m 300 600 l S\n"
+        b"0.5 w 100 700 m 300 700 l S\n"
+        b"0.5 w 100 800 m 300 800 l S\n"
+        b"BT /F1 12 Tf 120 750 Td (T1) Tj ET\n"
+        b"BT /F1 12 Tf 220 750 Td (T2) Tj ET\n"
+        b"BT /F1 12 Tf 120 650 Td (T3) Tj ET\n"
+        b"BT /F1 12 Tf 220 650 Td (T4) Tj ET\n"
+        b"0.5 w 350 300 m 350 500 l S\n"
+        b"0.5 w 450 300 m 450 500 l S\n"
+        b"0.5 w 550 300 m 550 500 l S\n"
+        b"0.5 w 350 300 m 550 300 l S\n"
+        b"0.5 w 350 400 m 550 400 l S\n"
+        b"0.5 w 350 500 m 550 500 l S\n"
+        b"BT /F1 12 Tf 370 450 Td (B1) Tj ET\n"
+        b"BT /F1 12 Tf 470 450 Td (B2) Tj ET\n"
+        b"BT /F1 12 Tf 370 350 Td (B3) Tj ET\n"
+        b"BT /F1 12 Tf 470 350 Td (B4) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_table_cap() -> bytes:
+    """The A6 cap fixture: 751 verticals + 751 horizontals = 1502 table
+    primitives — one past the markdown lane's MAX_TABLE_EDGES bail-out.
+    Detection is skipped: `tables: []`, `tables_refused` true (at
+    rotation 0 — the reading rule that distinguishes the cap from the
+    frame refusals)."""
+    rules = []
+    for i in range(751):
+        x = 100.0 + i * 0.5
+        rules.append(f"0.5 w {x} 600 m {x} 800 l S".encode("ascii"))
+    for i in range(751):
+        y = 600.0 + i * 0.25
+        rules.append(f"0.5 w 100 {y} m 500 {y} l S".encode("ascii"))
+    return generate_pdf_layout(b"\n".join(rules))
+
+
+def generate_pdf_table_pages(count: int) -> bytes:
+    """`count` pages, each carrying the ruled 2×2 grid (the rot-0
+    intersection fixture's content): the GIL heartbeat cell's fixture —
+    the tables marshalling is O(pages) entries + O(pages × tables ×
+    cells) nested construction post-detach, so the op must be several
+    heartbeat ticks long (the sibling cells' methodology). Not committed
+    to the corpus; built on demand."""
+    # Object layout: catalog 1, pages 2, font 3, then per page a page
+    # dict (4 + 2i) and its content stream (5 + 2i).
+    kids = " ".join(f"{4 + page * 2} 0 R" for page in range(count))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    body = b"\n".join(
+        [
+            b"0.5 w 100 600 m 100 800 l S",
+            b"0.5 w 300 600 m 300 800 l S",
+            b"0.5 w 500 600 m 500 800 l S",
+            b"0.5 w 100 600 m 500 600 l S",
+            b"0.5 w 100 700 m 500 700 l S",
+            b"0.5 w 100 800 m 500 800 l S",
+            b"BT /F1 12 Tf 120 750 Td (A) Tj ET",
+            b"BT /F1 12 Tf 320 750 Td (B) Tj ET",
+            b"BT /F1 12 Tf 120 650 Td (C) Tj ET",
+            b"BT /F1 12 Tf 320 650 Td (D) Tj ET",
+        ]
+    )
+    for page in range(count):
+        objects.append(
+            "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 3 0 R >> >>"
+            f" /MediaBox [0 0 612 792] /Contents {5 + page * 2} 0 R >>".encode("ascii")
+        )
+        objects.append(
+            f"<< /Length {len(body)} >>\nstream\n".encode("ascii") + body + b"\nendstream"
+        )
+    return _pdf_from_objects(objects)
+
+
 # --- the office geometry fixtures (standalone, on demand: the same
 # --- generate_pdf_big precedent — none of them carries conversion content
 # --- the matrix's sweeps need, and the committed corpora stay unpinned to

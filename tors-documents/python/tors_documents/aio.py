@@ -51,6 +51,7 @@ __all__: list[str] = []
 _WRAPPED = (
     "page_geometry",
     "page_layout",
+    "page_tables",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",
