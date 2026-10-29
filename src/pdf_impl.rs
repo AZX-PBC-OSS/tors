@@ -960,7 +960,10 @@ fn render_roman(n: u64, uppercase: bool) -> Option<String> {
             n -= *value;
         }
     }
-    debug_assert!(result.len() <= MAX_LABEL_CHARS, "the bound check is the law");
+    debug_assert!(
+        result.len() <= MAX_LABEL_CHARS,
+        "the bound check is the law"
+    );
     Some(if uppercase {
         result.to_uppercase()
     } else {
@@ -2149,7 +2152,11 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
     // A9 marker (see the field's reading rule).
     let paths = doc.extract_paths(page);
     let paths_error = paths.is_err();
-    let primitives = paths.unwrap_or_default().iter().filter(|p| p.is_table_primitive()).count();
+    let primitives = paths
+        .unwrap_or_default()
+        .iter()
+        .filter(|p| p.is_table_primitive())
+        .count();
     let has_rulings = primitives > 0;
 
     // The A6 cap: above the markdown lane's MAX_TABLE_EDGES the surface
@@ -8519,17 +8526,27 @@ mod tests {
             }) => {
                 assert_eq!(*scope, CapScope::Image);
                 assert_eq!(*limit_bytes, 1_000_000);
-                assert_eq!(*needed_bytes, 4_000_000, "the ACTUAL bytes, not the estimate");
+                assert_eq!(
+                    *needed_bytes, 4_000_000,
+                    "the ACTUAL bytes, not the estimate"
+                );
             }
             other => panic!("expected the post-decode SizeCap, got {other:?}"),
         }
         // Pixels mode: the chain ends in DCT, so the decode is the same
         // container arm — the same refusal on actuals.
-        let entry = page_images(bytes, None, None, "pdf", ImageDecode::Pixels, Some(1_000_000))
-            .unwrap()
-            .remove(0)
-            .images
-            .remove(0);
+        let entry = page_images(
+            bytes,
+            None,
+            None,
+            "pdf",
+            ImageDecode::Pixels,
+            Some(1_000_000),
+        )
+        .unwrap()
+        .remove(0)
+        .images
+        .remove(0);
         assert!(matches!(
             entry.data,
             ImageBytes::Error(ImageDataError::SizeCap {

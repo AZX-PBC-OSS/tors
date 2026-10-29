@@ -888,9 +888,12 @@ fn probe_capability_refusal(
     backend: Backend,
 ) -> Option<DocumentError> {
     let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
-        Source::Data(bytes) => {
-            documents_impl::probe_geometry_capability(probe_sniff_bytes(bytes, format), None, format, backend)
-        }
+        Source::Data(bytes) => documents_impl::probe_geometry_capability(
+            probe_sniff_bytes(bytes, format),
+            None,
+            format,
+            backend,
+        ),
         Source::Path(path) => {
             // The name-decided answer touches nothing (the
             // probe_sniff_bytes law, the path branch): an explicit
@@ -3673,9 +3676,12 @@ fn probe_structure_refusal(
     backend: Backend,
 ) -> Option<DocumentError> {
     let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
-        Source::Data(bytes) => {
-            documents_impl::probe_structure_capability(probe_sniff_bytes(bytes, format), None, format, backend)
-        }
+        Source::Data(bytes) => documents_impl::probe_structure_capability(
+            probe_sniff_bytes(bytes, format),
+            None,
+            format,
+            backend,
+        ),
         Source::Path(path) => {
             // The name-decided refusal opens NOTHING (the claim at the
             // docstring above — "resolved from format=… no body read" —
