@@ -4502,20 +4502,23 @@ def test_weighted_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granul
     the same workload shape (the weighted weights walk is O(#lists),
     invisible next to the O(entries) dedup walk).
 
-    Measured alongside the unweighted cell in the same session (ambient
-    load varying, 4 samples per cell): 200k total entries across 5
-    lists, weights=[2.0, 1.0, 1.0, 1.0, 0.5]: worst gaps 16.0-19.0ms of
-    16.1-30.6ms walls, ratios 0.62 on the uncontended samples — the
-    unweighted cell's own band (0.52-0.62 this session), as predicted:
-    the weighted pass is the same detach with a multiply, and the loaded
-    samples read ~1.0 on both spellings alike (the scheduler-starved
-    shape the first-clean retry discipline rides through). The advisory
-    verdict's magnitude bound: the band-stretch excuse covers only
-    GIL-signature strikes under 4 x 28.4ms = 114ms of gap AND under
-    max(0.80, 1.15 x 0.74) = 0.851 of ratio (the rank_fuse cell's, see
-    ``_RANK_BAND_GAP_TOP_S``); a strike at/above either raises even in
-    this advisory cell."""
-    lists = _ranked_lists(200_000)
+    Measured at the 400k recalibration (the score_fuse 100k -> 200k
+    enlargement precedent: the original 200k pin's 16.1-30.6ms walls sat
+    at the 10ms ping floor, where a tick straddling the whole op read
+    ~100% and convicted on scheduling noise -- the sub-ping artifact,
+    unjudgeable). 400k total entries across 5 lists,
+    weights=[2.0, 1.0, 1.0, 1.0, 0.5]: worst gaps 38-64ms of 61-93ms
+    walls (6-9x the floor), ratios 0.61-0.68, every sample inside both
+    budgets outright -- and 800k is past the honest stop: its measured
+    walls (170-220ms) put the by-design walk's own blocked gap
+    (123-162ms) at the advisory magnitude bound (4 x 28.4ms = 114ms,
+    ``_RANK_BAND_GAP_TOP_S``), so the gate would raise on the walk under
+    load. The advisory verdict's magnitude bound: the band-stretch
+    excuse covers only GIL-signature strikes under 4 x 28.4ms = 114ms of
+    gap AND under max(0.80, 1.15 x 0.74) = 0.851 of ratio (the
+    rank_fuse cell's, see ``_RANK_BAND_GAP_TOP_S``); a strike at/above
+    either raises even in this advisory cell."""
+    lists = _ranked_lists(400_000)
     weights = [2.0, 1.0, 1.0, 1.0, 0.5]
     asyncio.run(
         _assert_loop_stays_responsive(
