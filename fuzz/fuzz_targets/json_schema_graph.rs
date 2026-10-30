@@ -20,19 +20,23 @@
 //! shared ref yields on the Python side), wide enums, and deep-vs-wide
 //! combinations, each against arbitrary document text.
 //!
-//! DELIBERATELY NOT ASSERTED: deadline compliance of the enum-suggestion
-//! path. Issue #115 is LIVE on this tree — `closest_enum_member` scores
-//! every member with `jaro_winkler` and never consults the armed clock,
-//! so an enum-miss repair runs past an armed `deadline_ms` (measured:
-//! 2000 members × 1500-char strings → TimeoutError ~160x past a 5 ms
-//! budget; the repro is in tests/redteam_corpus/, `issue-115`). Once the
-//! fix lands, add the deadline invariant here (assert the call's own
-//! wall stays under a generous multiple of the budget on wide enums) —
-//! a failing assert before the fix would make this a known-crashing
-//! target, the time-bomb shape the Makefile's documents_markdown note
-//! bans from the run lists.
+//! The enum-suggestion path's deadline (issue #115) is FIXED and pinned
+//! where the calibration lives: `closest_enum_member` runs a forced
+//! per-member clock read and hands each `jaro_winkler` comparison the
+//! clock's remaining budget, so a wide enum answers within the budget
+//! (tests/test_json_repair_native.py's TestEnumSuggestionDeadline carries
+//! the wall pins at the reported 2000x1500 repro). This target carries
+//! the promised fuzz-side invariant: whenever the config arms a deadline,
+//! the call's own wall stays under a generous multiple of it (100x: the
+//! fixed walk measured ~3x past the budget at the repro's size, the
+//! un-clock'd rot class ~160x), which catches the rot without becoming
+//! the time-bomb shape the Makefile's documents_markdown note bans (a
+//! generous ceiling cannot false-fire on a loaded runner at sub-ms
+//! calls).
 
 #![no_main]
+
+use std::time::Instant;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -53,10 +57,11 @@ struct Input {
     /// Builder knobs, modded to useful ranges at build time.
     knob_a: u16,
     knob_b: u16,
-    /// Whether the config arms a small deadline (the live #115 hole means
-    /// this must NOT gate any assertion yet; the lane exists so the
-    /// no-panic/termination contract holds under BOTH armaments, and so
-    /// the deadline invariant slots in without reshaping the target).
+    /// Whether the config arms a small deadline. The EnumWide shape (the
+    /// deadline's own territory, the #115 scorer's) force-arms it in the
+    /// generator; elsewhere the knob randomizes, so the no-panic/
+    /// termination contract holds under BOTH armaments and the wall-time
+    /// invariant below gates on the same flag.
     arm_deadline: bool,
     salvage: bool,
     diagnostics: bool,
@@ -72,7 +77,8 @@ enum Shape {
     /// One property subschema cloned into `k` slots (the expanded form a
     /// Python shared ref yields), with `w` distinct neighbors around it.
     Aliased,
-    /// A wide `enum` list (the #115 scorer's input shape, kept small).
+    /// A wide `enum` list (the #115 scorer's input shape; the generator
+    /// force-arms the deadline for it).
     EnumWide,
     /// Deep nesting INSIDE each of `w` wide properties.
     DeepWide,
@@ -171,6 +177,9 @@ fn build_schema(shape: &Shape, knob_a: u16, knob_b: u16) -> (Value, usize) {
 
 fuzz_target!(|input: Input| {
     let (schema, deep_units) = build_schema(&input.shape, input.knob_a, input.knob_b);
+    // The generator arms the deadline wherever the scorer's territory is
+    // the point (EnumWide), randomizes elsewhere.
+    let armed = input.arm_deadline || matches!(input.shape, Shape::EnumWide);
     let cfg = RepairConfig {
         skip_json_loads: false,
         strict: false,
@@ -178,14 +187,32 @@ fuzz_target!(|input: Input| {
         schema: Some(schema),
         diagnostics: input.diagnostics,
         locale: NumericLocale::Auto,
-        deadline_ms: input.arm_deadline.then_some(5.0),
+        deadline_ms: armed.then_some(5.0),
         deadline_clock: None,
     };
 
     // The core contract: the call TERMINATES (implicit — a hang fails the
     // run's own timeout) and answers with Ok or a catchable Err, never a
     // panic, for arbitrary document text against every builder shape.
+    let started = Instant::now();
     let outcome = repair(&input.doc, &cfg);
+    let wall = started.elapsed();
+
+    // The deadline's wall-time invariant (the promised one, issue #115's
+    // rot class): with the deadline armed, the call's own wall stays
+    // under a generous multiple of the budget. The fixed walk measured
+    // ~3x past a 5ms budget at the repro's size (2000 members x 1500
+    // chars: the pytest suite's calibrated pins); the pre-fix scorer
+    // never consulted the clock and ran ~160x past. 100x (500ms) sits
+    // far above the fixed wall — a loaded runner cannot stall a sub-ms
+    // call past it — and far below the rot's.
+    if armed {
+        assert!(
+            wall.as_millis() < 500,
+            "a 5ms-deadline repair ran its wall past 100x the budget: {wall:?}, doc={:?}",
+            input.doc
+        );
+    }
 
     // The walk-cap refusal: a schema past the nesting cap must be a clean
     // Err (upstream surfaces deep schemas as errors from validation, never

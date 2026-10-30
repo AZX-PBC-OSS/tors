@@ -92,6 +92,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 import tors
+from loop_harness import assert_bounded
 from reference import (
     assert_opcodes_are_valid,
     diff_pair_char_shuffled,
@@ -598,18 +599,21 @@ class TestDeadline:
         costs ~1.5 s (measured) while the call returns in well under a
         second."""
         a, b = diff_pair_char_shuffled(_DEADLINE_PAIR_BYTES)
-        started = time.perf_counter()
-        with pytest.raises(TimeoutError, match="deadline") as excinfo:
-            tors.diff_opcodes(a, b, deadline_ms=_DEADLINE_MS)
-        wall = time.perf_counter() - started
-        message = str(excinfo.value)
-        assert type(excinfo.value) is TimeoutError
-        # The message names the deadline and the elapsed cost, both in ms.
-        assert re.search(rf"\b{_DEADLINE_MS:g}(\.\d+)?\s*ms\b", message), message
-        assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
-        # The deadline bounded the call (the unbounded diff is ~30x the
-        # budget; generous upper bound for a loaded runner's dispatch).
-        assert wall < 1.0, f"deadline-bounded call took {wall:.2f}s"
+
+        def fire() -> None:
+            with pytest.raises(TimeoutError, match="deadline") as excinfo:
+                tors.diff_opcodes(a, b, deadline_ms=_DEADLINE_MS)
+            message = str(excinfo.value)
+            assert type(excinfo.value) is TimeoutError
+            # The message names the deadline and the elapsed cost, both in ms.
+            assert re.search(rf"\b{_DEADLINE_MS:g}(\.\d+)?\s*ms\b", message), message
+            assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the deadline-bounded abort — one
+        # scheduler hit retries, a lost deadline dirties every sample and
+        # still fails (the ~50-60ms abort against a 1.0s ceiling).
+        assert_bounded(fire, 1.0, samples=3, label="the diff_opcodes deadline abort")
 
     def test_deadline_none_is_the_default_and_unchanged(self) -> None:
         """``deadline_ms=None`` (the default) is exactly the previous

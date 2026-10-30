@@ -33,7 +33,7 @@
 //!   U+000C `\f`, U+000D `\r`
 //! - every other codepoint below U+0020, plus DEL (U+007F, which is outside
 //!   printable ASCII), as `\u00XX` with LOWERCASE hex
-//! - every codepoint >= U+080's own scalar value above ASCII as `\uXXXX`
+//! - every codepoint >= U+0080 (everything above ASCII) as `\uXXXX`
 //!   lowercase; astral codepoints (>= U+10000) as the UTF-16 surrogate-pair
 //!   escapes `\uHHHH\uLLLL` (lowercase), e.g. U+1F600 -> `\ud83d\ude00`
 //!

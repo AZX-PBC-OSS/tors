@@ -184,7 +184,7 @@ pub fn pdf_classify(
 /// seam: `has_text` and the scanned match call the core's own rule, never
 /// a re-derived string match here: stringified only at the `page_kinds`
 /// getter.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PdfClassification {
     page_count: usize,
     page_kinds: Vec<tors::pdf_impl::PageKind>,
@@ -440,15 +440,22 @@ pub fn pdf_page_count(
 /// last range in the stable-sorted tree with `start_page ≤ i` covers
 /// page `i`; two ranges sharing a start page resolve to the last in
 /// traversal order (root `/Nums` before `/Kids`, kids in array order).
-/// Labels render on u64 arithmetic (a legal `/St 4294967294` renders
-/// through `4294967296` without panic or wrap — never the engine
-/// formatter's `u32 + u32`; an over-u32 `/St` carries the engine's own
-/// parse-time truncation, e.g. 5000000000 reads back as 705032704).
-/// Rotation and crop are irrelevant (tree data). A corrupt tree (a
-/// non-dict `/PageLabels`, tree node, `/Kids` member, or label entry) is
-/// presented as "no labels" — every page `None`, the content-read-
-/// failure law, the same list a tree-less document answers; that is a
-/// deliberate masking, stated here the way `tables_refused: false` is.
+/// Labels render on u64 arithmetic under the bounded-label law: a label
+/// the render builds past 4 KiB (`pdf_impl::MAX_LABEL_CHARS`) bounds OUT
+/// to `None` for that page, never a truncated numeral — the subtractive
+/// Roman render is one char per thousand of the value, so a legal
+/// `/St 4294967294` renders 4,294,967 chars per page (measured 858,994,700
+/// total chars, 1.67 GiB RSS at 200 pages before the bound), a value
+/// display-prohibitive by construction. Decimal and alpha renders are
+/// O(log n) and can never reach the bound. The arithmetic itself never
+/// panics or wraps (never the engine formatter's `u32 + u32`; an
+/// over-u32 `/St` carries the engine's own parse-time truncation, e.g.
+/// 5000000000 reads back as 705032704). Rotation and crop are irrelevant
+/// (tree data). A corrupt tree (a non-dict `/PageLabels`, tree node,
+/// `/Kids` member, or label entry) is presented as "no labels" — every
+/// page `None`, the content-read-failure law, the same list a tree-less
+/// document answers; that is a deliberate masking, stated here the way
+/// `tables_refused: false` is.
 ///
 /// `backend` names the engine lane, the same vocabulary the conversion
 /// pair takes: `"auto"` (the default; the native layer takes `None` as
@@ -689,7 +696,7 @@ fn pdf_security_inner(security: tors::pdf_impl::PdfSecurity) -> PdfSecurity {
 /// deviation note applies: the fields are bools and an optional
 /// [`PdfPermissions`], exactly as returned, nothing to re-type; `==` is
 /// structural (the four fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PdfSecurity {
     inner: tors::pdf_impl::PdfSecurity,
 }
@@ -765,7 +772,7 @@ fn security_repr(security: &tors::pdf_impl::PdfSecurity) -> String {
 ///
 /// Exposed DIRECTLY (no Python wrapper view) — the `PageGeometry`
 /// deviation note applies; `==` is structural (the nine fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PdfPermissions {
     inner: tors::pdf_impl::PdfPermissions,
 }
@@ -881,10 +888,22 @@ fn probe_capability_refusal(
     backend: Backend,
 ) -> Option<DocumentError> {
     let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
-        Source::Data(bytes) => {
-            documents_impl::probe_geometry_capability(bytes, None, format, backend)
-        }
+        Source::Data(bytes) => documents_impl::probe_geometry_capability(
+            probe_sniff_bytes(bytes, format),
+            None,
+            format,
+            backend,
+        ),
         Source::Path(path) => {
+            // The name-decided answer touches nothing (the
+            // probe_sniff_bytes law, the path branch): an explicit
+            // format= that resolves to a non-Excel kind decides from the
+            // name alone — open(2) and the 64 KiB read have no business
+            // running, and their failures (a chmod-000 file, a
+            // directory, a missing path) must not bury the refusal.
+            if name_decides_probe(format) {
+                return documents_impl::probe_geometry_capability(&[], None, format, backend).err();
+            }
             let gated = std::fs::metadata(path)
                 .map_err(|_| ())
                 .and_then(|meta| refuse_non_regular(path, meta.file_type()).map_err(|_| ()));
@@ -898,6 +917,41 @@ fn probe_capability_refusal(
         }
     };
     probed.err()
+}
+
+/// The probe's own byte budget for a `data=` call: an explicit `format=`
+/// that resolves to a non-Excel kind consults NO bytes (the core's
+/// `resolve` short-circuits on the name; the probe's tables consult
+/// bytes for the Excel kind's OLE-container case only) — the full
+/// buffer is skipped entirely. Every other case hands the probe the
+/// bounded 64 KiB prefix the path lane reads — NEVER the full buffer:
+/// pre-fix the probe sniffed all of `data=` under the GIL
+/// (`looks_like_html` is a lossy-UTF-8 walk of the whole slice), and a
+/// 128 MiB blob held the GIL 356.5 ms max (measured), against the
+/// crate's own GIL contract — the whole native pass runs under
+/// `py.detach`.
+///
+/// The Excel carve-out keeps the prefix so the OLE-container decision
+/// (a legacy xls workbook or an encrypted xlsx package — the union
+/// refusal) can fire pre-read exactly as before. A name that resolves
+/// to NOTHING (an unknown `format=`) falls through to the prefix path
+/// and defers, exactly as an unresolvable prefix does — the core's
+/// authoritative resolve post-read raises the unknown-name error.
+fn probe_sniff_bytes<'a>(bytes: &'a [u8], format: Option<&str>) -> &'a [u8] {
+    if name_decides_probe(format) {
+        return &[];
+    }
+    &bytes[..bytes.len().min(SNIFF_PREFIX)]
+}
+
+/// Whether an explicit `format=` alone decides this probe: the name
+/// resolves to a kind, and that kind is not Excel (the one kind whose
+/// probe consults bytes — the OLE-container decision).
+fn name_decides_probe(format: Option<&str>) -> bool {
+    matches!(
+        format.map(documents_impl::Kind::from_name),
+        Some(Some(kind)) if kind != documents_impl::Kind::Excel
+    )
 }
 
 /// `tors.documents.page_geometry(path, data=None, format=None,
@@ -923,8 +977,11 @@ fn probe_capability_refusal(
 /// layer — a section declaring only margins is `None`, never a
 /// fabricated Letter); pptx → one per slide (the raw deck-wide slide
 /// size, EMU ÷ 12700.0 in float, `None` everywhere when undeclared);
-/// xlsx → one per worksheet, all `None` (a worksheet is an unbounded
-/// grid, not a page); legacy doc/xls/ppt → all `None` at the converter's
+/// xlsx → one per WORKSHEET, all `None` (a worksheet is an unbounded
+/// grid, not a page; a chartsheet or dialog tab is NOT a unit — the raw
+/// layer's kind filter, the structure surface's sheet list's own rule:
+/// the surfaces agree on the same workbook, pre-fix they counted apart);
+/// legacy doc/xls/ppt → all `None` at the converter's
 /// section count; html/csv/rtf/epub/odt/ods/odp → exactly one entry,
 /// `None` (unit = whole document, single-flow — never `[]`). `[]` is
 /// reachable exactly when the resolved unit count is zero (a zero-page
@@ -1071,7 +1128,7 @@ pub fn page_geometry(
 /// elementwise), so `page_geometry(path) == page_geometry(path,
 /// backend="oxide")` is a plain list equality — the property the tests
 /// pin.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageGeometry {
     inner: documents_impl::PageGeometry,
 }
@@ -1255,7 +1312,8 @@ impl PageGeometry {
 /// The unit and length are a documented function of the resolved format —
 /// the GEOMETRY capability table applies to this surface IDENTICALLY:
 /// pdf → one entry per page (or the normalized pages= selection's), docx
-/// → one per section, pptx → one per slide, xlsx → one per worksheet,
+/// → one per section, pptx → one per slide, xlsx → one per WORKSHEET
+/// (a chartsheet is not a unit — the structure surface's own filter),
 /// legacy doc/xls/ppt → one per converter section — every office row
 /// carrying its declared geometry with EMPTY spans/lines/images (no
 /// office engine exposes text/image boxes: PDF-only for layout), and
@@ -1369,6 +1427,13 @@ pub fn page_layout(
     // The zero value threads through (see `parse_max_bytes_on`): the
     // core's sequenced check is this surface's zero refusal.
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -1406,7 +1471,7 @@ pub fn page_layout(
 /// from the `PdfClassification` wrapper precedent, `PageGeometry`'s
 /// stated rationale: the fields are exactly as returned, nothing to
 /// re-type; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct TextSpan {
     inner: tors::pdf_impl::LayoutSpan,
 }
@@ -1493,7 +1558,7 @@ impl TextSpan {
 /// One word inside a [`TextLine`] (`PageLayout.lines[].words`): the
 /// text and its box — the engine's own gap-clustered word box, never
 /// re-derived downstream.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Word {
     inner: tors::pdf_impl::LayoutWord,
 }
@@ -1534,7 +1599,7 @@ impl Word {
 /// re-implemented downstream). The join law: this line's text is its
 /// words' texts joined with single spaces, and every word's box is
 /// inside this line's box (both pinned in the tests).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct TextLine {
     inner: tors::pdf_impl::LayoutLine,
 }
@@ -1581,7 +1646,7 @@ impl TextLine {
 /// placement — from the engine's image HANDLES (no decode, no silent
 /// small-image filter, no swallowed errors; `extract_images` is
 /// disqualified for an evidence surface).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct ImageBox {
     inner: tors::pdf_impl::LayoutImage,
 }
@@ -1658,7 +1723,7 @@ impl ImageBox {
 /// Exposed DIRECTLY (no Python wrapper view) — the same deliberate
 /// deviation from the `PdfClassification` wrapper precedent `PageGeometry`
 /// states; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageLayout {
     inner: tors::pdf_impl::PageLayoutData,
 }
@@ -1741,30 +1806,12 @@ impl PageLayout {
     fn __repr__(&self) -> String {
         // each list formatted via its class's own Python shape — never the
         // Rust Debug of the inner structs (`LayoutSpan { … }` is not a
-        // shape a Python consumer recognizes)
-        let spans = self
-            .inner
-            .spans
-            .iter()
-            .map(text_span_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let lines = self
-            .inner
-            .lines
-            .iter()
-            .map(text_line_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let images = self
-            .inner
-            .images
-            .iter()
-            .map(image_box_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
+        // shape a Python consumer recognizes) — through the ONE capped
+        // list renderer (finding 14: an uncapped repr printed every
+        // element; a 4,288-char page's repr was 511,468 chars — the repr
+        // of a container is a shape preview, not a serialization).
         format!(
-            "PageLayout(page_index={}, format={:?}, geometry={}, spans=[{}], lines=[{}], images=[{}])",
+            "PageLayout(page_index={}, format={:?}, geometry={}, spans={}, lines={}, images={})",
             self.inner.page_index,
             self.inner.format,
             match &self.inner.geometry {
@@ -1772,9 +1819,9 @@ impl PageLayout {
                     page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
                 None => "None".to_string(),
             },
-            spans,
-            lines,
-            images
+            structure_list_repr(&self.inner.spans, text_span_repr),
+            structure_list_repr(&self.inner.lines, text_line_repr),
+            structure_list_repr(&self.inner.images, image_box_repr),
         )
     }
 }
@@ -1849,9 +1896,13 @@ impl PageLayout {
 /// byte-pinned error strings, output parallel to the NORMALIZED selection
 /// with `page_index` on every entry, the office leg's 32 MiB ceiling
 /// binding even though `tables` is always `[]` there, and the encrypted
-/// door preceding the `pages=` validation on the PDF lane (A10: an
+/// door preceding the `pages=` range validation on the PDF lane (A10: an
 /// encrypted document with a malformed selection answers the encryption).
-/// A10's door-first order also means `max_bytes` is inert on the PDF lane
+/// A10's full order is two-tier (the binding parses the pages= SHAPE
+/// under the GIL before the detach: an empty/negative/non-index selection
+/// refuses BEFORE the door; the door precedes the core's RANGE
+/// validation) — and its door-first order also means `max_bytes` is
+/// inert on the PDF lane
 /// except the zero-value refusal (pdf_oxide's own limits govern there).
 ///
 /// GIL model: page_layout's shape — argument marshalling under the GIL,
@@ -1897,6 +1948,13 @@ pub fn page_tables(
     // The zero value threads through (see `parse_max_bytes_on`): the
     // core's sequenced check is this surface's zero refusal.
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -1983,7 +2041,7 @@ fn tables_table_repr(table: &tors::pdf_impl::TableEntry) -> String {
 ///
 /// Exposed DIRECTLY (no Python wrapper view) — the `PageGeometry`
 /// deviation note applies to all four tables classes; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Cell {
     inner: tors::pdf_impl::Cell,
 }
@@ -2039,7 +2097,7 @@ impl Cell {
 
 /// One row in a [`Table`]: the row's cells and the engine's own header
 /// verdict.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Row {
     inner: tors::pdf_impl::Row,
 }
@@ -2078,7 +2136,7 @@ impl Row {
 }
 
 /// One detected table in a [`PageTables`] entry: the engine's grid.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct Table {
     inner: tors::pdf_impl::TableEntry,
 }
@@ -2153,7 +2211,7 @@ impl Table {
 ///
 /// Exposed DIRECTLY (the `PageGeometry` deviation note applies); `==` is
 /// structural (the five fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageTables {
     inner: tors::pdf_impl::PageTablesData,
 }
@@ -2390,6 +2448,13 @@ pub fn page_images(
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
     let decode = parse_image_decode(decode)?;
     let max_image_bytes = parse_max_image_bytes(max_image_bytes)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -2574,6 +2639,13 @@ pub fn page_text_chars(
         return Err(document_error(py, refusal)?);
     }
     let max_bytes = parse_max_bytes_on(max_bytes, ZeroRefusal::CoreSide)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let entries = match py.detach(move || {
         let (bytes, hint) = source
@@ -2605,7 +2677,7 @@ pub fn page_text_chars(
 ///
 /// Exposed DIRECTLY (the `PageGeometry` deviation note applies); `==` is
 /// structural (the four fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageImagesData {
     inner: tors::pdf_impl::PageImagesData,
 }
@@ -2640,7 +2712,14 @@ impl PageImagesData {
     }
 
     /// The page's images, paint order — the same order `page_layout`'s
-    /// `images` lists (same enumeration, same transform).
+    /// `images` lists (same enumeration, same transform). Each access
+    /// materializes a fresh list of fresh entries (a clone per element —
+    /// the `geometry` getter's fresh-object law, the deliberate shape of
+    /// these pyclasses: thin getters over plain core structs, no shared
+    /// mutable state, `==` stays structural). The bytes the entries
+    /// carry are COPIED, not aliased: on `decode=` payloads that is
+    /// O(decode-output) transient per access, by construction — the
+    /// caller holding the entry list owns its bytes outright.
     #[getter]
     fn images(&self) -> Vec<PageImageEntry> {
         self.inner
@@ -2793,7 +2872,7 @@ fn image_bytes_repr(data: &tors::pdf_impl::ImageBytes) -> String {
 /// the bytes only under opt-in decode.
 ///
 /// Exposed DIRECTLY; `==` is structural (all thirteen fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageImageEntry {
     inner: tors::pdf_impl::PageImageEntry,
 }
@@ -2802,9 +2881,10 @@ pub struct PageImageEntry {
 impl PageImageEntry {
     /// The image's axis-aligned box, `(x, y, w, h)`: points, bottom-left
     /// origin of the page's render space — the same mapped box
-    /// `page_layout`'s `ImageBox` carries. `None` when the page's box
-    /// cannot be read ([R11]: no frame to map into — the bytes are still
-    /// served).
+    /// `page_layout`'s `ImageBox` carries. `None` when the page has no
+    /// USABLE frame to map into — the box cannot be read, or it declares
+    /// a degenerate (zero/non-finite) extent ([R11]: the bytes are still
+    /// served either way; only the BOX is frame-gated).
     #[getter]
     fn bbox(&self) -> Option<(f32, f32, f32, f32)> {
         self.inner.bbox
@@ -2896,7 +2976,10 @@ impl PageImageEntry {
 
     /// The decode result — the ALWAYS-PRESENT four-arm sum (R6/F9):
     /// `kind` is `"not_requested" | "container" | "raw" | "error"` and
-    /// every other getter is None unless `kind` names it.
+    /// every other getter is None unless `kind` names it. A fresh native
+    /// object per access — a clone of the entry's own arm (the
+    /// `geometry` getter's fresh-object law): the byte getters below
+    /// copy, they do not alias.
     #[getter]
     fn data(&self) -> ImageBytes {
         ImageBytes {
@@ -2920,7 +3003,7 @@ impl PageImageEntry {
 /// `kind` names it (F9) — "no bytes" is never two different things.
 ///
 /// Exposed DIRECTLY; `==` is structural (the whole arm).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct ImageBytes {
     inner: tors::pdf_impl::ImageBytes,
 }
@@ -2946,6 +3029,11 @@ impl ImageBytes {
     }
 
     /// The container bytes — None unless `kind == "container"` (F9).
+    /// Each access COPIES the bytes into a fresh Python object (no
+    /// aliasing, no caching: the getters are pure functions of the arm,
+    /// and a caller mutating the returned `bytes` can never reach the
+    /// entry). The copy is O(container) transient per access, by
+    /// construction.
     #[getter]
     fn bytes(&self) -> Option<Vec<u8>> {
         use tors::pdf_impl::ImageBytes as IB;
@@ -2977,7 +3065,9 @@ impl ImageBytes {
         }
     }
 
-    /// The sample bytes — None unless `kind == "raw"` (F9).
+    /// The sample bytes — None unless `kind == "raw"` (F9). Each access
+    /// COPIES the pixels into a fresh Python object (no aliasing, no
+    /// caching: the `bytes` getter's copy law).
     #[getter]
     fn pixels(&self) -> Option<Vec<u8>> {
         use tors::pdf_impl::ImageBytes as IB;
@@ -3152,7 +3242,9 @@ impl ImageBytes {
 
     /// The failure's message (the engine's own text, or the composed F1
     /// refusal for an encrypted image whose container cannot be served) —
-    /// None unless `kind == "error"`.
+    /// None unless `kind == "error"`. The size-cap message names the
+    /// scope (finding 11: a call-scope refusal is not an image-size
+    /// story — the two ceilings are different sentences).
     #[getter]
     fn message(&self) -> Option<String> {
         use tors::pdf_impl::ImageBytes as IB;
@@ -3161,9 +3253,22 @@ impl ImageBytes {
             | IB::Error(tors::pdf_impl::ImageDataError::Unsupported(message)) => {
                 Some(message.clone())
             }
-            IB::Error(tors::pdf_impl::ImageDataError::SizeCap { .. }) => {
-                Some("the image's decode estimate exceeded the ceiling".to_string())
-            }
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap {
+                scope: tors::pdf_impl::CapScope::Image,
+                ..
+            }) => Some(
+                "the image's decoded size exceeded the per-image ceiling \
+                 (the caps bind on actual bytes)"
+                    .to_string(),
+            ),
+            IB::Error(tors::pdf_impl::ImageDataError::SizeCap {
+                scope: tors::pdf_impl::CapScope::Call,
+                ..
+            }) => Some(
+                "serving this image would push the call past the cumulative \
+                 decode budget (the caps bind on actual bytes)"
+                    .to_string(),
+            ),
             _ => None,
         }
     }
@@ -3203,9 +3308,10 @@ impl ImageBytes {
         }
     }
 
-    /// The bytes the work needed: the image's own estimate for `scope ==
-    /// "image"`, the call's cumulative total had the image been served
-    /// for `scope == "call"` — None unless `error_kind == "size_cap"`.
+    /// The bytes the work needed: the image's own estimate OR ACTUAL
+    /// size (whichever check fired) for `scope == "image"`, the call's
+    /// cumulative total had the image been served for `scope == "call"`
+    /// — None unless `error_kind == "size_cap"`.
     #[getter]
     fn needed_bytes(&self) -> Option<u64> {
         use tors::pdf_impl::ImageBytes as IB;
@@ -3231,7 +3337,7 @@ impl ImageBytes {
 /// parse, reading order.
 ///
 /// Exposed DIRECTLY; `==` is structural (the four fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct PageCharsData {
     inner: tors::pdf_impl::PageCharsData,
 }
@@ -3280,15 +3386,10 @@ impl PageCharsData {
     }
 
     fn __repr__(&self) -> String {
-        let chars = self
-            .inner
-            .chars
-            .iter()
-            .map(text_char_repr)
-            .collect::<Vec<_>>()
-            .join(", ");
+        // the capped list renderer (finding 14: an uncapped repr printed
+        // every char of the page — a 4,288-char page repr'd 511,468 chars)
         format!(
-            "PageCharsData(page_index={}, format={:?}, geometry={}, chars=[{}])",
+            "PageCharsData(page_index={}, format={:?}, geometry={}, chars={})",
             self.inner.page_index,
             self.inner.format,
             match &self.inner.geometry {
@@ -3296,7 +3397,7 @@ impl PageCharsData {
                     page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
                 None => "None".to_string(),
             },
-            chars,
+            structure_list_repr(&self.inner.chars, text_char_repr),
         )
     }
 }
@@ -3314,7 +3415,7 @@ fn text_char_repr(ch: &tors::pdf_impl::TextCharBox) -> String {
 /// span surface's em-box law.
 ///
 /// Exposed DIRECTLY; `==` is structural (all six fields).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct TextChar {
     inner: tors::pdf_impl::TextCharBox,
 }
@@ -3468,11 +3569,19 @@ impl TextChar {
 /// for the structure lane, which also holds the node array). Zero is
 /// refused core-side, sequenced after the capability refusal. The entry
 /// cap is separate and honest: [`MAX_STRUCTURE_ENTRIES`] — 200,000 —
-/// bounds the PAYLOAD's entry lists in document order, with
-/// `entries_truncated` on the affected payload and all sheet/range/merge/name
+/// bounds the PAYLOAD's entry lists in document order as ONE RUNNING
+/// BUDGET that counts every materialized entry object: docx blocks AND
+/// their table cells, xlsx cells, html nodes AND their grid cells (a
+/// cell is an entry object — pre-fix the cap let 1M docx cells and 300k
+/// html cells ride inside one entry), with `entries_truncated` on the
+/// affected payload and all sheet/range/merge/name
 /// metadata complete — a marshalling bound, never a refusal.
 ///
-/// Errors: `OSError` for a missing/unreadable file; `ValueError` for
+/// Errors: `OSError` for a missing/unreadable file — but NEVER for a
+/// call the name already refused: an explicit `format=` naming a
+/// non-Excel kind decides the refusal from the name alone and touches
+/// no filesystem (a chmod-000/directory/missing path answers the format
+/// refusal, its OSError never fires); `ValueError` for
 /// bytes that resolve to no format (`sniff()` is the fix-it), an unknown
 /// `format=` name, a bad backend name, every refused format row (GIL-side,
 /// resolved from `format=`/the 64 KiB prefix alone, no body read — the 64
@@ -3483,8 +3592,10 @@ impl TextChar {
 /// document, an office container that will not parse or pass the
 /// decompression audit, and an over-ceiling input.
 ///
-/// GIL model: the argument marshalling plus the capability probe (a
-/// bounded 64 KiB prefix read) under the GIL; the whole
+/// GIL model: the argument marshalling plus the capability probe — a
+/// bounded 64 KiB prefix on the data= lane (NEVER the full buffer; an
+/// explicit non-Excel name consults no bytes at all) or a bounded
+/// prefix read on the path lane — under the GIL; the whole
 /// read+resolve+structure pass under one `py.detach`; then O(payload) of
 /// native-object construction post-detach (the payload pyclasses are
 /// thin getters over plain core structs — structural `==` throughout).
@@ -3513,7 +3624,11 @@ pub fn document_structure(
     // backend (the format-level family precedes the backend check; the
     // geometry surfaces' probe is anydoc-only because their refusals
     // are, and this surface's are not). The probe resolves from the
-    // format name, the content markers in the 64 KiB prefix, or the
+    // format name (an explicit name that resolves to a non-Excel kind
+    // consults NO bytes and touches NO filesystem — the path branch's
+    // open(2) has no business running when the name decides), the
+    // content markers in the 64 KiB prefix (data= hands the probe the
+    // BOUNDED prefix, never the full buffer), or the
     // name hint's extension — the same precedence the core's resolve
     // runs — and defers when even the prefix cannot resolve (the
     // core's authoritative resolve is the only truth).
@@ -3561,10 +3676,29 @@ fn probe_structure_refusal(
     backend: Backend,
 ) -> Option<DocumentError> {
     let probed: Result<Option<tors::documents_impl::Kind>, DocumentError> = match source {
-        Source::Data(bytes) => {
-            documents_impl::probe_structure_capability(bytes, None, format, backend)
-        }
+        Source::Data(bytes) => documents_impl::probe_structure_capability(
+            probe_sniff_bytes(bytes, format),
+            None,
+            format,
+            backend,
+        ),
         Source::Path(path) => {
+            // The name-decided refusal opens NOTHING (the claim at the
+            // docstring above — "resolved from format=… no body read" —
+            // is now true of the path lane too): an explicit format=
+            // that resolves to a non-Excel kind decides from the name
+            // alone, so a chmod-000 file with format=pdf answers the
+            // "cannot serve pdf" refusal (measured pre-fix:
+            // PermissionError INSTEAD of the refusal — the probe
+            // opened and read the file it was about to refuse), a
+            // directory answers it (pre-fix IsADirectoryError), a
+            // missing path answers it (pre-fix FileNotFoundError).
+            // Excel keeps the prefix read: the OLE-container union
+            // decision is bytes'.
+            if name_decides_probe(format) {
+                return documents_impl::probe_structure_capability(&[], None, format, backend)
+                    .err();
+            }
             let gated = std::fs::metadata(path)
                 .map_err(|_| ())
                 .and_then(|meta| refuse_non_regular(path, meta.file_type()).map_err(|_| ()));
@@ -3584,7 +3718,7 @@ fn probe_structure_refusal(
 /// and exactly one per-format payload. The payload getter is the ONE
 /// discriminating accessor (`isinstance(report.payload, DocxStructure)`
 /// narrows); `==` is structural (the whole report).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocumentStructure {
     inner: documents_impl::StructureReport,
 }
@@ -3915,7 +4049,7 @@ fn html_structure_repr(html: &documents_impl::HtmlStructure) -> String {
 
 /// The DOCX payload (the `document_structure` report's `payload` for a
 /// docx): thin getters over the core's plain struct; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxStructure {
     inner: documents_impl::DocxStructure,
 }
@@ -3989,7 +4123,7 @@ impl DocxStructure {
 }
 
 /// One DOCX body block.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxBlock {
     inner: documents_impl::DocxBlock,
 }
@@ -4110,7 +4244,7 @@ impl DocxBlock {
 }
 
 /// One DOCX table's grid.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxTable {
     inner: documents_impl::DocxTable,
 }
@@ -4165,7 +4299,7 @@ impl DocxTable {
 }
 
 /// One DOCX table cell.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxCell {
     inner: documents_impl::DocxCell,
 }
@@ -4213,7 +4347,7 @@ impl DocxCell {
 }
 
 /// One DOCX hyperlink.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxLink {
     inner: documents_impl::DocxLink,
 }
@@ -4261,7 +4395,7 @@ impl DocxLink {
 }
 
 /// One DOCX picture.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct DocxImage {
     inner: documents_impl::DocxImage,
 }
@@ -4324,7 +4458,7 @@ impl DocxImage {
 
 /// The XLSX payload (the `document_structure` report's `payload` for an
 /// xlsx): thin getters over the core's plain struct; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxStructure {
     inner: documents_impl::XlsxStructure,
 }
@@ -4391,7 +4525,7 @@ impl XlsxStructure {
 }
 
 /// One XLSX worksheet.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxSheet {
     inner: documents_impl::XlsxSheet,
 }
@@ -4492,7 +4626,7 @@ impl XlsxSheet {
 
 /// One XLSX cell: the value as the file states it, discriminated by
 /// `type`, never coerced.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxCell {
     inner: documents_impl::XlsxCell,
 }
@@ -4581,7 +4715,7 @@ impl XlsxCell {
 }
 
 /// One defined name.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxDefinedName {
     inner: documents_impl::XlsxDefinedName,
 }
@@ -4632,7 +4766,7 @@ impl XlsxDefinedName {
 }
 
 /// One XLSX sheet hyperlink.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxHyperlink {
     inner: documents_impl::XlsxHyperlink,
 }
@@ -4674,7 +4808,7 @@ impl XlsxHyperlink {
 }
 
 /// One XLSX cell comment.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct XlsxComment {
     inner: documents_impl::XlsxComment,
 }
@@ -4711,7 +4845,7 @@ impl XlsxComment {
 
 /// The HTML payload (the `document_structure` report's `payload` for
 /// html): thin getters over the core's plain struct; `==` is structural.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlStructure {
     inner: documents_impl::HtmlStructure,
 }
@@ -4748,7 +4882,7 @@ impl HtmlStructure {
 }
 
 /// One HTML node (the nine reachable kinds).
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlNode {
     inner: documents_impl::HtmlNode,
 }
@@ -4863,7 +4997,7 @@ impl HtmlNode {
 }
 
 /// One HTML table grid.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlGrid {
     inner: documents_impl::HtmlGrid,
 }
@@ -4905,7 +5039,7 @@ impl HtmlGrid {
 }
 
 /// One HTML grid cell.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlGridCell {
     inner: documents_impl::HtmlGridCell,
 }
@@ -4959,7 +5093,7 @@ impl HtmlGridCell {
 }
 
 /// One inline annotation on an HTML node's text.
-#[pyclass]
+#[pyclass(module = "_tors_documents")]
 pub struct HtmlAnnotation {
     inner: documents_impl::HtmlAnnotation,
 }
@@ -5347,6 +5481,13 @@ fn convert(
     let source = parse_source(path, data, what)?;
     let format = parse_format(format)?;
     let backend = parse_backend(backend)?;
+    // The pages= shape refusals (empty selection, negative, non-index
+    // types) are the BINDING's, parsed under the GIL here — BEFORE the
+    // detach and so before the encrypted door: A10's order is two-tier
+    // (measured: pages=[] on a locked document answers the shape
+    // refusal, not the encryption refusal). The core's range
+    // validation (an index past the page count) runs post-open, after
+    // the door. The pdf_impl docstring states the PDF leg alone.
     let pages = parse_pages(pages)?;
     let password = parse_password(password)?;
     let max_bytes = parse_max_bytes(max_bytes)?;

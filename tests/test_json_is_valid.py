@@ -29,11 +29,13 @@ the scanner module's docs cite.
 
 The GIL-release claim gets its own pin: a co-resident asyncio heartbeat must
 keep ticking at ~10ms granularity while 1 MiB documents scan in a worker
-thread (the pattern of tests/test_gil_release.py, slimmed to this file: the
-scan is sub-millisecond, so the honest assertions are that the heartbeat
-ticks at all, keeps ticking across a 1s scan loop, and never gaps anywhere
-near a GIL-held whole-scan band). Uses no async pytest plugin: the test owns
-its loop via ``asyncio.run``.
+thread (tests/test_gil_release.py's shared verdict machinery — the #225
+port: pass-on-first-clean over the heartbeat budgets, the tiered
+starvation/wall-pin excuses separating a loaded runner's runqueue stalls
+from a lost GIL release, the scan being sub-millisecond so the flat
+assertions are the machinery's budgets plus the 1s scan loop's own
+throughput floor). Uses no async pytest plugin: the test owns its loop via
+``asyncio.run``.
 
 Booleans only: no invalid input raises — the depth cap is an answer
 (``False``), not an exception; the only error path is a wrong-TYPE argument
@@ -45,7 +47,6 @@ twice — the second through its cached UTF-8 view) give the same answer.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import json
 import time
 
@@ -478,41 +479,28 @@ assert len(_MIB_DOC) > 1024 * 1024
 
 
 def test_heartbeat_ticks_while_large_scans_run() -> None:
-    ticks: list[float] = []
-    stop = asyncio.Event()
+    from test_gil_release import _assert_loop_stays_responsive
 
-    async def heartbeat() -> None:
-        while True:
-            ticks.append(time.monotonic())
-            if stop.is_set():
-                return
-            await asyncio.sleep(0.01)
+    scanned: list[int] = []
 
-    async def run() -> None:
-        nonlocal stop
-        # The first tick must land while the scans are still running, well
-        # inside any GIL-held band of the loop's own workload.
-        first_tick_deadline = 0.5
-        scan_deadline = time.monotonic() + 1.0
-        scanned = 0
-        hb = asyncio.create_task(heartbeat())
-        started = time.monotonic()
-        try:
-            while time.monotonic() < scan_deadline:
-                await asyncio.to_thread(tors.json_is_valid, _MIB_DOC)
-                scanned += 1
-            first_tick = ticks[0] - started if len(ticks) > 1 else float("inf")
-            assert first_tick < first_tick_deadline, (
-                f"first heartbeat tick took {first_tick:.3f}s"
-            )
-            assert scanned >= 10, f"only {scanned} scans in 1s"
-        finally:
-            stop.set()
-            await hb
+    async def scan_loop() -> None:
+        # The first tick lands before the op starts (the machinery's leading
+        # sleep(0)), and the heartbeat must keep ticking at ~10ms granularity
+        # while the 1s loop of sub-millisecond scans runs: exactly the
+        # budgets the shared verdict machinery holds it to, with the tiered
+        # excuses for a loaded runner's starvation of the heartbeat thread —
+        # the bare flat max(gaps) + first-tick ceilings this replaced
+        # convicted that starvation as a regression.
+        deadline = time.monotonic() + 1.0
+        count = 0
+        while time.monotonic() < deadline:
+            await asyncio.to_thread(tors.json_is_valid, _MIB_DOC)
+            count += 1
+        scanned.append(count)
 
-    asyncio.run(run())
+    asyncio.run(_assert_loop_stays_responsive(scan_loop))
 
-    # No gap anywhere near a GIL-held band: the worst tick gap is the 10ms
-    # ping floor plus scheduling noise, not a held scan.
-    gaps = [b - a for a, b in itertools.pairwise(ticks)]
-    assert max(gaps) < 0.5, f"event loop gapped {max(gaps):.3f}s during the scans"
+    # The throughput floor: the loop really ran scans, at a rate no
+    # scheduler hit explains away.
+    count = scanned[-1]
+    assert count >= 10, f"only {count} scans in 1s"
