@@ -509,6 +509,23 @@ class TestPathCoercionNamesTheArgument:
         path.write_bytes(_PDF_BYTES)
         assert to_markdown(path) == to_markdown(str(path))
 
+    def test_a_bytes_fspath_pathlike_path_works(self, tmp_path: Path) -> None:
+        """Finding 13's pin: a PathLike whose ``__fspath__`` returns BYTES
+        is a legal path — ``open()`` accepts bytes paths, and
+        ``os.fspath`` yields the bytes faithfully. Pre-fix the typed
+        wrappers refused it (``path must be a str or os.PathLike, not
+        <class 'bytes'>`` — the message blamed the bytes for a thing
+        they can do). Green: the coercion fsdecode's the fspath result
+        and the call works, identical to the str spelling."""
+        path = tmp_path / "two.pdf"
+        path.write_bytes(_PDF_BYTES)
+
+        class BytesPath:
+            def __fspath__(self) -> bytes:
+                return os.fsencode(str(path))
+
+        assert to_markdown(BytesPath()) == to_markdown(str(path))
+
 
 # --- fix 5: the data= copy runs inside the detach ---------------------------
 
@@ -610,6 +627,123 @@ def test_a_400mb_data_call_keeps_the_gil_at_heartbeat_granularity() -> None:
     assert peak < 1_600_000, (
         f"peak RSS grew to {peak} kB — a third copy appeared (the fix moves "
         "the existing one, it must not add one):\n{report}"
+    )
+
+
+# --- the page-label bound: the render's memory, guarded ---------------------
+
+
+_ROMAN_OVERFLOW_PROBE = r"""
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from documents import generate_pdf_page_labels_value
+from tors_documents import pdf_page_labels
+
+# The hostile-but-legal /St values under a roman style: the subtractive
+# render is one char per thousand of the value, so pre-fix each page's
+# label was `value / 1000` chars, materialized for EVERY page
+# (4294967294 at 200 pages: 858,994,700 chars, 1.67 GiB RSS, measured).
+# Post-fix: bounded out to None above the 4 KiB label bound, nothing
+# built.
+for st, pages in ((4294967294, 200), (20000000, 50)):
+    data = generate_pdf_page_labels_value(pages, f"<< /S /r /St {st} >>")
+    t0 = time.perf_counter()
+    labels = pdf_page_labels(data=data)
+    wall = time.perf_counter() - t0
+    assert labels == [None] * pages, f"St {st}: the bounded-out law, all None"
+    print(f"St={st} pages={pages} wall={wall:.2f}s")
+if os.path.exists("/proc/self/status"):
+    hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
+    print(hwm.strip())
+"""
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/status").exists(), reason="the VmHWM half of the probe is Linux-shaped"
+)
+def test_the_page_label_render_is_bounded_in_time_and_space() -> None:
+    """The bounded-label law's resource cell (the finding's measured
+    before: 858,994,700 total chars, 1.67 GiB RSS at 200 pages for a
+    20 KB PDF — the docstring BLESSED that render pre-fix). Green: the
+    two hostile-but-legal roman values bound out to None per page (the
+    output half is pinned in test_documents_engines.py), the calls stay
+    in the sub-second band the O(1) bound-check buys, and the child's
+    peak RSS stays orders of magnitude under the pre-fix 1.67 GiB."""
+    def check(report: str) -> None:
+        walls = re.findall(r"wall=(\d+(?:\.\d+)?)s", report)
+        assert len(walls) == 2, f"the probe did not report both calls:\n{report}"
+        assert all(float(w) < 5.0 for w in walls), (
+            f"the label render laboured past the bound (walls {walls}) — "
+            "the render must refuse on the run's length before building"
+        )
+
+    report = first_clean(
+        lambda: _run_or_fail(_ROMAN_OVERFLOW_PROBE, str(Path(__file__).parent), timeout=120),
+        check,
+        samples=2,
+        label="the page-label bound probe",
+    )
+    peak = _hwm_kb(report)
+    assert peak < 300_000, (
+        f"peak RSS reached {peak} kB — the bounded-out render must cost "
+        f"O(1) per page, not the pre-fix 1.67 GiB:\n{report}"
+    )
+
+
+# --- the image caps: the actual-bytes law, memory-guarded -------------------
+
+
+_FLATE_DCT_CHAIN_PROBE = r"""
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from documents import generate_pdf_layout_flate_dct_chain
+from tors_documents import page_images
+
+# The measured probe's own shape: three Flate→DCT images in one ~584 KB
+# PDF, each inflating to 200 MB. The estimate reads the STORED bytes (a
+# few KB per image), so the pre-check saw spent+estimate <= 512 MiB and
+# SERVED all three — 572 MiB against the documented 512 MiB/call budget
+# (pre-fix). Post-fix the budget is a decode-time check on ACTUALS:
+# entries 1-2 stand, the third is refused scope="call".
+data = generate_pdf_layout_flate_dct_chain(images=3, container_size=200_000_000)
+entries = page_images(data=data, decode="pixels")[0].images
+kinds = [entry.data.kind for entry in entries]
+assert kinds == ["container", "container", "error"], kinds
+assert entries[2].data.error_kind == "size_cap", entries[2].data.error_kind
+assert entries[2].data.scope == "call", entries[2].data.scope
+assert entries[2].data.needed_bytes == 600_000_000, entries[2].data.needed_bytes
+print("ok")
+if os.path.exists("/proc/self/status"):
+    hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
+    print(hwm.strip())
+"""
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/status").exists(), reason="the VmHWM half of the probe is Linux-shaped"
+)
+def test_the_cumulative_image_budget_refuses_on_actuals() -> None:
+    """The image-cap fix's cumulative cell, subprocess + VmHWM (the
+    finding's measured before: three 200 MB inflations from one 584 KB
+    PDF served 572 MiB against the documented 512 MiB/call — the
+    pre-check saw spent+estimate=400 MB ≤ 512 MiB and never refused).
+    Green: the third entry is the typed scope='call' refusal, and the
+    child's peak RSS stays bounded by the two SERVED containers plus one
+    transient inflation (the refused decode's bytes never enter the
+    payload)."""
+    def check(report: str) -> None:
+        assert "ok" in report, report
+
+    report = first_clean(
+        lambda: _run_or_fail(_FLATE_DCT_CHAIN_PROBE, str(Path(__file__).parent), timeout=300),
+        check,
+        samples=2,
+        label="the cumulative image-budget probe",
+    )
+    peak = _hwm_kb(report)
+    assert peak < 2_000_000, (
+        f"peak RSS reached {peak} kB — the refused decode's bytes must not "
+        f"accumulate in the payload:\n{report}"
     )
 
 

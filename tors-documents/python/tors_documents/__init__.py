@@ -231,11 +231,17 @@ def _coerce_path(path: str | os.PathLike[str] | None) -> str | None:
     os.PathLike object, not int`` names neither the argument nor the
     function, against the every-message-names-the-argument convention the
     native layer already holds (probed once: ``to_markdown(123)`` died
-    in the wrapper before the native parse_path could refuse it properly)."""
+    in the wrapper before the native parse_path could refuse it properly).
+    A PathLike whose ``__fspath__`` returns BYTES is decoded (``os.fsdecode``)
+    rather than refused: ``open()`` accepts bytes paths, so a refusal would
+    blame the bytes for a thing they can do (finding 13's pin) — a
+    bytes-path is a real filesystem spelling (surrogate-escaped names
+    cannot round-trip through str faithfully), and fsdecode is the lossy
+    view ``open`` itself effectively accepts."""
     if path is None:
         return None
     try:
-        return os.fspath(path)
+        return os.fsdecode(os.fspath(path))
     except TypeError:
         raise TypeError(f"path must be a str or os.PathLike, not {path!r}") from None
 

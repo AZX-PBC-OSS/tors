@@ -151,10 +151,15 @@ The rules in brief:
   the page declares no label (no tree, or before the tree's first range) — the
   caller's fabricate-an-ordinal signal, never fabricated here; a declared label
   is always a string, including the empty one (a styleless, prefixless range
-  declares it). Labels render on u64 arithmetic (a legal `/St 4294967294` never
-  panics or wraps); rotation and crop are irrelevant (tree data); a corrupt
-  tree is presented as "no labels" (the documented masking). The encrypted door
-  governs unchanged: a locked document raises, never ciphertext labels.
+  declares it). Labels render on u64 arithmetic under the bounded-label law:
+  a label whose render exceeds 4 KiB bounds out to `None` for that page, never
+  truncated — the subtractive Roman render is one char per thousand of the
+  value, so a legal `/St 4294967294` renders 4,294,967 chars per page, a value
+  display-prohibitive by construction (decimal and alpha renders are O(log n)
+  and never reach the bound); the arithmetic itself never panics or wraps.
+  Rotation and crop are irrelevant (tree data); a corrupt tree is presented as
+  "no labels" (the documented masking). The encrypted door governs unchanged:
+  a locked document raises, never ciphertext labels.
 - `pdf_security` is the typed encryption/permissions probe — the door's one
   documented carve-out: it REPORTS the locked state (`ValueError`-free) instead
   of failing closed. `PdfSecurity` carries `.encrypted`,
@@ -319,6 +324,12 @@ geometry at all", and the two deliberately disagree:
 | xlsx | worksheet | worksheet count | office_oxide (count only) | `ValueError` |
 | doc / xls / ppt | section | section count | office_oxide (IR count) | `ValueError` |
 | html / csv / tsv / rtf / epub / odt / ods / odp | document | exactly 1 (`[None]`) | no engine runs | the same `[None]` — nothing to refuse |
+
+The worksheet count is the raw layer's kind-filtered WORKSHEETS
+(`SheetKind::Worksheet | Macro`): a chartsheet or dialog tab is not a
+unit — the same filter the structure surface's sheet list applies, so
+`page_geometry`/`page_layout` and `document_structure` agree on the same
+workbook (a chartsheet-bearing workbook answers 3 and 3, pre-fix 4 and 3).
 
 Office sizes are honest per unit: docx sections read the RAW declared size
 (twips ÷ 20 — a margins-only section is `None`, never a fabricated Letter),
@@ -494,10 +505,19 @@ decode is the engine's `Unsupported` verbatim, feature-gated).
 (`"not_requested" | "container" | "raw" | "error"`); every arm getter is
 `None` unless `kind` names it — "no bytes" is never two different things.
 A decode failure is a **visible typed entry**, siblings intact. Caps: 256
-MiB per image (the chain-aware pre-decode estimate), 512 MiB per call
-cumulative, the over-cap image a typed `size_cap` entry
+MiB per image, 512 MiB per call cumulative — the caps bind on **actual
+bytes**: the chain-aware pre-decode estimate is the advisory pre-labour
+check, and the same caps re-run on each decode's ACTUAL output
+immediately after it, before the bytes enter the payload (one chain class
+under-estimates by construction: a Flate→DCT chain is applied
+innermost-first, so the container is the INFLATED stream, measured
+3,898 stored bytes → 4,000,000 container bytes — caught post-decode). The
+over-cap image is a typed `size_cap` entry
 (`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated (a
-truncated image is a wrong image with no marker); `max_image_bytes=`
+truncated image is a wrong image with no marker); the call budget is a
+budget checked at decode time, so an under-estimated chain can push the
+call past it by at most one image's inflation (that entry refuses, scope
+`call`; entries already served stand); `max_image_bytes=`
 overrides the per-image ceiling (raising it past the engine's env-read
 `PDF_OXIDE_MAX_DECOMPRESS_MB` cannot make the ENGINE decode more). The
 payload describes itself (`components`/`bpc` are the buffer's stride;
@@ -604,7 +624,15 @@ backend with a format-level `ValueError` ("document_structure cannot serve
 …") fired before the backend check, resolved from `format=`/the 64 KiB
 prefix alone — a `path=` + `format="pdf"` call on a 40 MiB file answers
 the refusal, never a ceiling error: no body read (the 64 KiB format probe
-runs only when the name alone cannot decide). The served office
+runs only when the name alone cannot decide). The probe's own byte
+budget: an explicit `format=` naming a non-Excel kind consults NO bytes
+and touches NO filesystem (a chmod-000 file, a directory, or a missing
+path with `format="pdf"` answers the refusal — its `OSError` never
+fires, pre-fix the probe opened and read the file it was about to
+refuse), and on `data=` the probe sniffs only the bounded 64 KiB prefix,
+never the whole buffer (the GIL contract: pre-fix a 128 MiB blob held
+the GIL 356.5 ms in the pre-read sniff; the authoritative resolve on the
+full bytes stays post-detach). The served office
 rows refuse `backend="anydoc"` as a capability (its office lane is
 whole-document markdown; the raw layers are office_oxide's). html's forced
 backends are conversion's own `UnsupportedBackend` pair, byte-identical. An
@@ -623,9 +651,17 @@ The surface-wide laws:
   and `XlsxStructure.unreadable_sheets` carry the raw layers' own
   cannot-parse records verbatim; the intact parts are served.
 - **One entry cap, truncate-with-marker.** `MAX_STRUCTURE_ENTRIES`
-  (200,000) bounds the payload's entry lists (docx blocks, xlsx cells,
-  html nodes) in document order, with `entries_truncated: true` on the
-  affected payload and all sheet/range/merge/name metadata complete. It
+  (200,000) bounds the payload's entry lists in document order as ONE
+  running budget that counts every materialized entry OBJECT: docx
+  blocks AND the table cells inside a table block, xlsx cells, html
+  nodes AND the grid cells inside a table node — a cell is an entry
+  object (pre-fix the cap let a 1M-cell docx table ride inside one
+  block and 300k html cells inside one node). The walk stops building
+  at zero remaining: the kept prefix stays in document order
+  (parents-before-children holds on html; a stopped table keeps its
+  grid metadata, its kept cells row-major; cells inside a stopped table
+  drop with the table), `entries_truncated: true` marks the affected
+  payload, and all sheet/range/merge/name metadata stays complete. It
   bounds PAYLOAD MARSHALLING, not the parse — the engine has already
   materialized everything by the time the cap applies — and it never
   refuses.
