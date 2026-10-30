@@ -223,7 +223,15 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
     token is a clean boundary even when the digest ends hex-dirty, so
     an adjacent number still scrubs exactly; and
     (3) no partial match inside a longer run — twelve-plus digits is an
-    id, not a phone. Leading spaces are skipped (word separation); a
+    id, not a phone — EXCEPT the width cut's group re-scan: a wider run
+    that bridges numbers with SPACES (`415-555-2671 415-555-2672`) is
+    re-scanned at group granularity, and each group the domestic grammar
+    accepts (exactly 10 or 11-with-`1` digits, an internal separator, a
+    clean start, the completing digit followed by a space or the run's
+    end) scrubs with its own digest — the old whole-run skip silently
+    leaked every bridged number. The cut fires on SPACES only, which is
+    what keeps the near-miss neighbors out (see the residual list).
+    Leading spaces are skipped (word separation); a
     leading structural separator (`-`, `.`, `(`, `)`) is ABSORBED into
     the match, not stripped (`x -415-555-2671` scrubs `-415-555-2671`
     whole); trailing separators survive past the last digit, same as
@@ -388,6 +396,18 @@ timestamps:
 - Bare digit runs never match even at ten/eleven digits (`4155552671`,
   `14155552671` are order numbers), and short `+`-led runs never match
   (`+1234567`, seven digits, is the ported non-match).
+- The domestic group re-scan cuts on SPACES only: dash- or dot-bridged
+  pairs leak whole (`415-555-2671-415-555-2672`, `415-555-2671.415-555-2672`
+  — the same shape the dash-chained id spells, ambiguous with it), as do
+  pairs bridged by any other separator (`)`-close then space). A pair
+  separated by a comma or newline was never a single run (neither char is
+  phone-class) and always scrubbed as two matches. Canonicalize (map
+  `-`/`.` between digit groups to spaces) before scrubbing if those
+  spellings are in threat.
+- 4-digit credit-card groupings stay out of the same re-scan
+  (`4111 1111 1111 1111`): the digit count passes through ten only
+  INSIDE a digit run, and a cut never fires mid-spelling — the count
+  must complete at a space or the run's end.
 - Extensions survive past the last digit: `415-555-2671 x1234` scrubs
   `415-555-2671` and leaves ` x1234` untouched, same as international
   (trailing separators survive; the extension is not part of the match).
@@ -685,8 +705,9 @@ Six names, one closed set:
   > keeps the exact five-name contract.
 - `uri_query_creds_extended` — the SAME `[?&]` anchor over the EXTENDED
   credential-key set: the shared five plus the ops-standard
-  query-parameter names (`access_key`, `api_key`, `apikey`, `auth`,
-  `key`, `passkey`, `pw`, `sas_token`, `secret`, `sig`, `token`). The names
+  query-parameter names (`access_key`, `access_token`, `api_key`,
+  `apikey`, `auth`, `key`, `oauth_token`, `passkey`, `pw`,
+  `refresh_token`, `sas_token`, `secret`, `sig`, `token`). The names
   are the published scanner lists, transcribed and closed: ESLint
   `no-credentials-in-query-params` (eslint-plugin-browser-security)'s
   default sensitive terms (`password`, `token`, `secret`, `api_key`/
@@ -697,11 +718,12 @@ Six names, one closed set:
   access logs, proxy logs, browser history, and the `Referer` header of
   every outbound link). Judicious cuts, stated: no
   `session`/`sessionid`/`sid` (session identifiers are not credentials;
-  masking them corrupts a log line for nothing), no
-  `access_token`/`refresh_token`/`auth_token` (the `_token` suffix
-  family is real but open-ended — `oauth_token=` does not mask under
-  the closed set, the documented seam; more names arrive as evidence
-  names them, never by pattern).
+  masking them corrupts a log line for nothing), and no
+  `auth_token` (the `_token` suffix family is open-ended — the one
+  `_token` name left out after the evidenced trio arrived:
+  `access_token=` is the canonical CWE-598 leak shape,
+  `refresh_token=`/`oauth_token=` its OAuth siblings; more names
+  arrive as evidence names them, never by pattern).
 - `libpq_conninfo_creds` — the keyword/value anchor of the SAME pass:
   `name=value` where the name is not the tail of a longer word (the
   live chain's `(?<![A-Za-z0-9_])` lookbehind), so libpq conninfo text
@@ -861,22 +883,34 @@ head) glued to a preceding key-charset char `[A-Za-z0-9_-]` is
 mid-token and never fires (`XAKIA…`), unless that char ends a complete
 escape sequence (`%XX`, `\uXXXX`, …) or an ANSI CSI sequence
 (formatting material, not a word), or the position opens a PEM BEGIN
-head after a dash run. Exact-width grammars refuse a candidate inside a
-LONGER run of their own alphabet (a near-miss is a longer word, never a
-match).
+head after a dash run. The prefixed grammars consume their tails
+MAXIMALLY at the pinned minimum width: a SHORTER run is the near-miss
+refusal (a longer word's fragment, never a match), and a LONGER run is
+ONE LONG key — the keys rule's own doctrine, over-redaction in the safe
+direction, and what keeps the pass strictly idempotent (a width-cut
+residue glued behind the token's own 12-hex digest composes the
+prefixless legacy class's 40-hex shape — fuzz-proven). The prefixless
+legacy hex class keeps the full exact-width refusal (no prefix to
+anchor a minimum on; a 41-plus hex run is a longer word — a SHA-256, an
+identifier).
 
-- `aws_access_key` — `AKIA`/`ASIA` + exactly 16 chars of `[0-9A-Z]`.
-  The prefixes are the access-key-ID heads AWS's own docs spell
+- `aws_access_key` — `AKIA`/`ASIA` + at least 16 chars of `[0-9A-Z]`,
+  the tail consumed maximally (a key glued to further tail-class
+  material is one long key); a shorter run is the near-miss refusal.
+  The prefixes are the
+  access-key-ID heads AWS's own docs spell
   (the `AKIA` + `IOSFODNN7EXAMPLE` example, IAM's "Manage access keys"
   page); the tail
   alphabet is uppercase letters and digits — Amazon's example carries
   both `I` and `O`, so there is no I/O exclusion to implement. The
-  class matches detect-secrets' AWS detector and trufflehog's
+  class redacts a superset of detect-secrets' AWS detector (whose
+  pattern `(?:A3T[A-Z0-9]|ABIA|ACCA|AKIA|ASIA)[0-9A-Z]{16}` has no
+  trailing boundary) and of trufflehog's exact-width spelling
   (`\b(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}\b`); tors pins the two
   live/temporary credential prefixes. AWS documents no checksum for
   access key IDs, so none is validated and none is claimed. False
-  positives: 20-char `[0-9A-Z]` strings with an `AKIA`/`ASIA` head at a
-  clean boundary — rare outside real key material.
+  positives: `[0-9A-Z]` strings at least 20 chars with an `AKIA`/`ASIA`
+  head at a clean boundary — rare outside real key material.
 - `slack_token` — case-insensitive `xox[abprso]-` + one or more
   digit-run/dash sections + a final alphanumeric run: detect-secrets'
   Slack detector (`xox(?:a|b|p|o|s|r)-(?:\d+-)+[a-z0-9]+` under
@@ -904,7 +938,9 @@ match).
   docs) stays a documented exclusion. The REPORT says which environment
   a key belongs to (`stripe_live`/`stripe_test`).
 - `github_token` — two classes under one name. Modern:
-  `(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}`, exactly 36 — GitHub's
+  `(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}` — at least 36, the tail
+  consumed maximally (the aws grammar's own posture; a shorter run is
+  the near-miss refusal) — GitHub's
   token-format post pins the five prefixes, the `_` separator, and the
   base62 body (30 random chars plus a 6-char checksum tail). GitHub
   DEFINES that checksum (a 32-bit CRC32 base62-encoded) but does not
@@ -1496,8 +1532,10 @@ uncatchable allocator abort). The ceiling applies before the identity contract's
 borrowed return, so a replace whose output would exceed it raises even when the
 net effect would be the identity — a >32 MiB "identity" replace is the
 amplification shape wearing a disguise. The masked spelling below is
-length-preserving and has no ceiling (a short key cannot amplify into a long
-output there).
+character-count-preserving and has no ceiling (its byte size is bounded, not
+preserved — at most 4 × the input's character count, one 4-byte character
+per character at worst — so a short key cannot amplify a bounded input into
+an unbounded output there).
 
 ```python
 tors.replace_many("the cat sat in the catalogue", {"cat": "dog", "catalogue": "library"})
@@ -2671,7 +2709,12 @@ are correct with no rewriting); bare words and Python literals repair
 casing, the strict special floats `NaN`/`Infinity`/`-Infinity` kept at
 their exact spellings); numbers follow the engine's run-and-rollback
 lanes (`1e+` heals to `"1e"`, `1,000` to `"1,000"`, `12abc` to
-`"12abc"`); comments skip (top-level ones exactly like the engine);
+`"12abc"`); an object-lane number run that absorbed a comma and rewound
+at an alphabetic char splits at the `:` proving the post-comma text a
+key — the value renders up to the comma, the post-comma text re-enters
+the key lane (`{"a": 1,7Z: 8}` to `{"a": "1", "7Z": 8}`, the engine's
+own classify_object_value_comma split); comments skip (top-level ones
+exactly like the engine);
 tuples and groupings split the engine's own way (`(1)` to `1`, `(1,)` to
 `[1]`, `{"a": (1, 2)}` to `{"a": [1, 2]}`); a closer matching a frame
 below the innermost one closes the levels between (`{"a": [1, 2}` to
@@ -2798,9 +2841,18 @@ strips the newline and `[NaN, 1` quotes the float — the stream keeps the
 strict spelling mid-document and matches only the tail-of-stream cases:
 the string last before the cut, the word still in flight); the paren-with-
 colon conversion (the engine turns a colon inside the parenthesized
-container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`);
-the mismatched-closer garbage where the engine's whole-text close-up
-re-decides earlier structure (both outputs valid); the word-swallow (a
+container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`); the
+mismatched-closer garbage where the engine's whole-text close-up
+re-decides earlier structure (both outputs valid); the comma-glue split's
+optimistic residual (the object-lane comma-glue rewind SPLITS at the `:`
+proving the post-comma text a key — `{"a": 1,7Z: 8}` to
+`{"a": "1", "7Z": 8}`, the engine's own classify split — but the engine's
+recoverable-value check needs the post-colon value's own tail to the
+object's `}`, which a linear machine has not seen: a bare-word value whose
+tail holds a quote before the close, or a cut before the close, keeps the
+comma on the engine's side where the stream split — `{"a": 1,b: x"y}` to
+the engine's `{"a": "1,b: x"}`, the stream `{"a": "1", "b": "x\"y"}`); the
+word-swallow (a
 bare word born at an array position runs past a mismatched closer in the
 engine's reparse: `[1e}` to `[1, "e}"]`, the stream `[1, "e"]`); the
 unquoted-value run's absorption (the engine's unquoted-value lane eats
@@ -6715,8 +6767,10 @@ value). Wrong TYPES raise `TypeError`
 or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
 extraction failure), a non-sequence `weights` (a bare `str` included), a
 non-numeric `weights` entry, an unhashable id, whose error is
-Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
-extracts as its `0`/`1` value, the int-extraction convention). For
+Python's own; a `bool` where an int belongs (`k=True`) extracts as its
+`0`/`1` value, the int-extraction convention, while a `bool` in `gains`
+or `weights` is a `TypeError` (a non-numeric value including `bool` is
+refused: `True`/`False` are not gains or weights). For
 nDCG, legal finite gains can be so large the DCG and
 IDCG sums overflow to `+inf`; the score then saturates instead of
 dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite
@@ -8353,17 +8407,25 @@ number (a style present).
 The covering rule is the engine's minus its ordinal fallback: the last range
 in the stable-sorted tree with `start_page ≤ i` covers page `i`; two ranges
 sharing a start page resolve to the last in traversal order (root `/Nums`
-before `/Kids`, kids in array order). Labels render on u64 arithmetic (a
-legal `/St 4294967294` renders through `4294967296` without panic or wrap;
-an over-u32 `/St` carries the engine's own parse-time truncation, e.g.
-`/St 5000000000` reads back as `705032704`). Rotation and crop are irrelevant
+before `/Kids`, kids in array order). Labels render on u64 arithmetic under
+the bounded-label law: a label the render builds past 4 KiB bounds OUT to
+`None` for that page, never a truncated numeral — the subtractive Roman
+render is one char per thousand of the value, so a legal `/St 4294967294`
+renders 4,294,967 chars per page (858,994,700 total chars and 1.67 GiB RSS
+at 200 pages, measured before the bound), a value display-prohibitive by
+construction; decimal and alpha renders are O(log n) and never reach the
+bound. The arithmetic itself never panics or wraps; an over-u32 `/St`
+carries the engine's own parse-time truncation, e.g. `/St 5000000000` reads
+back as `705032704`. Rotation and crop are irrelevant
 (tree data). A corrupt tree (a non-dict `/PageLabels`, tree node, `/Kids`
 member, or label entry) is presented as "no labels" — every page `None`, the
 content-read-failure law, the same list a tree-less document answers; that is
 a deliberate masking, stated here the way `tables_refused: false` is.
 
-The styles: decimal (`D`), uppercase/lowercase Roman (`R`/`r`, unbounded —
-4000 is `MMMM`), uppercase/lowercase alpha (`A`/`a`, bijective base-26 — Z
+The styles: decimal (`D`), uppercase/lowercase Roman (`R`/`r`, the
+subtractive table under the 4 KiB label bound — 4000 is `MMMM`; a value
+whose render passes the bound answers `None`, never a truncated numeral),
+uppercase/lowercase alpha (`A`/`a`, bijective base-26 — Z
 wraps to AA), and the styleless label-only form. `/St` offsets where the
 range's numbering starts (positive; `/St 0`/`-3` read as the default 1);
 `/P` prefixes as UTF-16BE (with BOM) or PDFDocEncoding text strings.
@@ -8595,7 +8657,10 @@ def page_geometry(
 ```
 
 The declared-box geometry probe: one entry per unit of the resolved format —
-PDF pages, docx sections, pptx slides, xlsx worksheets, legacy
+PDF pages, docx sections, pptx slides, xlsx worksheets (the raw layer's
+kind filter: a chartsheet or dialog tab is NOT a unit — the same filter
+the structure surface's sheet list applies, so the surfaces agree on the
+same workbook), legacy
 doc/xls/ppt sections — `None` where that unit declares no box, `[]` only for
 zero units. Each `Some` entry is a `PageGeometry` (below): the render extent
 in points with the axes swapped for a 90/270 PDF rotation (the turn already
@@ -8745,7 +8810,9 @@ against rulings in another — a ruled table vanishes there, a 180-symmetric one
 comes back with every cell's text 180°-swapped), this surface reports no tables
 rather than wrong ones; `true` at rotation 0 → **the edge cap** (a page with
 more table primitives than the markdown lane's own 1500-edge bail-out;
-detection skipped). FALSE for no-tables pages, for content-stream failures
+detection skipped) or **the unreadable path walk** (fail-closed: a failed
+`extract_paths` refuses the page rather than deciding "no rulings" from an
+input it couldn't read). FALSE for no-tables pages, for content-stream failures
 (unknowable — `tables: []` stays indistinguishable from a no-tables page, like
 `page_layout`'s empty lists), and on office rows (there `tables: []` is the
 per-format capability statement and the entry's `format` field is the marker).
@@ -8839,11 +8906,18 @@ engine's `Unsupported` verbatim (feature-gated).
 "raw" | "error"`); every arm getter is `None` unless `kind` names it — "no bytes" is
 never two different things. A decode failure is a **visible typed entry**
 (`error_kind: "decode" | "unsupported" | "size_cap"`), siblings intact. Caps: 256
-MiB per image (the chain-aware pre-decode estimate: the container's own size for a
-DCT chain, the packed bits for CCITT, the unpacked one-byte-per-component arithmetic
-otherwise), 512 MiB per call cumulative, the over-cap image a typed `size_cap` entry
-(`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated;
-`max_image_bytes=` overrides the per-image ceiling (raising it past the engine's
+MiB per image, 512 MiB per call cumulative — the caps bind on **actual bytes**: the
+chain-aware pre-decode estimate (the container's own size for a DCT chain, the packed
+bits for CCITT, the unpacked one-byte-per-component arithmetic otherwise) is the
+advisory pre-labour check, and the same caps re-run on each decode's ACTUAL output
+immediately after it, before the bytes enter the payload (one chain class
+under-estimates by construction: a Flate→DCT chain is applied innermost-first, so the
+container is the INFLATED stream — measured 3,898 stored bytes → 4,000,000 container
+bytes). The over-cap image is a typed `size_cap` entry
+(`scope`/`limit_bytes`/`needed_bytes`) — refused, never truncated; the call budget is a
+budget checked at decode time, so an under-estimated chain can push the call past it by
+at most one image's inflation (that entry refuses, scope `call`; entries already served
+stand); `max_image_bytes=` overrides the per-image ceiling (raising it past the engine's
 env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` cannot make the ENGINE decode more).
 
 The honesty flags, stated where the engine leaves them: an image XObject with a
@@ -8939,8 +9013,10 @@ page = tors.documents.page_text_chars(data=generate_pdf_layout_baseline())[0]
 The `page_images` classes, exposed directly (the `PageGeometry` deviation note
 applies); `==` is structural. `PageImagesData`: `page_index`, `format` (the
 provenance marker), `geometry` (the `page_geometry` entry — the images are STILL
-enumerated when it is `None`, their `bbox` `None`), `images` (paint order).
-`PageImageEntry`: `bbox` (`None` when no frame), `width_px`/`height_px` (the
+enumerated when it is `None`, their `bbox` `None`; a DEGENERATE
+zero/non-finite-extent box is the same None-frame answer — the bytes are
+frame-independent, only the box is gated), `images` (paint order).
+`PageImageEntry`: `bbox` (`None` when no usable frame), `width_px`/`height_px` (the
 DICTIONARY's), `rotation_degrees`, `paint_order`, `color_space` (spelled:
 `"DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "Indexed" | "CalGray" | "CalRGB" |
 "Lab" | "ICCBased(n)" | "Separation" | "DeviceN" | "Pattern"`),
@@ -9125,8 +9201,11 @@ capability; html's forced backends are conversion's own
 with the legacy-xls-or-encrypted-xlsx union message. There is NO
 `password=` parameter: no served format accepts one. An explicit
 `max_bytes=` binds pre-read; `None` keeps the 32 MiB default ceiling on
-every served row; the 200,000-entry payload cap truncates with
-`entries_truncated` (metadata stays complete), never refusing.
+every served row; the 200,000-entry payload cap is one running budget
+over every materialized entry OBJECT (docx blocks and their table cells,
+xlsx cells, html nodes and their grid cells — a cell is an entry object)
+that truncates with `entries_truncated` (metadata stays complete; the
+kept prefix keeps the reading-order invariants), never refusing.
 `format=` is trusted and never re-sniffed — the fix-it is
 [`sniff`](#torsdocumentssniff).
 
@@ -9177,7 +9256,9 @@ section), `section_breaks: list[int]` (verbatim; section i covers body
 elements `[prev_break, section_breaks[i])`), `footnotes`/`endnotes`/
 `comments: int` (body counts; v1 keeps note BODIES out),
 `unreadable_parts: list[str]` (the raw layer's cannot-parse records,
-verbatim — the report-the-loss law), and `entries_truncated: bool`.
+verbatim — the report-the-loss law), and `entries_truncated: bool`
+(the running entry budget counts blocks AND their table cells — a cell
+is an entry object).
 
 ## `tors.documents.DocxBlock`
 
@@ -9288,8 +9369,11 @@ Attributes: `cell_ref: str`, `author: str | None`, `text: str`.
 The html payload; `==` is structural (both fields). Attributes:
 `nodes: list[HtmlNode]` (the flat array, reading order, parents before
 children — the auto-built Group tree IS the heading tree) and
-`entries_truncated: bool` (the kept prefix stays index-sound; children
-filtered to kept indices). No second tables list: the Table nodes carry
+`entries_truncated: bool` (the running entry budget counts nodes AND
+their grid cells — a cell is an entry object; the kept prefix stays
+index-sound; children
+filtered to kept indices; cells inside a stopped table drop with the
+table). No second tables list: the Table nodes carry
 the grids.
 
 ## `tors.documents.HtmlNode`

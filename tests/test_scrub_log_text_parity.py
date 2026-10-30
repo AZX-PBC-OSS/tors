@@ -128,7 +128,10 @@ QUOTED_CRED_PARAM_NAMES: tuple[str, ...] = (
 # bytes). The mixed combined pattern's two name lists are quoted as one
 # string each (the reference interpolates both).
 QUOTED_CRED_PARAM_NAMES_EXTENDED: tuple[str, ...] = (
+    "refresh_token",
+    "access_token",
     "sslpassword",
+    "oauth_token",
     "passphrase",
     "access_key",
     "sas_token",
@@ -500,8 +503,9 @@ _CORPUS: list[str] = [
     " password=a&password=b",
     "?password=a=password",
     # The extended key set (uri_query_creds_extended): the ops-standard
-    # names the adoption verdict flagged, near misses (longer names whose
-    # tails are keys: oauth_token, api_key inside xapi_key), the
+    # names the adoption verdict flagged plus the evidenced `_token`
+    # trio, near misses (longer names whose
+    # tails are keys: auth_token, api_key inside xapi_key), the
     # delimiter boundaries, values spanning to end of text, quoted
     # values, the shared-five vectors byte-identical under the
     # superset lane.

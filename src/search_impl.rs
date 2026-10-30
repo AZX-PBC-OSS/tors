@@ -86,15 +86,19 @@
 //!
 //! The pattern list may be empty (answers empty, and building a zero-pattern
 //! automaton is legal), but every entry must be non-empty: an empty pattern
-//! would match at every position and has no leftmost-longest meaning; the
-//! wrapper refuses it with `ValueError("empty pattern")`. The build itself
+//! would match at every position and has no leftmost-longest meaning. The
+//! precondition is enforced twice over: [`build_leftmost`] asserts it (the
+//! one choke point every entry path here shares, `scan_impl::
+//! find_unescaped`'s pattern), and the pyo3 wrapper refuses it with
+//! `ValueError("empty pattern")` — the Python spelling of the same refusal.
+//! The build itself
 //! can still fail on engine limits (a pattern longer than the automaton's
 //! u32 span budget, or more patterns than its ID space), hence the
 //! `Result`, mapped by the wrapper to a `ValueError` carrying the engine's
 //! message; both are unreachable for any input a real caller can build.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use aho_corasick::{AhoCorasickBuilder, MatchKind};
 
@@ -118,6 +122,16 @@ pub struct PatternMatch {
 /// [`CompiledPatterns`]'s one-time build, so the two spellings drive the
 /// identical engine configuration by construction.
 fn build_leftmost(patterns: &[&str]) -> Result<aho_corasick::AhoCorasick, BuildError> {
+    // The module docs' non-empty-pattern precondition, enforced HERE — the
+    // single choke point every entry path (the free find / count / replace
+    // / masked-replace spells and the compiled build) shares — mirroring
+    // `scan_impl::find_unescaped`'s own assert. The pyo3 wrapper's
+    // `ValueError("empty pattern")` is the Python spelling of this refusal;
+    // a direct Rust caller handing an empty pattern over now panics named
+    // instead of matching at every position.
+    for pattern in patterns {
+        assert!(!pattern.is_empty(), "empty pattern");
+    }
     AhoCorasickBuilder::new()
         .match_kind(MatchKind::LeftmostLongest)
         .build(patterns)
@@ -410,11 +424,15 @@ impl From<BuildError> for ReplaceError {
 /// surfaced with the refused size in the error).
 ///
 /// The masked spelling needs NO ceiling and has none: it is
-/// length-preserving (`replace_many_masked`'s length proof — the output's
-/// byte and character size are the input's plus at most the mask's
-/// per-match delta, every span replaced by exactly its own length), so a
-/// short key cannot amplify into a long output; the per-match TIME bound
-/// is the only resource the masked splice consumes (issue #101's lane).
+/// length-preserving in CHARACTERS (`replace_many_masked`'s length proof —
+/// every span is replaced by exactly its own character count, so the
+/// output's character size is the input's), and its byte size is bounded
+/// though not preserved: `bytes_out <= 4 * chars_in` (every output
+/// character is at most 4 UTF-8 bytes, the truncation branch spending the
+/// whole budget — one 4-byte value character per 1-byte span), so a short
+/// key cannot amplify a bounded input into an unbounded output; the
+/// per-match TIME bound is the only other resource the masked splice
+/// consumes (issue #101's lane).
 pub const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 
 /// The shared splice of the replace side: [`replace_many`]'s scan over a
@@ -469,15 +487,12 @@ fn scan_replace<'a>(
     let mut out = String::new();
     out.try_reserve(out_len)
         .map_err(|_| ReplaceError::ReservationRefused { requested: out_len })?;
-    let mut matched = false;
     let mut last = 0usize;
     for m in ac.find_iter(text) {
-        matched = true;
         out.push_str(&text[last..m.start()]);
         out.push_str(values[&text[m.start()..m.end()]]);
         last = m.end();
     }
-    let _ = matched;
     out.push_str(&text[last..]);
     // The identity contract's second lane: a replacement whose net effect is
     // the identity (value == key, or mutually-cancelling splices) hands back
@@ -543,6 +558,11 @@ fn scan_replace<'a>(
 /// mask replaces the matched key's bytes (`"a"` → `"é"` is 1 char to 1
 /// char but 1 byte to 2), so byte-unit arithmetic on the output is not
 /// preserved. This is by design, because no byte-unit offset is ever reported.
+/// What bytes are is BOUNDED, not preserved: the output is at most
+/// 4 × the input's character count in bytes (every output character is at
+/// most 4 UTF-8 bytes, the truncation branch spending that whole budget —
+/// one 4-byte value character per 1-byte span), so even here a short key
+/// cannot amplify a bounded input into an unbounded output.
 ///
 /// # Identity-return contract
 ///
@@ -747,9 +767,9 @@ impl CompiledPatterns {
     /// The one-time build: the automaton, the remaps, and the owned
     /// pattern strings, from a non-empty-entry pattern list (the empty
     /// list is legal and compiles to a zero-pattern automaton that finds
-    /// nothing; the entry-level refusal is the caller's, the same
-    /// `ValueError("empty pattern")` contract the free functions' wrapper
-    /// enforces).
+    /// nothing; the entry-level empty-pattern refusal is
+    /// [`build_leftmost`]'s assert — the same contract the free functions'
+    /// wrapper enforces as `ValueError("empty pattern")`).
     pub fn build(patterns: &[&str]) -> Result<Self, BuildError> {
         let ac = build_leftmost(patterns)?;
         let first_id = first_id_remap(patterns);
@@ -798,15 +818,24 @@ impl CompiledPatterns {
     ) -> Result<HashMap<&'a str, &'a str>, ReplacementsMismatch> {
         let mut values: HashMap<&str, &str> = HashMap::with_capacity(pairs.len());
         let mut unknown: Vec<String> = Vec::new();
+        let mut seen_unknown: HashSet<&str> = HashSet::new();
         for (key, value) in pairs {
-            if !self.first_index.contains_key(*key) {
+            if !self.first_index.contains_key(*key) && seen_unknown.insert(*key) {
+                // Each DISTINCT unknown key is reported once, in
+                // first-occurrence pair order (the message's own
+                // contract): a duplicated unknown pair is one unknown
+                // key, not two.
                 unknown.push((*key).to_string());
             }
             values.entry(*key).or_insert(*value);
         }
-        // Dict keys are unique, so the in-set key count is the map's size
-        // minus the unknown ones, and every compiled pattern is valued
-        // exactly when that count reaches the pattern set's size.
+        // The in-set key count is the map's DISTINCT keys minus the
+        // DISTINCT unknown ones — `unknown` is deduped, so it can never
+        // exceed `values.len()` and the subtraction cannot wrap (the
+        // pre-fix spelling subtracted the PAIR count here and underflowed
+        // on duplicate unknown keys: a debug panic, and a release wrap
+        // that zeroed the missing count) — and every compiled pattern is
+        // valued exactly when that count reaches the pattern set's size.
         let in_set = values.len() - unknown.len();
         let missing = self.first_index.len().saturating_sub(in_set);
         if !unknown.is_empty() || missing > 0 {
@@ -1940,6 +1969,54 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_unknown_pairs_are_one_unknown_key_not_two() {
+        // The validation counts DISTINCT keys: the pre-fix spelling
+        // pushed one `unknown` entry PER PAIR while `values` held one
+        // entry per distinct key, so `values.len() - unknown.len()`
+        // underflowed on duplicate unknown keys — a debug panic
+        // ("attempt to subtract with overflow"), and a release wrap that
+        // answered missing == 0 while the message named "dog" twice. One
+        // unknown key, reported once, the missing count intact.
+        let cp = compiled(&["cat"]);
+        let err = cp
+            .replace_values(&[("dog", "1"), ("dog", "2")])
+            .unwrap_err();
+        assert_eq!(err.unknown, vec!["dog".to_string()]);
+        assert_eq!(err.missing, 1);
+        assert_eq!(
+            err.message(),
+            "replacements must pair every compiled pattern with a value \
+             (no others): unknown keys [\"dog\"], 1 pattern(s) missing a value"
+        );
+        // Mixed: the known key keeps its value and the duplicated unknown
+        // still counts once (missing == 0: "cat" is valued).
+        let err = cp
+            .replace_values(&[("cat", "X"), ("dog", "1"), ("dog", "2")])
+            .unwrap_err();
+        assert_eq!(err.unknown, vec!["dog".to_string()]);
+        assert_eq!(err.missing, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "empty pattern")]
+    fn empty_pattern_is_a_core_precondition_violation() {
+        // The module docs' non-empty-pattern precondition is enforced
+        // Rust-side too, at the one choke point every entry path shares
+        // (build_leftmost, scan_impl::find_unescaped's pattern): the pyo3
+        // wrapper's ValueError is the Python spelling of this refusal.
+        let _ = find_patterns(&[""], "abc");
+    }
+
+    #[test]
+    #[should_panic(expected = "empty pattern")]
+    fn the_compiled_build_refuses_the_empty_pattern_too() {
+        // The compiled spelling builds through the same choke point, so
+        // the assert covers it by construction — pinned so the choke-point
+        // claim cannot silently rot.
+        let _ = CompiledPatterns::build(&["cat", ""]);
+    }
+
+    #[test]
     fn compiled_matches_the_free_functions_over_multibyte_random_texts() {
         // The multibyte random sweep, compiled side: the same deterministic
         // LCG texts the free spelling's sweep builds, the compiled fixture
@@ -2070,13 +2147,34 @@ mod tests {
 
     #[test]
     fn the_masked_spelling_has_no_ceiling_because_it_cannot_amplify() {
-        // Length-preserving: the output's byte size is the input's, so a
-        // short key cannot amplify and the masked splice runs uncapped
-        // (the ceiling lives in scan_replace only). 33 MiB in, 33 MiB out.
+        // Length-preserving in CHARACTERS; on this all-ASCII shape the
+        // byte size is the input's too, so a short key cannot amplify and
+        // the masked splice runs uncapped (the ceiling lives in
+        // scan_replace only). 33 MiB in, 33 MiB out. The multibyte side —
+        // bytes may grow, bounded by 4 × chars — is pinned by
+        // masked_byte_length_is_bounded_by_four_times_the_chars.
         let text = "a".repeat(MAX_OUTPUT_BYTES + 1);
         let masked = replace_many_masked(&text, &[("a", "x")], '*')
             .unwrap_or_else(|err| panic!("masked splice refused: {err}"));
         assert_eq!(masked.len(), text.len());
+    }
+
+    #[test]
+    fn masked_byte_length_is_bounded_by_four_times_the_chars() {
+        // The honest byte story (the claim the doc once made — that the
+        // masked output's BYTE size is the input's — is false): the
+        // guarantee is characters, and bytes are bounded, not preserved.
+        // A 1-byte key masked to a 4-byte value character per span grows
+        // 1_000_000 bytes to 4_000_000 — the 4 × chars_in bound exactly —
+        // while the character counts stay equal (the truncation branch
+        // spends the whole per-character budget: one 4-byte value char
+        // per 1-byte span).
+        let text = "a".repeat(1_000_000);
+        let masked = replace_many_masked(&text, &[("a", "\u{1d54f}")], '*')
+            .unwrap_or_else(|err| panic!("masked splice refused: {err}"));
+        assert_eq!(masked.chars().count(), text.chars().count());
+        assert!(masked.len() > text.len());
+        assert_eq!(masked.len(), 4 * text.chars().count());
     }
 
     #[test]

@@ -131,6 +131,7 @@ from documents import (
     generate_xlsx_macro,
     generate_xlsx_structure,
 )
+from loop_harness import assert_bounded
 
 try:  # the payload wheel (tors[documents])
     from tors_documents import (
@@ -1143,6 +1144,29 @@ def test_page_geometry_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
         # the O(pages) marshalling), convicted at any load.
         for _ in range(30):
             page_geometry(str(path))
+
+    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
+
+
+@pytest.mark.timing
+def test_document_structures_probe_sniffs_a_prefix_not_the_whole_blob() -> None:
+    """The pre-detach probe's GIL band (the finding: the probe received
+    the FULL data= buffer — looks_like_html lossy-walked all of it under
+    the GIL; measured 356.5 ms max gap on a 128 MiB blob, against the
+    crate's own whole-native-pass-under-detach GIL contract). Green: the
+    probe hands the GIL-side sniff only the bounded 64 KiB prefix the
+    path lane reads, so the worst gap stays at the ping floor through a
+    call over the same blob (the call itself refuses post-detach:
+    unknown content, no name to consult)."""
+    from test_gil_release import _assert_loop_stays_responsive
+
+    blob = b"\xff" * (128 * 1024 * 1024)  # invalid UTF-8, every byte
+
+    def op() -> None:
+        try:
+            document_structure(data=blob)
+        except ValueError:
+            pass  # the unknown-format refusal IS the expected answer
 
     asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
 
@@ -2350,6 +2374,37 @@ class TestPdfPageLabels:
         labels = pdf_page_labels(data=out.getvalue())
         assert labels == ["iii", "iv", "v", "A-1", "A-2", "cover"]
 
+    def test_the_bounded_label_law(self) -> None:
+        """A roman render past the 4 KiB label bound bounds OUT to None
+        per page — never a truncated numeral (a truncated roman numeral
+        is a wrong label), never the multi-million-char build. The
+        pre-fix render was linear in the value (one 'm' per thousand):
+        this same legal /St 4294967294 materialized 4,294,967 chars PER
+        PAGE, for every page (858,994,700 total chars, 1.67 GiB RSS at
+        200 pages — the VmHWM-guarded subprocess cell in
+        test_documents_hardening.py pins the resource half; this pin is
+        the output half). Decimal and alpha at the same value render
+        fine (O(log n) — never reach the bound); a roman value whose
+        run fits the bound renders in full (4000 is 'mmmm')."""
+        from documents import generate_pdf_page_labels_value
+
+        hostile = generate_pdf_page_labels_value(3, "<< /S /r /St 4294967294 >>")
+        assert pdf_page_labels(data=hostile) == [None, None, None]
+        # the same value under decimal: 10 chars, exact through u32::MAX
+        decimal = generate_pdf_page_labels_value(3, "<< /S /D /St 4294967294 >>")
+        assert pdf_page_labels(data=decimal) == [
+            "4294967294",
+            "4294967295",
+            "4294967296",
+        ]
+        # /St 20000000 under roman: a 20,000-char run per page, the
+        # timing/space cell's value — bounded out.
+        mid = generate_pdf_page_labels_value(2, "<< /S /r /St 20000000 >>")
+        assert pdf_page_labels(data=mid) == [None, None]
+        # under the bound: exact
+        small = generate_pdf_page_labels_value(1, "<< /S /r /St 4000 >>")
+        assert pdf_page_labels(data=small) == ["mmmm"]
+
 
 # --- the page-geometry probe (the geometry lane's contract) -----------------------
 
@@ -2576,6 +2631,32 @@ class TestPageGeometry:
         # text surfaces on the oxide conversion lane
         _, markdown = to_markdown(data=generate_xlsx_chart(), backend="oxide")
         assert "Units per quarter" in markdown
+
+    def test_a_chartsheet_is_not_a_geometry_unit(self) -> None:
+        """The chartsheet unit law (the finding: office_geometry counted
+        raw.worksheets.len() — Chart|Dialog kinds included in 0.1.15 —
+        while structure_xlsx splits them out, so one workbook answered
+        page_geometry 4 vs document_structure 3). A chartsheet is not a
+        unit: the geometry surfaces (page_geometry, page_layout, and the
+        other office-lane siblings) count WORKSHEETS — the structure
+        surface's own filter — and the counts AGREE on the same
+        workbook."""
+        from documents import generate_xlsx_structure
+
+        geometry = page_geometry(data=generate_xlsx_structure())
+        layout = page_layout(data=generate_xlsx_structure())
+        structure = document_structure(data=generate_xlsx_structure())
+        # 3 worksheets + 1 chartsheet: the geometry unit count is 3
+        assert len(geometry) == 3
+        assert all(entry is not None and entry.geometry is None for entry in layout)
+        assert len(layout) == 3
+        # ...and the structure surface's served-sheet list agrees
+        assert len(structure.payload.sheets) == 3
+        assert structure.payload.chartsheets == ["ChartTab"]
+        assert len(structure.payload.sheets) == len(geometry), (
+            "the surfaces must count the same units: worksheets, never "
+            "chartsheets"
+        )
 
     def test_the_legacy_trio_fixtures_answer_all_none_at_the_ir_count(
         self,
@@ -4437,6 +4518,26 @@ class TestLayoutClassContracts:
         assert perms_repr.startswith("PdfPermissions(")
         assert "print_low_res=" in perms_repr and "raw_p=" in perms_repr
 
+    def test_the_page_reprs_are_capped(self) -> None:
+        """Finding 14's pin: `PageLayout.__repr__`/`PageCharsData.__repr__`
+        print the CAPPED list preview (structure_list_repr's 3 entries +
+        the ellipsis count) — pre-fix they printed EVERY element (measured:
+        a 4,288-char page repr'd 511,468 chars; a repr is a shape preview,
+        not a serialization)."""
+        from documents import generate_pdf_big
+
+        page = page_layout(data=generate_pdf_big(300))[0]
+        assert len(page.spans) > 3
+        layout_repr = repr(page)
+        assert "more" in layout_repr, layout_repr[:200]
+        assert len(layout_repr) < 5_000, len(layout_repr)
+
+        chars = page_text_chars(data=generate_pdf_big(300))[0]
+        assert len(chars.chars) > 3
+        chars_repr = repr(chars)
+        assert "more" in chars_repr, chars_repr[:200]
+        assert len(chars_repr) < 5_000, len(chars_repr)
+
 
 # --- the page_images and page_text_chars surfaces (issues #205/#206) -----------
 
@@ -4614,6 +4715,65 @@ class TestPageImages:
         served = page_images(data=giant_dct, decode="pixels")[0].images[0]
         assert served.data.kind == "container", served.data.error_kind
 
+    def test_a_degenerate_frame_gates_the_bbox_never_the_bytes(self) -> None:
+        """The frame-gate law (the finding: a degenerate MediaBox yielded
+        geometry=None but bbox=Some mapped through the zero-extent frame
+        — measured: page_images served ((-50, 500, 100, 100)) where
+        every other surface serves nothing). Green: the bbox is gated on
+        the usable frame (geometry.is_some()) across the surfaces, while
+        the BYTES stay enumerated — frame-independent (R11's enumeration
+        law preserved: the enumeration never drops for a frame reason;
+        only the BOX is gated)."""
+        from documents import generate_pdf_layout_zero_mediabox
+
+        data = generate_pdf_layout_zero_mediabox()
+        # geometry: None on both
+        assert page_geometry(data=data) == [None]
+        layout = page_layout(data=data)[0]
+        assert layout.geometry is None
+        images = page_images(data=data, decode="pixels")[0]
+        assert images.geometry is None
+        chars = page_text_chars(data=data)[0]
+        assert chars.geometry is None
+        assert chars.chars == []
+        # the image: enumerated with bytes, box None
+        (entry,) = images.images
+        assert entry.bbox is None, entry.bbox
+        assert entry.data.kind == "raw"
+        assert len(entry.data.pixels) == 3
+        # page_layout's own walk answers empty here (the engine's
+        # empty-on-error law on the degenerate page — "every other
+        # surface serves nothing", the measured probe3 note)
+        assert layout.images == []
+
+    def test_the_caps_bind_on_actual_bytes_not_the_estimate(self) -> None:
+        """The Flate→DCT under-estimate (measured: 3,898 stored bytes →
+        4,000,000 container bytes — the engine applies the filters
+        innermost-first, so the container is the INFLATED stream while
+        the estimate reads the STORED bytes): max_image_bytes=1_000_000
+        SERVED the 4 MB container pre-fix. The estimate is advisory; the
+        ACTUAL check refuses the result before it enters the payload —
+        per-image here, scope 'image', needed the real bytes."""
+        from documents import generate_pdf_layout_flate_dct
+
+        entry = page_images(
+            data=generate_pdf_layout_flate_dct(), decode="container", max_image_bytes=1_000_000
+        )[0].images[0]
+        assert entry.data.kind == "error"
+        assert entry.data.error_kind == "size_cap"
+        assert entry.data.scope == "image"
+        assert entry.data.limit_bytes == 1_000_000
+        assert entry.data.needed_bytes == 4_000_000
+        assert "actual" in entry.data.message, entry.data.message
+
+    # The call budget's own end-to-end pin is the subprocess cell
+    # (test_documents_hardening.py::test_the_cumulative_image_budget_refuses_on_actuals):
+    # an honest refusal needs the payload to HOLD over-budget actuals
+    # (three 200 MB inflations from one ~584 KB PDF, the measured
+    # probe's shape), and that is subprocess work by this suite's own
+    # convention. The refusal arithmetic is pinned Rust-side
+    # (images_the_call_budget_refuses_on_actuals).
+
     def test_the_ccitt_payload_carries_all_seven_params(self) -> None:
         """The packed codestream verbatim (in == out, measured), and the
         seven /DecodeParms fields — without them the consumer could not
@@ -4695,6 +4855,28 @@ class TestPageImages:
             page_images(data=generate_pdf_layout_image(), decode="junk")
         with pytest.raises(TypeError, match="(?i)decode must be one of"):
             page_images(data=generate_pdf_layout_image(), decode=1)
+
+    def test_the_pages_shape_refusal_precedes_the_encrypted_door(self) -> None:
+        """A10's two-tier order, pinned at the binding (the finding:
+        binding-level shape refusals — pages=[], negatives, non-index
+        types — precede the door, measured pre-fix on a locked document:
+        pages=[] answered the shape refusal, not the encryption refusal,
+        and the old docstrings claimed the door first without the tier).
+        The docstrings state the full order now: binding shape refusals
+        → door → core range validation."""
+        locked = _encrypted_pdf()
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_images(data=locked, pages=[])
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_layout(data=locked, pages=[])
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_tables(data=locked, pages=[])
+        with pytest.raises(ValueError, match="pages= selected no pages"):
+            page_text_chars(data=locked, pages=[])
+        # the RANGE refusal is the core's, junior to the door: locked +
+        # out-of-range answers the encryption refusal
+        with pytest.raises(ValueError, match="encrypted"):
+            page_images(data=locked, pages=[9])
 
 
 class TestPageTextChars:
@@ -5130,22 +5312,22 @@ class TestZipBombRefusals:
         sub-second wall (measured 0.03s on this box; inflating 600 MiB
         and parsing it would cost seconds and ~1.6 GiB, so the wall band
         is the pre-decompression proof that cannot flake)."""
-        import time
-
         path = tmp_path / "bomb_oxide.docx"
         _zip_bomb_docx(path, inflated_mib=600)
         assert path.stat().st_size < _MIB, "the fixture lost the bomb shape (stored > 1 MiB)"
-        started = time.perf_counter()
-        with pytest.raises(ValueError, match="decompression limit exceeded") as raised:
-            to_markdown(str(path), backend="oxide")
-        elapsed = time.perf_counter() - started
-        message = str(raised.value)
-        assert "word/document.xml" in message, message
-        assert "536870912" in message, message  # 512 MiB: the cap's own number, verbatim
-        assert elapsed < 2.0, (
-            f"the refusal took {elapsed:.2f}s — the pre-decompression guard "
-            "regressed (measured 0.03s; an inflated refusal costs seconds)"
-        )
+
+        def fire() -> None:
+            with pytest.raises(ValueError, match="decompression limit exceeded") as raised:
+                to_markdown(str(path), backend="oxide")
+            message = str(raised.value)
+            assert "word/document.xml" in message, message
+            assert "536870912" in message, message  # 512 MiB: the cap's own number, verbatim
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the ~0.03s refusal (a ~66x margin) — one
+        # scheduler hit retries, a regressed (inflating) refusal dirties
+        # every sample.
+        assert_bounded(fire, 2.0, samples=3, label="the oxide-lane zip-bomb refusal")
 
 
 # --- JSON-lines is not csv (the sniffer's record-shape guard) ---------------------
@@ -5581,6 +5763,41 @@ class TestDocumentStructure:
         assert docx.blocks[-1].index == 199_999
         assert docx.sections == 1
 
+    def test_the_entry_cap_counts_the_nested_cells(self) -> None:
+        """The cap counts every materialized entry OBJECT, not just the
+        top-level list's elements (the finding: a 1M-cell docx table rode
+        inside ONE block — blocks=1, marker False, 1M cell objects in the
+        payload; 300k html grid cells rode inside ONE node). The running
+        budget stops the BUILD: the docx table keeps its grid metadata,
+        its kept cells row-major, marker True; the html walk's kept
+        prefix stays index-sound (parents before children — cells inside
+        a stopped table drop with the table)."""
+        from documents import generate_docx_cells, generate_html_grid_cells
+
+        report = document_structure(data=generate_docx_cells(1_000_000))
+        docx = report.payload
+        assert docx.entries_truncated is True
+        assert len(docx.blocks) == 1
+        # the block spent 1 of the 200,000; its cells the rest — a
+        # BOUNDED payload, the pre-fix 1,000,000
+        total_cells = sum(len(block.table.cells) for block in docx.blocks if block.table)
+        assert total_cells == 200_000 - 1
+        # the kept cells stay row-major (a stopped prefix of the row walk)
+        table = docx.blocks[0].table
+        assert table.rows == 1_000_000  # the grid metadata stays complete
+        assert [cell.row for cell in table.cells] == list(range(200_000 - 1))
+
+        report = document_structure(data=generate_html_grid_cells(300_000))
+        html = report.payload
+        assert html.entries_truncated is True
+        assert len(html.nodes) == 1
+        grid = html.nodes[0].grid
+        assert grid.rows == 300_000 and grid.cols == 1  # metadata complete
+        assert len(grid.cells) == 200_000 - 1
+        # the kept prefix is index-sound: the one node has no parent
+        assert html.nodes[0].parent is None
+        assert html.nodes[0].children == []
+
     # --- the html payload -------------------------------------------------
 
     def test_html_payload_pins(self) -> None:
@@ -5772,6 +5989,44 @@ class TestDocumentStructure:
             assert message.startswith("document_structure cannot serve xls"), message
             assert "legacy xls workbook" in message, message
             assert "encrypted xlsx package" in message, message
+
+    def test_the_name_decided_refusal_never_touches_the_filesystem(self, tmp_path: Path) -> None:
+        """The name-decided refusal opens NOTHING (the finding: the
+        probe's path branch always File::open + 64 KiB read before
+        format= could short-circuit — a chmod-000 file with format=pdf
+        raised PermissionError INSTEAD of the "cannot serve pdf"
+        refusal, a directory IsADirectoryError, a missing path
+        FileNotFoundError: the filesystem error burying the refusal the
+        call was going to raise anyway). Green: with an explicit
+        format= naming a non-Excel kind, the refusal decides from the
+        name alone on all three unreadable-path shapes; without
+        format=, the OSError keeps its place (the read is then the
+        call's next step, and the error is the true one)."""
+        # the unreadable trio
+        unreadable = tmp_path / "unreadable.pdf"
+        unreadable.write_bytes(b"%PDF-1.4\n")
+        unreadable.chmod(0o000)
+        directory = tmp_path / "a-directory"  # no suffix: not a pdf name
+        directory.mkdir()
+        missing = tmp_path / "no-such-file.pdf"
+        try:
+            for path, format_name in (
+                (unreadable, "pdf"),
+                (directory, "pdf"),
+                (missing, "pdf"),
+            ):
+                with pytest.raises(ValueError) as raised:
+                    document_structure(str(path), format=format_name)
+                message = str(raised.value)
+                assert message.startswith("document_structure cannot serve pdf"), (
+                    f"{path}: the OSError buried the refusal: {message}"
+                )
+        finally:
+            unreadable.chmod(0o644)
+        # without format= the filesystem error keeps its place: the read
+        # is the call's next step, and OSError is its true answer
+        with pytest.raises(OSError):
+            document_structure(str(missing))
 
     def test_the_encrypted_cfb_without_a_format_is_unknown_format(self) -> None:
         """F9's qualifier: nothing resolves an encrypted CFB (anydoc's

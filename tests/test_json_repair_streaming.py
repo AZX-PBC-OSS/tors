@@ -473,6 +473,33 @@ MALFORMED = [
     '{"a": [1, 2}',
     '{"a": 1]',
     '[{"a": 1]',
+    # the object-lane comma-glue's rewind SPLIT (the crash-artifact
+    # class, crash-4114e3f094e25e9854fe273a65273690fba07f79): a number
+    # run that absorbed an object-lane comma rewinds at an alphabetic
+    # char, and the `:` proving the post-comma text a key splits the
+    # run at the comma -- the value renders up to it, the post-comma
+    # text re-enters the key lane (the engine's own
+    # classify_object_value_comma member split)
+    '{Z7:8,7Z:8',
+    '{"a": 1,b: 2}',
+    '{"a": 1,7Z:8}',
+    '{"a": 1,b: "x"}',
+    '{"a": 1,b: x, c: 1}',
+    '{"a": 1,7Z: [1]}',
+    '{"a": 1,b: 2',
+    '{"a": 1,_7Z:8}',
+    '{"a": .8,7Z:8}',
+    '{"a": 1,7-Z:8}',
+    '{"a": 1,7Z :8}',
+    '{"a": 1,7Z: 8, 9Z: 10}',
+    '{"a": 1,7Z: tru}',
+    '{"a": 1,b:}',
+    '{"a": 1,7Z:08}',
+    '{"a": 1,7Z:-8}',
+    '{"a": 1,7Z:.5}',
+    '{"a": 1,7Z:1e2}',
+    '{"a": 1,7Z:07Z:8}',
+    '{"a": 1,7Z:8',
     '{"a": [1, }',
     '{"a": [}',
     '[1,, 2]',
@@ -781,7 +808,16 @@ DIVERGENCES = [
     ("[1, 'e„b\\'c''", '[1, "e\\u201eb\'c"]', '[1, "e\\u201eb\'c\'\'"]'),
     # the mismatched-closer garbage: the engine's whole-text close-up
     # re-decides earlier structure
-    ("{{\r]0\x01\x0b/\u2001/\u2001\u2000\u2000('", "[]", '{}'),]
+    ("{{\r]0\x01\x0b/\u2001/\u2001\u2000\u2000('", "[]", '{}'),
+    # the comma-glue split's OPTIMISTIC residual (the class's Scope
+    # entry in src/json_repair/streaming.rs): the engine's
+    # recoverable-value check needs the post-colon value's own tail to
+    # the object's `}`, which a linear machine has not seen at the `:`
+    # where its split fires -- a quote before the close, or the cut
+    # itself, flips the engine to keep-the-comma
+    ('{"a": 1,b: x"y}', '{"a": "1,b: x"}', '{"a": "1", "b": "x\\"y"}'),
+    ('{"a": 1,b: x', '{"a": "1,b: x"}', '{"a": "1", "b": "x"}'),
+]
 
 
 def stream(text: str, splits: list[int], *, ensure_ascii: bool = True) -> tuple[list[str], str]:
@@ -1688,6 +1724,37 @@ class TestDocumentedDecisions:
                 _assert_loads_or_empty(got)
             _, one = stream(text, [])
             assert one == stream_shape, f"{text!r}: {one!r} != {stream_shape!r}"
+
+    def test_the_comma_glue_rewind_split_matches_the_engine(self) -> None:
+        """The fuzz crash artifact's class
+        (crash-4114e3f094e25e9854fe273a65273690fba07f79, the
+        json_repair_streaming target's engine-parity assert, exit 77):
+        an object-lane number run absorbs a comma (the currency shape),
+        rewinds at an alphabetic char, and the `:` proving the
+        post-comma text a key splits the run at the comma -- the value
+        renders up to it, the post-comma text re-enters the key lane,
+        and the whole class reaches the engine's
+        classify_object_value_comma member split at EVERY split
+        position (the machine decides at the `:`, no lookahead). The
+        residual (the engine's recoverable-value check needs the
+        post-colon value's tail) is pinned to its documented divergence
+        in DIVERGENCES above."""
+        crash = "{Z7:8,7Z:8"
+        want = tors.repair_json(crash)
+        assert want == '{"Z7": "8", "7Z": 8}'
+        for k in range(1, len(crash)):
+            _, got = stream(crash, [k])
+            assert got == want, f"split {k}: {got!r} != {want!r}"
+        # the finding's second repro: the comma glued, the key directly
+        # alphabetic
+        assert tors.repair_json('{"a": 1,b: 2}') == '{"a": "1", "b": 2}'
+        for k in range(1, len('{"a": 1,b: 2}')):
+            _, got = stream('{"a": 1,b: 2}', [k])
+            assert got == '{"a": "1", "b": 2}', f"split {k}: {got!r}"
+        assert tors.repair_json('{"a": 1,7Z:8}') == '{"a": "1", "7Z": 8}'
+        for k in range(1, len('{"a": 1,7Z:8}')):
+            _, got = stream('{"a": 1,7Z:8}', [k])
+            assert got == '{"a": "1", "7Z": 8}', f"split {k}: {got!r}"
 
 
 # --- escape and unicode state across boundaries ---------------------------------

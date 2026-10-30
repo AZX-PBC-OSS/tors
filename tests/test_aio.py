@@ -42,7 +42,6 @@ import pytest
 
 import tors
 import tors.aio
-from loop_harness import first_clean
 from reference import prose
 
 _PYI = Path(__file__).resolve().parent.parent / "python" / "tors" / "aio.pyi"
@@ -278,59 +277,40 @@ class TestAwaitCorrectness:
     def test_the_event_loop_stays_responsive_during_a_whole_corpus_call(self) -> None:
         """The facade's reason to exist, asserted directly: while a large
         ``diff_opcodes`` call runs in the worker thread (a call whose sync
-        spelling takes tens of milliseconds or more), a 5 ms heartbeat
-        keeps ticking with worst gaps well under the call's own wall. A
-        wrapper that silently ran the native pass inline (the "lying"
-        failure mode this facade's design deliberately avoids) would
-        starve the heartbeat for the whole wall instead."""
+        spelling takes tens of milliseconds or more), the loop stays
+        schedulable at heartbeat granularity. A wrapper that silently ran
+        the native pass inline (the "lying" failure mode this facade's
+        design deliberately avoids) would starve the heartbeat for the
+        whole wall instead."""
+        from test_gil_release import _assert_loop_stays_responsive
 
-        def measure() -> tuple[float, float, int]:
-            # 16 MiB, not 2 MiB: the 2 MiB corpus measured ~4.6ms wall on a
-            # loaded CI runner, right at the razor's edge of the "must cost
-            # something" floor below and prone to landing under it on a
-            # faster or differently-loaded box: exactly what happened here.
-            # 16 MiB gives real margin toward the docstring's own "tens of
-            # milliseconds or more" claim rather than a threshold this test
-            # can trip on jitter alone.
-            a = prose(16 * 1024 * 1024)
-            b = a[: len(a) // 2] + "X" + a[len(a) // 2 :]
-            ticks: list[float] = []
+        # 16 MiB, not 2 MiB: the 2 MiB corpus measured ~4.6ms wall on a
+        # loaded CI runner, right at the razor's edge of the "must cost
+        # something" floor below and prone to landing under it on a
+        # faster or differently-loaded box: exactly what happened here.
+        # 16 MiB gives real margin toward the docstring's own "tens of
+        # milliseconds or more" claim rather than a threshold this test
+        # can trip on jitter alone.
+        a = prose(16 * 1024 * 1024)
+        b = a[: len(a) // 2] + "X" + a[len(a) // 2 :]
+        walls: list[float] = []
 
-            async def heartbeat() -> None:
-                last = time.perf_counter()
-                while True:
-                    await asyncio.sleep(0.005)
-                    now = time.perf_counter()
-                    ticks.append(now - last)
-                    last = now
+        async def corpus_call() -> None:
+            started = time.perf_counter()
+            opcodes = await tors.aio.diff_opcodes(a, b)
+            walls.append(time.perf_counter() - started)
+            assert len(opcodes) >= 1
 
-            async def run() -> tuple[float, float, int]:
-                hb = asyncio.create_task(heartbeat())
-                await asyncio.sleep(0.02)  # the heartbeat establishes cadence
-                started = time.perf_counter()
-                opcodes = await tors.aio.diff_opcodes(a, b)
-                wall = time.perf_counter() - started
-                await asyncio.sleep(0.02)
-                hb.cancel()
-                assert len(opcodes) >= 1
-                return wall, max(ticks), len(ticks)
-
-            return asyncio.run(run())
-
-        def check(measured: tuple[float, float, int]) -> None:
-            wall, worst_gap, tick_count = measured
-            assert wall > 0.010, "the corpus must actually cost something"
-            assert tick_count >= 4, "the heartbeat must have ticked during the call"
-            assert worst_gap < 0.015, (
-                f"worst heartbeat gap {worst_gap * 1000:.1f} ms during a "
-                f"{wall * 1000:.0f} ms call: the native pass is blocking the loop"
-            )
-
-        # Load-robust spelling (tests/loop_harness.py): pass-on-first-clean
-        # over up to 4 samples — one starved sample retries (a 5ms
+        # The shared verdict machinery (the #225 port, the same port the
+        # dedup twins got): pass-on-first-clean over the heartbeat budgets
+        # with the tiered excuses — one starved sample retries (a
         # heartbeat on a shared runner absorbs a scheduler hit on exactly
-        # one sample), while a wrapper that runs the native pass inline
-        # dirties every sample and still fails.
-        first_clean(
-            measure, check, samples=4, label="the aio diff_opcodes heartbeat cell"
-        )
+        # one sample, and the machinery's runqueue-wait account tells that
+        # story), while a wrapper that runs the native pass inline dirties
+        # every sample and still fails through the tiered verdict.
+        asyncio.run(_assert_loop_stays_responsive(corpus_call))
+
+        # The cost floor survives the port: the corpus must actually cost
+        # something, on the sample the machinery's verdict cleared.
+        wall = walls[-1]
+        assert wall > 0.010, "the corpus must actually cost something"

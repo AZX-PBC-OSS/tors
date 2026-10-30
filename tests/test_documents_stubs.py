@@ -380,6 +380,25 @@ def _stub_class(path: Path, name: str) -> ast.ClassDef:
     raise AssertionError(f"{path}: no {name} class — the stub is broken")
 
 
+def test_the_payload_classes_report_the_family_module() -> None:
+    """Finding 12's pin: every type the native module exposes reports the
+    extension module's family (`__module__ == '_tors_documents'`,
+    matching NeedsOcrError, which always did) — pre-fix the pyclasses
+    reported `builtins` (pyo3's default with no `module=`): a class the
+    repl prints as `builtins.PageGeometry`, an unpicklable-looking
+    family beside its own exception."""
+    from tors_documents import _tors_documents as native
+
+    exposed = {
+        name: obj for name, obj in vars(native).items() if isinstance(obj, type)
+    }
+    assert exposed, "the native module exposes payload types"
+    for name, cls in exposed.items():
+        assert cls.__module__ == "_tors_documents", (name, cls.__module__)
+    # the exception the family is named after agrees
+    assert native.NeedsOcrError.__module__ == "_tors_documents"
+
+
 def test_page_layout_classes_carry_exactly_the_d6_field_lists() -> None:
     """D6's field bar over the five layout classes, stub side: each class
     declares EXACTLY the §5/D6 field list as read-only properties (no

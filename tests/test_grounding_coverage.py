@@ -13,10 +13,6 @@ in ``src/grounded_impl.rs``; this file pins what a consumer can rely on.
 
 from __future__ import annotations
 
-import asyncio
-import itertools
-from time import monotonic
-
 import pytest
 from grounding_reference import (
     _cov,
@@ -325,38 +321,6 @@ class TestGroundingCoverageWave2:
         assert got < _cov(source, "alpha beta"), (
             "the same signal, pushed past the text cap, must not score full"
         )
-
-
-# ---------------------------------------------------------------------------
-# 5. GIL wave 2: four CONCURRENT 10MB calls -- held time per call must stay
-# flat (no allocator-contention leak into the GIL window).
-# ---------------------------------------------------------------------------
-
-
-async def _gap_and_wall(calls):
-    """Run `calls` concurrently under a 10ms heartbeat; return (worst gap,
-    total wall)."""
-    ticks: list[float] = []
-    stop = asyncio.Event()
-
-    async def heartbeat():
-        while True:
-            ticks.append(monotonic())
-            if stop.is_set():
-                return
-            await asyncio.sleep(0.01)
-
-    task = asyncio.create_task(heartbeat())
-    await asyncio.sleep(0)
-    started = monotonic()
-    try:
-        await asyncio.gather(*calls)
-        end = monotonic()
-    finally:
-        stop.set()
-        await task
-    worst = max((b - a for a, b in itertools.pairwise(ticks)), default=0.0)
-    return worst, end - started
 
 
 def _unit(n: int) -> str:
