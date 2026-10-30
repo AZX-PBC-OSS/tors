@@ -172,42 +172,13 @@ pub fn scrub_secrets_report(
 }
 
 /// Render the report's byte-offset spans as `(type, char_start,
-/// char_end)`: one linear walk over the input's `char_indices`,
-/// consuming the sorted unique byte offsets (the same renderer the
-/// `scrub_pii_report` binding runs). Every span boundary the scanner
-/// emits sits on a char boundary (matches start and end at
-/// ASCII-adjacent positions).
+/// char_end)` — the py layer's one shared renderer (`super::
+/// render_char_spans`), the same one the `scrub_pii_report` binding
+/// runs; this binding's span→name mapping fed in.
 fn render_char_spans(text: &str, spans: &[secret_impl::SecretSpan]) -> Vec<(String, usize, usize)> {
-    let mut offsets: Vec<usize> = spans.iter().flat_map(|s| [s.start, s.end]).collect();
-    offsets.sort_unstable();
-    offsets.dedup();
-    let mut char_at: Vec<usize> = Vec::with_capacity(offsets.len());
-    let mut chars = text.char_indices();
-    let mut ahead = chars.next();
-    let mut char_idx = 0usize;
-    for &b in &offsets {
-        while let Some((cb, _)) = ahead {
-            if cb >= b {
-                break;
-            }
-            char_idx += 1;
-            ahead = chars.next();
-        }
-        char_at.push(char_idx);
-    }
-    let index_of = |b: usize| {
-        char_at[offsets
-            .binary_search(&b)
-            .expect("every span offset was collected")]
-    };
-    spans
+    let named = spans
         .iter()
-        .map(|s| {
-            (
-                s.kind.name().to_string(),
-                index_of(s.start),
-                index_of(s.end),
-            )
-        })
-        .collect()
+        .map(|s| (s.start, s.end, s.kind.name().to_string()))
+        .collect::<Vec<_>>();
+    super::render_char_spans(text, &named)
 }

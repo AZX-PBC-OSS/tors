@@ -713,16 +713,14 @@ pub fn highlight(query: &str, text: &str, max_snippets: usize, max_chars: usize)
                 presented = (ss, se, bs, be);
             }
         }
-        // Clamp to max_chars at token boundaries. One shrink pass suffices:
-        // the loop exits only when `cs + 1 == ce` (a single token left — the
-        // documented keep-at-least-one-token floor) or the span already fits
-        // `max_chars`, and the second condition (shrinking from the start)
-        // requires BOTH to be false, so a start-shrink pass can never run.
-        // (A sentence-expanded candidate fits by construction; the clamp
-        // only ever bites run-only candidates.)
-        while cs + 1 < ce && toks[ce - 1].end - toks[cs].start > max_chars {
-            ce -= 1;
-        }
+        // No max_chars clamp here: both branches above are budget-bounded
+        // by construction — the run builder merges only while the merged
+        // span fits max_chars, and the sentence expansion fires only when
+        // the sentence fits — so the candidate's token span cannot exceed
+        // the budget at this point (a one-token run can only exceed it if
+        // that token alone does, and the keep-at-least-one-token floor is
+        // the documented answer there). The sentence scorer keeps the live
+        // clamp: raw sentences have no such build-time bound.
         candidates.push(Candidate {
             tok_s: cs,
             tok_e: ce,

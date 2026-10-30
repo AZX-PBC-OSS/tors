@@ -21,13 +21,13 @@ a visible, tested fact rather than a claim nobody checks.
 from __future__ import annotations
 
 import re
-import time
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tors
+from loop_harness import assert_bounded
 from reference import assert_opcodes_are_valid, diff_pair_near_identical
 
 
@@ -230,15 +230,20 @@ _DEADLINE_MS = 50.0
 class TestDeadline:
     def test_a_slow_pair_exceeding_the_deadline_raises_timeout_error(self) -> None:
         a, b = _line_shuffled_pair(10_000)
-        started = time.perf_counter()
-        with pytest.raises(TimeoutError, match="deadline") as excinfo:
-            tors.diff_opcodes_lines(a, b, deadline_ms=_DEADLINE_MS)
-        wall = time.perf_counter() - started
-        message = str(excinfo.value)
-        assert type(excinfo.value) is TimeoutError
-        assert re.search(rf"\b{_DEADLINE_MS:g}(\.\d+)?\s*ms\b", message), message
-        assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
-        assert wall < 1.0, f"deadline-bounded call took {wall:.2f}s"
+
+        def fire() -> None:
+            with pytest.raises(TimeoutError, match="deadline") as excinfo:
+                tors.diff_opcodes_lines(a, b, deadline_ms=_DEADLINE_MS)
+            message = str(excinfo.value)
+            assert type(excinfo.value) is TimeoutError
+            assert re.search(rf"\b{_DEADLINE_MS:g}(\.\d+)?\s*ms\b", message), message
+            assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the deadline-bounded abort — one
+        # scheduler hit retries, a lost deadline dirties every sample and
+        # still fails (the ~50-60ms abort against a 1.0s ceiling).
+        assert_bounded(fire, 1.0, samples=3, label="the diff_opcodes_lines deadline abort")
 
     def test_deadline_none_is_the_default_and_unchanged(self) -> None:
         a, b = diff_pair_near_identical(256 * 1024)

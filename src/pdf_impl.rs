@@ -791,11 +791,25 @@ pub fn page_count(bytes: Vec<u8>, password: Option<&str>) -> Result<usize, PdfEr
 /// `"0"` in release two pages later) and truncates the `/St` integer to
 /// u32 first (`/St 5000000000` reads back as 705032704). The u64 render
 /// keeps the engine's per-style spellings — decimal, subtractive Roman
-/// (unbounded: 4000 is "MMMM"), bijective base-26 alpha (Z wraps to AA) —
-/// so a legal `/St` renders without panic or wrap, while an over-u32 `/St`
-/// carries the engine's own truncation into the visible label (the value
-/// the PDF's /St literally names is not representable; the first
-/// rendered number is still the truncated one).
+/// (the "m"-per-thousand run), bijective base-26 alpha (Z wraps to AA) —
+/// under the BOUNDED-LABEL LAW: a label the render builds past
+/// [`MAX_LABEL_CHARS`] is bounded OUT to `None`, never truncated (a
+/// truncated roman numeral is a wrong label). The bound exists because
+/// the subtractive Roman render is LINEAR in the value — one char per
+/// thousand — so the same legal-but-hostile `/St 4294967294` that made
+/// the engine's arithmetic wrap makes an unbounded u64 render a memory
+/// amplifier: 4,294,967 chars PER PAGE, materialized for every page
+/// (measured: 858,994,700 total chars, 1.67 GiB RSS at 200 pages). The
+/// bound is checked on the run's length BEFORE any building, so a
+/// bounded-out label costs O(1). The value is display-prohibitive — no
+/// reader renders a four-million-character label — and `None` (the
+/// page's declared label is unusable as a display string) is the honest
+/// answer above it. Decimal and alpha renders are O(log n) (at most 20
+/// and ~13 chars on u64) and can never reach the bound. An over-u32
+/// `/St` still carries the engine's own truncation into the visible
+/// label (the value the PDF's /St literally names is not representable;
+/// the first rendered number is still the truncated one) — bounded or
+/// not.
 ///
 /// The None ladder (failures raise; the per-page None is the only soft
 /// answer): door/parse/page-count failures raise — document-level;
@@ -812,7 +826,12 @@ pub fn page_count(bytes: Vec<u8>, password: Option<&str>) -> Result<usize, PdfEr
 /// prefix that fails to decode (unmapped PDFDocEncoding bytes are
 /// dropped; invalid UTF-16 decodes to nothing) is silently lost: with
 /// `/S` absent the page still answers `Some("")` (styleless +
-/// no-prefix), with a style it answers the bare number.
+/// no-prefix), with a style it answers the bare number. And the newest
+/// rung, the bound: a page whose covering range's render exceeds
+/// [`MAX_LABEL_CHARS`] answers `None` for that page (the
+/// bounded-out-label law, [`render_roman`]) — the same soft answer, a
+/// different reason, named here so a consumer can tell them apart only
+/// by the value that produced them.
 ///
 /// The door: page labels are read from ENCRYPTED string objects, and the
 /// extractor is NOT auth-gated engine-side — on a locked document it
@@ -849,47 +868,74 @@ pub fn page_labels(
 /// One page's label: the covering range's render, or `None` where no
 /// range covers (the engine's covering rule replicated — see
 /// [`page_labels`]; never [`PageLabelExtractor::get_label`], which
-/// fabricates an ordinal fallback).
+/// fabricates an ordinal fallback) and `None` where the render bounds
+/// out ([`MAX_LABEL_CHARS`] — the bounded-label law).
 fn render_page_label(ranges: &[PageLabelRange], page: usize) -> Option<String> {
     let range = ranges.iter().rev().find(|r| r.start_page <= page)?;
     // start_value is the engine's u32 (an over-u32 /St is the engine's
     // own truncation, already applied at parse); the render arithmetic is
     // u64, so no legal value panics or wraps (format_label's u32 + u32
-    // does both — page_labels's docstring).
+    // does both — page_labels's docstring). The BOUND above it is the
+    // render's own law: a value whose render is display-prohibitive
+    // bounds out to None, never a truncated string.
     let number = range.start_value as u64 + (page - range.start_page) as u64;
-    Some(render_label_number(
-        range.style,
-        number,
-        range.prefix.as_deref(),
-    ))
+    render_label_number(range.style, number, range.prefix.as_deref())
 }
 
 /// The per-style render, the engine's spellings on u64 arithmetic
-/// ([`render_page_label`]): decimal; subtractive Roman, unbounded (no
-/// u32 ceiling: 4000 is "MMMM"); bijective base-26 alpha (1=A … 26=Z,
-/// 27=AA — no zero glyph, so Z wraps to AA); styleless renders the empty
-/// string (the prefix, alone, if any).
-fn render_label_number(style: PageLabelStyle, number: u64, prefix: Option<&str>) -> String {
+/// ([`render_page_label`]): decimal; subtractive Roman, bounded
+/// ([`MAX_LABEL_CHARS`] — the one style whose length is linear in the
+/// value); bijective base-26 alpha (1=A … 26=Z, 27=AA — no zero glyph,
+/// so Z wraps to AA; O(log₂₆ n), never bounded); styleless renders the
+/// empty string (the prefix, alone, if any). `None` = the bounded-out
+/// label.
+fn render_label_number(style: PageLabelStyle, number: u64, prefix: Option<&str>) -> Option<String> {
     let rendered = match style {
         PageLabelStyle::Decimal => number.to_string(),
-        PageLabelStyle::RomanUpper => render_roman(number, true),
-        PageLabelStyle::RomanLower => render_roman(number, false),
+        PageLabelStyle::RomanUpper => render_roman(number, true)?,
+        PageLabelStyle::RomanLower => render_roman(number, false)?,
         PageLabelStyle::AlphaUpper => render_alpha(number, true),
         PageLabelStyle::AlphaLower => render_alpha(number, false),
         // The engine's own render: an empty string, prefix included.
         PageLabelStyle::None => String::new(),
     };
-    match prefix {
+    Some(match prefix {
         Some(prefix) => format!("{prefix}{rendered}"),
         None => rendered,
-    }
+    })
 }
 
-/// Subtractive Roman numerals, the engine's table on u64 (unbounded: one
-/// "m" pair per thousand, no ceiling — [`page_labels`]'s docstring).
-fn render_roman(mut n: u64, uppercase: bool) -> String {
+/// The bounded-label law's own constant: 4 KiB per label. A display label
+/// has no use past a few hundred chars; the bound exists because the
+/// subtractive Roman render is linear in the value (one char per
+/// thousand), so a hostile-but-legal `/St` (4294967294) renders 4.29
+/// million chars per page — measured 858,994,700 total chars, 1.67 GiB
+/// RSS at 200 pages before the bound. Above it the label is bounded OUT
+/// (None), never truncated.
+pub(crate) const MAX_LABEL_CHARS: usize = 4 * 1024;
+
+/// The longest a sub-1000 roman tail can render: 12 (`DCCCLXXXVIII` —
+/// 888; the subtractive pairs only shorten a render). The bound's head
+/// room, so a render the check admits can never pass [`MAX_LABEL_CHARS`]
+/// at build time.
+const ROMAN_TAIL_MAX: u64 = 16;
+
+/// Subtractive Roman numerals, the engine's table on u64, BOUNDED
+/// ([`MAX_LABEL_CHARS`]): the "m"-per-thousand run is checked on its
+/// LENGTH before anything is built (the tail renders at most
+/// [`ROMAN_TAIL_MAX`] chars, so the check is conservative), and a run the
+/// bound refuses returns `None` — never a truncated numeral, never the
+/// 4.29M-char build (page_labels's docstring carries the measured
+/// before).
+fn render_roman(n: u64, uppercase: bool) -> Option<String> {
     if n == 0 {
-        return String::new();
+        return Some(String::new());
+    }
+    // The bound, BEFORE the build: run + tail_max over MAX_LABEL_CHARS
+    // is bounded out. (u64 arithmetic: `(n / 1000) as usize` could wrap
+    // on a 32-bit usize.)
+    if n / 1000 > (MAX_LABEL_CHARS as u64 - ROMAN_TAIL_MAX) {
+        return None;
     }
     let numerals = [
         (1000, "m"),
@@ -906,6 +952,7 @@ fn render_roman(mut n: u64, uppercase: bool) -> String {
         (4, "iv"),
         (1, "i"),
     ];
+    let mut n = n;
     let mut result = String::new();
     for (value, numeral) in numerals.iter() {
         while n >= *value {
@@ -913,11 +960,15 @@ fn render_roman(mut n: u64, uppercase: bool) -> String {
             n -= *value;
         }
     }
-    if uppercase {
+    debug_assert!(
+        result.len() <= MAX_LABEL_CHARS,
+        "the bound check is the law"
+    );
+    Some(if uppercase {
         result.to_uppercase()
     } else {
         result
-    }
+    })
 }
 
 /// Bijective base-26 (1=A, 26=Z, 27=AA), the engine's algorithm on u64.
@@ -1864,9 +1915,11 @@ pub struct PageTablesData {
     pub tables: Vec<TableEntry>,
     /// The A9 marker: TRUE iff this surface deliberately declined to serve
     /// a page whose inputs indicate possible table content — the
-    /// frame-incoherent /Rotate classes (A1) or the table-primitive edge
-    /// cap (A6). Reading rule: `tables_refused` + `geometry.rotation !=
-    /// 0` → frame incoherence; `true` at rotation 0 → the edge cap.
+    /// frame-incoherent /Rotate classes (A1), the table-primitive edge
+    /// cap (A6), or an UNREADABLE path walk (A12's fail-closed: no
+    /// decision from an input you couldn't read). Reading rule:
+    /// `tables_refused` + `geometry.rotation != 0` → frame incoherence;
+    /// `true` at rotation 0 → the edge cap or the unreadable path input.
     /// FALSE for no-tables pages, for content-stream failures (unknowable
     /// — stays indistinguishable from no-tables by design), and on office
     /// rows (their marker is `format`).
@@ -1877,9 +1930,11 @@ pub struct PageTablesData {
 /// boxes are in (and so how they map forward), or that the page's inputs
 /// are frame-INCOHERENT and the surface refuses. computable from public
 /// API only: the page's rotation, whether any path is a table primitive
-/// (`has_rulings`), and the spans' `page_rotation_applied` flags
+/// (`has_rulings`), the spans' `page_rotation_applied` flags
 /// (`any_mapped`/`all_mapped` — the engine-mapping flag, NOT
-/// `rotation_degrees`, which is content rotation). Per the ruling's table,
+/// `rotation_degrees`, which is content rotation), and whether the path
+/// WALK itself failed (`paths_error` — A12's fail-closed: no decision
+/// from an input you couldn't read). Per the ruling's table,
 /// with the A12 fail-closed default: any combination NOT listed coherent
 /// is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1897,7 +1952,22 @@ enum Frame {
     Incoherent,
 }
 
-fn table_frame_gate(rotation: i32, has_rulings: bool, any_mapped: bool, all_mapped: bool) -> Frame {
+fn table_frame_gate(
+    rotation: i32,
+    has_rulings: bool,
+    any_mapped: bool,
+    all_mapped: bool,
+    paths_error: bool,
+) -> Frame {
+    // The unreadable-input refusal FIRST (A12's fail-closed): a failed
+    // path walk feeds the gate no ruling bit at all — pre-fix it
+    // collapsed into "no rulings" (`unwrap_or_default`) and a 90/270
+    // page with all-mapped spans was SERVED Mapped while the detector's
+    // path input may have been raw: the exact disagreement the gate
+    // exists to refuse. No decision from an input you couldn't read.
+    if paths_error {
+        return Frame::Incoherent;
+    }
     match rotation {
         // 0: the engine maps nothing and the forward rule is the identity;
         // every page at 0 is coherent by construction (the ruling table's
@@ -1965,7 +2035,10 @@ fn table_frame_gate(rotation: i32, has_rulings: bool, any_mapped: bool, all_mapp
 /// treatment) — every other combination refuses:
 /// `tables: []`, `tables_refused: true`, geometry intact. The docs' reading
 /// rule (A9): `tables_refused` with `geometry.rotation != 0` is frame
-/// incoherence; `tables_refused` at rotation 0 is the primitive cap.
+/// incoherence; `tables_refused` at rotation 0 is the primitive cap — or
+/// the unreadable path walk (A12's fail-closed: a failed `extract_paths`
+/// refuses the page rather than deciding "no rulings" from an input it
+/// couldn't read).
 ///
 /// The markdown divergence (A4, stated, not fixed in v1): this surface
 /// builds on the PUBLIC `extract_tables` — spatial-only, unconsolidated.
@@ -1981,10 +2054,14 @@ fn table_frame_gate(rotation: i32, has_rulings: bool, any_mapped: bool, all_mapp
 /// intersection cell's box is grid geometry, not ownership).
 ///
 /// Zero pages: an empty vec. Encrypted documents fail closed at the
-/// [`open`] door check (before the `pages=` validation — A10's PDF-leg
-/// order: open → page_count → normalize/validate, so an encrypted
-/// document with a malformed selection answers the encryption refusal).
-/// Runs under [`with_depth_headroom`], like every entry point.
+/// [`open`] door check (the PDF leg of A10's order — open → page_count →
+/// normalize/validate, so an encrypted document with a malformed
+/// selection answers the encryption refusal). A10's full order is
+/// TWO-TIER: the BINDING parses the pages= SHAPE under the GIL before
+/// the detach (an empty selection, a negative index, a non-index type —
+/// `parse_pages` refusals), so those precede the door; the door
+/// precedes the core's range validation. Runs under
+/// [`with_depth_headroom`], like every entry point.
 pub fn page_tables(
     bytes: Vec<u8>,
     pages: Option<&[usize]>,
@@ -2067,11 +2144,19 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
 
     // ONE path walk for both gate inputs (A6/last ruling): the table
     // primitives' count IS the has_rulings bit (0 = none). A path-walk
-    // failure reads as zero primitives (and starves extract_tables below
-    // into its own empty answer — the content-failure class, refused:
-    // false).
-    let paths = doc.extract_paths(page).unwrap_or_default();
-    let primitives = paths.iter().filter(|p| p.is_table_primitive()).count();
+    // FAILURE is tracked (the Err): the gate refuses the page
+    // fail-closed (A12 — no decision from an input you couldn't read;
+    // pre-fix the failure read as "no rulings" via unwrap_or_default
+    // and could serve a Mapped page whose path input was unread).
+    // `tables_refused: true` — the input-unreadable refusal rides the
+    // A9 marker (see the field's reading rule).
+    let paths = doc.extract_paths(page);
+    let paths_error = paths.is_err();
+    let primitives = paths
+        .unwrap_or_default()
+        .iter()
+        .filter(|p| p.is_table_primitive())
+        .count();
     let has_rulings = primitives > 0;
 
     // The A6 cap: above the markdown lane's MAX_TABLE_EDGES the surface
@@ -2102,7 +2187,7 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
     }
 
     // The A1 frame-coherence gate (A12's fail-closed default).
-    let frame = table_frame_gate(rotation, has_rulings, any_mapped, all_mapped);
+    let frame = table_frame_gate(rotation, has_rulings, any_mapped, all_mapped, paths_error);
     if frame == Frame::Incoherent {
         return PageTablesData {
             page_index: page,
@@ -2181,13 +2266,23 @@ fn page_tables_one(doc: &PdfDocument, page: usize, format: &str) -> PageTablesDa
 /// engine's env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` knob (flate/unpack/
 /// Indexed) merely moves the refusal into the engine's own error — the
 /// docstring says so.
+///
+/// The cap binds on ACTUAL bytes: the chain-aware estimate is the
+/// advisory pre-labour check, and the same cap re-runs on the decode's
+/// real output immediately after the decode, before the bytes enter the
+/// payload (the under-estimate class: a Flate→DCT chain's container is
+/// the INFLATED stream, not the stored bytes — [`decode_estimate`]).
 pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The per-call cumulative decode ceiling (R7): 512 MiB, the family's
 /// `OXIDE_MAX_TOTAL_DECOMPRESSED` / `MAX_INPUT_READ` number. The budget
-/// checks each image's ESTIMATE before its decode and accumulates the
-/// ACTUALS after; the refusal is the typed SizeCap, never a truncation
-/// (a truncated image is a wrong image with no marker).
+/// is checked at decode time — each image's ESTIMATE before its decode,
+/// each ACTUAL after it — and the refusal is the typed SizeCap, never a
+/// truncation (a truncated image is a wrong image with no marker). The
+/// honest bound of what that buys: an under-estimated chain (an
+/// inflation the estimate did not see) can push the call past budget by
+/// at most one image's inflation — that image is refused (scope `Call`,
+/// the actual counted), entries already served stand.
 pub const MAX_CALL_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The container byte's format (R5): a `Container` arm names what a
@@ -2223,8 +2318,8 @@ pub enum CapScope {
 /// The typed decode failure (`ImageBytes::Error`'s payload): the engine's
 /// decode() failure (`Decode`), a filter this build cannot decode
 /// (`Unsupported` — retrying cannot fix it; R2), or this seam's own
-/// ceiling refusing BEFORE the labour (`SizeCap` — with the numbers a
-/// bare limit cannot be acted on; R7).
+/// ceiling refusing (`SizeCap` — with the numbers a bare limit cannot be
+/// acted on; R7).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ImageDataError {
     /// The engine's decode() failed. The payload is the error's Display —
@@ -2235,19 +2330,26 @@ pub enum ImageDataError {
     /// feature-naming string verbatim, or the composed refusal F1 rules
     /// for an encrypted image whose container cannot be served.
     Unsupported(String),
-    /// The seam's ceiling refused before decoding. `limit_bytes` is the
-    /// ceiling that fired (`Image`: the per-image cap — the default
+    /// The seam's ceiling refused. `limit_bytes` is the ceiling that
+    /// fired (`Image`: the per-image cap — the default
     /// [`DEFAULT_MAX_IMAGE_BYTES`] or the `max_image_bytes=` override;
-    /// `Call`: [`MAX_CALL_IMAGE_BYTES`]); `needed_bytes` is the estimate
-    /// that exceeds it (`Image`), or the call's cumulative total had the
-    /// image been served (`Call`).
+    /// `Call`: [`MAX_CALL_IMAGE_BYTES`]); `needed_bytes` is the byte
+    /// count that exceeded it. The caps bind on ACTUAL bytes, checked
+    /// twice: `needed_bytes` is this image's chain-aware ESTIMATE when
+    /// the pre-labour check fired, or the decode's ACTUAL output size
+    /// when the post-decode check fired (an under-estimated chain — a
+    /// Flate→DCT container's inflated stream — is caught there). For
+    /// `Call`, the cumulative total (`spent` + this image's estimate or
+    /// actual). A saturated estimate arithmetic reports `u64::MAX` (the
+    /// true product does not fit u64; no cap admits it).
     SizeCap {
         /// Which ceiling fired.
         scope: CapScope,
         /// The ceiling, in bytes.
         limit_bytes: u64,
-        /// The bytes the work needed (`Image`: this image's estimate;
-        /// `Call`: the spent total plus this image's estimate).
+        /// The bytes the work needed (`Image`: this image's estimate or
+        /// actual; `Call`: the spent total plus this image's estimate or
+        /// actual).
         needed_bytes: u64,
     },
 }
@@ -2540,8 +2642,20 @@ fn sniff_jpx_container(bytes: &[u8]) -> Option<ContainerFormat> {
 ///   16-bit image → 4 bytes, bpc 8).
 /// - **Sub-byte** unpacks to one byte per component.
 ///
-/// The estimate feeds the caps BEFORE the labour (R7); the cumulative
-/// budget accumulates ACTUALS after each decode.
+/// The estimate is ADVISORY (R7, restated): a dictionary number is not a
+/// byte count, and one chain class under-estimates by construction — a
+/// Flate→DCT chain (`/Filter [/FlateDecode /DCTDecode]`) is applied
+/// innermost-first, so the container the DCT arm returns is the INFLATED
+/// stream (measured: 3,898 stored bytes → 4,000,000 container bytes)
+/// while `byte_size_compressed` reads the STORED size. The estimate
+/// still feeds the pre-labour check (cheap refusals stay cheap); the
+/// GUARANTEE is the actual-bytes check immediately after the decode
+/// ([`image_bytes_for`]) — the caps bind on ACTUAL bytes. Every product
+/// here is saturating: a dictionary that overflows u64
+/// (2^31 × 2^31 × 4 components) saturates the estimate at `u64::MAX`,
+/// which no cap can admit — the arithmetic never wraps the cap away
+/// (the pre-fix `u64` multiply wrapped 2^31² CMYK to ≈0 and served the
+/// decode unchecked).
 fn decode_estimate(handle: &PdfImageHandle<'_>) -> u64 {
     let filters: Vec<String> = handle.filter_chain.iter().map(filter_name).collect();
     // DCT anywhere: the decode returns the container, never pixels.
@@ -2552,7 +2666,7 @@ fn decode_estimate(handle: &PdfImageHandle<'_>) -> u64 {
     if filters.len() == 1 && filters[0] == "JPXDecode" {
         return handle.byte_size_compressed;
     }
-    let dims = u64::from(handle.width.max(1)) * u64::from(handle.height.max(1));
+    let dims = u64::from(handle.width.max(1)).saturating_mul(u64::from(handle.height.max(1)));
     let is_ccitt = filters.iter().any(|name| name == "CCITTFaxDecode");
     if is_ccitt {
         // Stays packed: 1-bit fax samples, the packed-bit estimate.
@@ -2589,11 +2703,13 @@ fn decode_estimate(handle: &PdfImageHandle<'_>) -> u64 {
     let representable = components == stride && !matches!(handle.color_space, ColorSpace::Lab);
     if !representable {
         // Packed at the dictionary depth.
-        return dims * components * u64::from(handle.bits_per_component.div_ceil(8));
+        return dims
+            .saturating_mul(components)
+            .saturating_mul(u64::from(handle.bits_per_component.div_ceil(8)));
     }
     // Unpacked/reduced to one byte per component (8 bpc unchanged, 16→8
     // reduced, sub-byte unpacked, Indexed expanded).
-    dims * components
+    dims.saturating_mul(components)
 }
 
 /// Map the engine's decode() error to the typed arm: a filter this build
@@ -2610,8 +2726,42 @@ fn image_error(error: PdfError) -> ImageDataError {
 /// One image's decode, under the caps (R7) and the F1 byte-source ruling:
 /// the containers-only selection first, then the chain-aware pre-decode
 /// estimate against the per-image cap and the call's cumulative budget,
-/// then the decode itself. `spent` accumulates the ACTUALS (container
-/// bytes or pixels) of every successful decode.
+/// then the decode itself, THEN the same two checks on the decode's
+/// ACTUAL bytes before the result enters the payload. `spent` accumulates
+/// the ACTUALS (container bytes or pixels) of every successful decode.
+///
+/// Why twice: the estimate is advisory (a dictionary number is not a
+/// byte count), and one chain class under-estimates by construction —
+/// a Flate→DCT chain is applied innermost-first, so the container the
+/// DCT arm returns is the INFLATED stream (measured: 3,898 stored bytes
+/// → 4,000,000 container bytes) while the estimate reads the stored
+/// size. The actual check is the guarantee: the caps bind on ACTUAL
+/// bytes, and an over-cap decode is refused as the typed SizeCap before
+/// its bytes are served — never truncated.
+///
+/// The call budget is checked at decode time with actuals accumulating:
+/// an under-estimated chain can push the call past budget by at most one
+/// image's inflation (the budget check saw estimate, the decode
+/// delivered actual). Entries already served stand; entries after the
+/// inflation see the inflated `spent` and refuse.
+fn actual_size_cap(actual: u64, max_image_bytes: u64, spent: u64) -> Option<ImageDataError> {
+    if actual > max_image_bytes {
+        return Some(ImageDataError::SizeCap {
+            scope: CapScope::Image,
+            limit_bytes: max_image_bytes,
+            needed_bytes: actual,
+        });
+    }
+    if spent.saturating_add(actual) > MAX_CALL_IMAGE_BYTES {
+        return Some(ImageDataError::SizeCap {
+            scope: CapScope::Call,
+            limit_bytes: MAX_CALL_IMAGE_BYTES,
+            needed_bytes: spent.saturating_add(actual),
+        });
+    }
+    None
+}
+
 fn image_bytes_for(
     handle: &PdfImageHandle<'_>,
     doc: &PdfDocument,
@@ -2652,8 +2802,14 @@ fn image_bytes_for(
         Ok(image) => match image.data() {
             // The engine's container passthrough (DCT anywhere — the
             // engine's own classification): decryption applied, no pixel
-            // decode, no re-encode (F1: NEVER raw_compressed_bytes).
+            // decode, no re-encode (F1: NEVER raw_compressed_bytes). The
+            // ACTUAL check runs on the container's bytes before they are
+            // served: on a Flate→DCT chain this is the inflated stream
+            // (the estimate read the stored size).
             ImageData::Jpeg(bytes) => {
+                if let Some(cap) = actual_size_cap(bytes.len() as u64, max_image_bytes, *spent) {
+                    return ImageBytes::Error(cap);
+                }
                 *spent = spent.saturating_add(bytes.len() as u64);
                 ImageBytes::Container {
                     bytes: bytes.clone(),
@@ -2661,6 +2817,9 @@ fn image_bytes_for(
                 }
             }
             ImageData::Raw { pixels, format } => {
+                if let Some(cap) = actual_size_cap(pixels.len() as u64, max_image_bytes, *spent) {
+                    return ImageBytes::Error(cap);
+                }
                 *spent = spent.saturating_add(pixels.len() as u64);
                 // The buffer's component count: the resolved space's —
                 // EXCEPT Indexed, whose expansion wrote the BASE space's
@@ -2707,6 +2866,11 @@ fn image_bytes_for(
                     return match handle.raw_compressed_bytes() {
                         Ok(bytes) => match sniff_jpx_container(&bytes) {
                             Some(container) => {
+                                if let Some(cap) =
+                                    actual_size_cap(bytes.len() as u64, max_image_bytes, *spent)
+                                {
+                                    return ImageBytes::Error(cap);
+                                }
                                 *spent = spent.saturating_add(bytes.len() as u64);
                                 ImageBytes::Container { bytes, container }
                             }
@@ -2754,10 +2918,18 @@ fn image_bytes_for(
 /// `Unsupported` verbatim, feature-gated (R2); a `rendering`/`jpeg2000`
 /// build decodes them: build-dependent, documented).
 ///
-/// Caps (R7): 256 MiB per image (chain-aware pre-decode estimate —
-/// [`decode_estimate`]), 512 MiB per call cumulative (estimates checked
-/// before each decode, actuals accumulated after), over-capped images
-/// typed `SizeCap{scope, limit, needed}` — refused, never truncated.
+/// Caps (R7): 256 MiB per image, 512 MiB per call cumulative — the caps
+/// bind on ACTUAL bytes: the chain-aware pre-decode estimate
+/// ([`decode_estimate`]) is the advisory pre-labour check (cheap
+/// refusals stay cheap), and the same caps re-run on each decode's
+/// ACTUAL output immediately after it, before the bytes enter the
+/// payload — the under-estimate class (a Flate→DCT chain's container is
+/// the INFLATED stream, measured 3,898 stored bytes → 4,000,000
+/// container bytes) is caught there. Over-capped images are typed
+/// `SizeCap{scope, limit, needed}` — refused, never truncated. The call
+/// budget is a budget checked at decode time: an under-estimated chain
+/// can push the call past it by at most one image's inflation (that
+/// entry refuses, scope `Call`; entries already served stand).
 /// `max_image_bytes` overrides the per-image ceiling; raising it past
 /// the engine's env-read `PDF_OXIDE_MAX_DECOMPRESS_MB` (the flate/unpack/
 /// Indexed ceilings it governs) cannot make the ENGINE decode more — the
@@ -2856,7 +3028,13 @@ fn page_images_one(
 ) -> PageImagesData {
     // The frame: any error here (the page's own get_page walk included)
     // is a `None` — and [R11] the enumeration continues, the entries'
-    // bbox `None` (no frame to map into; the bytes are still served).
+    // bbox `None` (no frame to map into; the bytes are still served). A
+    // DEGENERATE box (zero/non-finite extent) is the same None-frame
+    // answer — geometry `None` AND the entries' bbox `None`: a
+    // zero-extent frame maps boxes into invented coordinates (measured:
+    // ((-50, 500, 100, 100)) out of a 0×0 page, every other surface
+    // serving nothing there); the bytes are frame-independent and stay
+    // enumerated.
     let media = doc.get_page_media_box(page).ok();
     let visible = doc.get_page_visible_box(page).ok();
     let rotation = doc.get_page_rotation(page).ok();
@@ -2875,9 +3053,18 @@ fn page_images_one(
         .iter()
         .map(|handle| {
             // Image handles are ALWAYS raw user space (the engine never
-            // /Rotate-maps them — probe P7): the forward rule directly.
-            let bbox = match (visible, rotation) {
-                (Some(visible), Some(rotation)) => Some(map_box_forward(
+            // /Rotate-maps them — probe P7): the forward rule directly —
+            // but only when the page has a USABLE frame to map into. A
+            // degenerate MediaBox (zero/non-finite extent) yields
+            // geometry None and NO transform frame: mapping the bbox
+            // through a zero-extent frame invents coordinates (measured:
+            // ((-50, 500, 100, 100)) out of a 0×0 page — every other
+            // surface serves nothing there). The BYTES are
+            // frame-independent and stay enumerated (R11's law: the
+            // enumeration never drops for a frame reason) — only the BOX
+            // is gated on the geometry.
+            let bbox = match (geometry, visible, rotation) {
+                (Some(_), Some(visible), Some(rotation)) => Some(map_box_forward(
                     (
                         handle.bbox.x,
                         handle.bbox.y,
@@ -6761,34 +6948,44 @@ mod tests {
 
     /// The A1 gate at unit level: the ruling table's every listed row
     /// (A12's fail-closed default covers the unlisted ones — asserted as
-    /// refusals too).
+    /// refusals too), plus the unreadable-path-input row: a failed path
+    /// walk refuses from ANY rotation (no decision from an input you
+    /// couldn't read — pre-fix the failure read as "no rulings" and a
+    /// 90/270 all-mapped page was served Mapped with an unread path
+    /// input).
     #[test]
     fn the_frame_gate_matches_the_ruling_table() {
         use Frame::{Incoherent, Mapped, Raw};
         // rotation 0: raw, always
-        assert_eq!(table_frame_gate(0, false, false, true), Raw);
-        assert_eq!(table_frame_gate(0, true, false, true), Raw);
+        assert_eq!(table_frame_gate(0, false, false, true, false), Raw);
+        assert_eq!(table_frame_gate(0, true, false, true, false), Raw);
         // 90/270 without rulings: none-mapped raw / all-mapped mapped / mixed refused
-        assert_eq!(table_frame_gate(90, false, false, false), Raw);
-        assert_eq!(table_frame_gate(270, false, false, false), Raw);
-        assert_eq!(table_frame_gate(90, false, true, true), Mapped);
-        assert_eq!(table_frame_gate(270, false, true, true), Mapped);
-        assert_eq!(table_frame_gate(90, false, true, false), Incoherent);
+        assert_eq!(table_frame_gate(90, false, false, false, false), Raw);
+        assert_eq!(table_frame_gate(270, false, false, false, false), Raw);
+        assert_eq!(table_frame_gate(90, false, true, true, false), Mapped);
+        assert_eq!(table_frame_gate(270, false, true, true, false), Mapped);
+        assert_eq!(table_frame_gate(90, false, true, false, false), Incoherent);
         // 90/270 with rulings: none-mapped raw / any-mapped refused
-        assert_eq!(table_frame_gate(90, true, false, false), Raw);
-        assert_eq!(table_frame_gate(270, true, false, false), Raw);
-        assert_eq!(table_frame_gate(90, true, true, true), Incoherent);
-        assert_eq!(table_frame_gate(270, true, true, false), Incoherent);
+        assert_eq!(table_frame_gate(90, true, false, false, false), Raw);
+        assert_eq!(table_frame_gate(270, true, false, false, false), Raw);
+        assert_eq!(table_frame_gate(90, true, true, true, false), Incoherent);
+        assert_eq!(table_frame_gate(270, true, true, false, false), Incoherent);
         // 180: all-mapped pathless serves; every rulings combination refuses
-        assert_eq!(table_frame_gate(180, false, true, true), Mapped);
-        assert_eq!(table_frame_gate(180, true, true, true), Incoherent);
-        assert_eq!(table_frame_gate(180, true, true, false), Incoherent);
-        assert_eq!(table_frame_gate(180, false, true, false), Incoherent);
+        assert_eq!(table_frame_gate(180, false, true, true, false), Mapped);
+        assert_eq!(table_frame_gate(180, true, true, true, false), Incoherent);
+        // The A12 unreadable-input row: a failed path walk refuses at
+        // every rotation and every span combination — including the
+        // mapped-class combination the failure used to fall into.
+        assert_eq!(table_frame_gate(90, false, true, true, true), Incoherent);
+        assert_eq!(table_frame_gate(180, false, true, true, true), Incoherent);
+        assert_eq!(table_frame_gate(0, false, false, true, true), Incoherent);
+        assert_eq!(table_frame_gate(180, true, true, false, false), Incoherent);
+        assert_eq!(table_frame_gate(180, false, true, false, false), Incoherent);
         // the (any=false, all=true) combination is the ZERO-SPAN vacuity
         // (all ⊆ any for any real span set): a spanless 180 page — no
         // table input at all — serves raw-empty, refused false.
-        assert_eq!(table_frame_gate(180, false, false, true), Raw);
-        assert_eq!(table_frame_gate(180, true, false, true), Raw);
+        assert_eq!(table_frame_gate(180, false, false, true, false), Raw);
+        assert_eq!(table_frame_gate(180, true, false, true, false), Raw);
     }
 
     /// The pdfium-hazard property, tables side: 8 threads opening their
@@ -6928,6 +7125,14 @@ mod tests {
     /// that truncated value (the ceiling comment: /St above u32::MAX is
     /// not representable in the engine's range struct, and the label the
     /// reader displays is the truncated one).
+    ///
+    /// The BOUNDED-LABEL LAW, restated over the old blessing: the u64
+    /// render is unbounded only in ARITHMETIC — the STRING render is
+    /// bounded at [`MAX_LABEL_CHARS`], and the decimal labels below are
+    /// 10-char strings that sail under it. The SAME value under a roman
+    /// style is exactly what the bound refuses (4,294,967 chars per page
+    /// — the 1.67 GiB-at-200-pages measurement): every page answers
+    /// `None`, nothing is built.
     #[test]
     fn page_labels_render_in_u64_no_panic_no_wrap() {
         // /St 4294967294 + 2 pages: u64 render crosses u32::MAX exactly
@@ -6961,12 +7166,72 @@ mod tests {
         );
     }
 
-    /// The alpha style is bijective base-26 (no zero glyph): 26 is "Z",
-    /// 27 wraps to "AA" — pinned (R14), and Roman is unbounded on the u64
-    /// render: 4000 is "mmmm" (the engine's subtractive table, one "m"
-    /// per thousand, no u32 ceiling).
+    /// The bounded-label law, pinned on the render the bound exists for:
+    /// a roman render past [`MAX_LABEL_CHARS`] (4 KiB) bounds OUT to
+    /// `None` for the page — never a truncated numeral, never the build
+    /// (the pre-fix render built one "m" per thousand of the value: a
+    /// legal /St 4294967294 materialized 4,294,967 chars PER PAGE, and
+    /// page_labels for EVERY page — 858,994,700 total chars, 1.67 GiB RSS
+    /// at 200 pages, measured). The boundary is exact: the largest value
+    /// the check admits renders in full (the m-run + a ≤12-char tail ≤
+    /// the 4 KiB bound), the first refused value above it answers None;
+    /// decimal/alpha (O(log n)) can never reach the bound.
     #[test]
-    fn page_labels_alpha_wraps_z_to_aa_and_roman_is_unbounded() {
+    fn page_labels_roman_bounds_out_above_max_label_chars() {
+        // The refused value: the same legal /St the old docstring blessed.
+        let labels = page_labels(
+            labeled_pdf(3, " /PageLabels << /Nums [0 << /S /r /St 4294967294 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![None, None, None]);
+
+        // The boundary: run ≤ 4080 (MAX_LABEL_CHARS - ROMAN_TAIL_MAX)
+        // renders in full; run 4081 is the first bounded out. 4_080_567:
+        // run 4080, tail 567 ("dlxvii", 6 chars) → 4086 chars ≤ 4096.
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /r /St 4080567 >>] >>"),
+            None,
+        )
+        .unwrap();
+        let Some(label) = labels[0].as_deref() else {
+            panic!("the admitted boundary value must render in full")
+        };
+        assert_eq!(label.len(), 4080 + 6);
+        assert!(label.starts_with('m') && label.ends_with("dlxvii"));
+        // the m-run is exactly the admitted run: all 'm' until the tail
+        assert!(label[..4080].chars().all(|c| c == 'm'));
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /r /St 4081000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![None], "run 4081: the first bounded-out value");
+
+        // Decimal at the same value: 7 chars, never bounded.
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /D /St 4081000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(labels, vec![Some("4081000".to_string())]);
+        // Alpha at the same value: O(log26 n), a handful of chars.
+        let labels = page_labels(
+            labeled_pdf(1, " /PageLabels << /Nums [0 << /S /a /St 4081000 >>] >>"),
+            None,
+        )
+        .unwrap();
+        assert!(labels[0].as_deref().is_some_and(|l| l.len() < 20));
+    }
+
+    /// The alpha style is bijective base-26 (no zero glyph): 26 is "Z",
+    /// 27 wraps to "AA" — pinned (R14). Roman is bounded at
+    /// [`MAX_LABEL_CHARS`] on the u64 render: 4000 is "mmmm" (the
+    /// engine's subtractive table, one "m" per thousand — values whose
+    /// run fits the bound render in full; see the bound's own test),
+    /// values past it bound out to None.
+    #[test]
+    fn page_labels_alpha_wraps_z_to_aa_and_roman_fits_the_bound() {
         let labels = page_labels(
             labeled_pdf(3, " /PageLabels << /Nums [0 << /S /A /St 26 >>] >>"),
             None,
@@ -8206,6 +8471,179 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The caps bind on ACTUAL bytes (the estimate is advisory): a
+    /// Flate→DCT chain is applied innermost-first, so the container the
+    /// DCT arm returns is the INFLATED stream — the measured probe shape
+    /// is 3,898 stored bytes → 4,000,000 container bytes. The estimate
+    /// reads the STORED size and sails under `max_image_bytes=1_000_000`;
+    /// the post-decode actual check refuses the RESULT as
+    /// `SizeCap{scope: Image, needed: actual}` before the bytes enter the
+    /// payload (the pre-fix behavior served the 4 MB container — and at
+    /// the documented 512 MiB/call budget, three such images from one
+    /// 584 KB PDF served 572 MiB, the pre-check having seen estimates
+    /// only).
+    #[test]
+    fn images_the_actual_bytes_refuse_when_the_estimate_under_estimates() {
+        // A 4,000,000-byte JPEG-shaped container (magic + filler),
+        // deflated to a few KB of stored stream — the probe's shape.
+        let mut container = Vec::with_capacity(4_000_000);
+        container.extend_from_slice(b"\xff\xd8\xff\xe0");
+        container.resize(4_000_000, 0x42);
+        let stored = zlib_flow(&container);
+        assert!(stored.len() < 100_000, "the fixture must compress");
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            &[image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8 \
+                 /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+                 /Filter [/FlateDecode /DCTDecode]",
+                &stored,
+            )],
+        );
+        // The container mode: the inflated container is refused on ACTUAL
+        // (the estimate read the stored bytes and passed; the override is
+        // 1,000,000 — the measured probe's own knob).
+        let entry = page_images(
+            bytes.clone(),
+            None,
+            None,
+            "pdf",
+            ImageDecode::Container,
+            Some(1_000_000),
+        )
+        .unwrap()
+        .remove(0)
+        .images
+        .remove(0);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope,
+                limit_bytes,
+                needed_bytes,
+            }) => {
+                assert_eq!(*scope, CapScope::Image);
+                assert_eq!(*limit_bytes, 1_000_000);
+                assert_eq!(
+                    *needed_bytes, 4_000_000,
+                    "the ACTUAL bytes, not the estimate"
+                );
+            }
+            other => panic!("expected the post-decode SizeCap, got {other:?}"),
+        }
+        // Pixels mode: the chain ends in DCT, so the decode is the same
+        // container arm — the same refusal on actuals.
+        let entry = page_images(
+            bytes,
+            None,
+            None,
+            "pdf",
+            ImageDecode::Pixels,
+            Some(1_000_000),
+        )
+        .unwrap()
+        .remove(0)
+        .images
+        .remove(0);
+        assert!(matches!(
+            entry.data,
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope: CapScope::Image,
+                ..
+            })
+        ));
+    }
+
+    /// The call budget is a decode-time budget on ACTUALS: the pure
+    /// refusal arithmetic (`actual_size_cap`) — over the per-image cap →
+    /// Image scope; over the call budget once spent accumulates → Call
+    /// scope naming `spent + actual`. (The end-to-end cumulative
+    /// measurement — three inflating images from one small PDF serving
+    /// past budget pre-fix — is the subprocess cell's job:
+    /// test_documents_hardening.py.)
+    #[test]
+    fn images_the_call_budget_refuses_on_actuals() {
+        // Per-image: the actual over the cap wins the scope.
+        let cap = actual_size_cap(4_000_000, 1_000_000, 0);
+        assert!(matches!(
+            cap,
+            Some(ImageDataError::SizeCap {
+                scope: CapScope::Image,
+                limit_bytes: 1_000_000,
+                needed_bytes: 4_000_000,
+            })
+        ));
+        // Call: the actual fits per-image, spent + actual passes budget.
+        let cap = actual_size_cap(200_000_000, 256 * 1024 * 1024, MAX_CALL_IMAGE_BYTES - 100);
+        assert!(matches!(
+            cap,
+            Some(ImageDataError::SizeCap {
+                scope: CapScope::Call,
+                limit_bytes: MAX_CALL_IMAGE_BYTES,
+                ..
+            })
+        ));
+        // Under both: no refusal.
+        assert!(actual_size_cap(1_000, 1_000_000, 0).is_none());
+    }
+
+    /// The estimate's multiply is saturating (the unchecked-multiply
+    /// finding): 2^31 × 2^31 dims on DeviceCMYK (×4 components)
+    /// overflowed u64 pre-fix — the wrap landed the estimate at ≈0, no
+    /// SizeCap ever fired, and the decode itself answered (a decode
+    /// error in release; a panic in debug builds, surfaced as
+    /// InvalidPdf). Post-fix the product saturates to `u64::MAX`, which
+    /// no cap can admit: the typed Image-scope SizeCap with
+    /// `needed_bytes = u64::MAX`. The RGB twin (×3) does not overflow:
+    /// the same fixture pins the sane-multiply refusal with the exact
+    /// product.
+    #[test]
+    fn images_estimate_multiplication_saturates_never_wraps() {
+        let cmyk = image_xobject(
+            "/Type /XObject /Subtype /Image /Width 2147483648 /Height 2147483648 \
+             /ColorSpace /DeviceCMYK /BitsPerComponent 8 /Filter /FlateDecode",
+            b"\x00\x01\x02",
+        );
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            std::slice::from_ref(&cmyk),
+        );
+        let entry = first_image(bytes, ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope,
+                limit_bytes,
+                needed_bytes,
+            }) => {
+                assert_eq!(*scope, CapScope::Image);
+                assert_eq!(*limit_bytes, DEFAULT_MAX_IMAGE_BYTES);
+                assert_eq!(*needed_bytes, u64::MAX, "the saturated product");
+            }
+            other => panic!("expected the saturation SizeCap, got {other:?}"),
+        }
+        // The RGB twin: 2^62 × 3 fits u64 — the exact product, refused.
+        let rgb = image_xobject(
+            "/Type /XObject /Subtype /Image /Width 2147483648 /Height 2147483648 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+            b"\x00\x01\x02",
+        );
+        let bytes = images_pdf(
+            "q 100 0 0 100 50 600 cm /Im1 Do Q",
+            "",
+            std::slice::from_ref(&rgb),
+        );
+        let entry = first_image(bytes, ImageDecode::Pixels);
+        match &entry.data {
+            ImageBytes::Error(ImageDataError::SizeCap {
+                scope: CapScope::Image,
+                needed_bytes,
+                ..
+            }) => assert_eq!(*needed_bytes, 3u64 << 62, "the exact product"),
+            other => panic!("expected the RGB twin's SizeCap, got {other:?}"),
+        }
     }
 
     /// The ~96 MiB 600-dpi letter-size RGB scan (5100×6600×3 =

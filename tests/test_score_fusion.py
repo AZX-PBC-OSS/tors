@@ -440,8 +440,10 @@ class TestScoreFuseArguments:
             tors.score_fuse([[("a", 1.0), ("b", bad)]])  # type: ignore[list-item]
 
     def test_int_and_bool_scores_launder_to_floats(self) -> None:
-        # The int-extraction convention: 2 and True extract as 2.0 and
-        # 1.0 (the weights=/gains= convention, same walk).
+        # The int-extraction convention for SCORES: 2 and True extract as
+        # 2.0 and 1.0. (The weights=/gains= walks reject bool — the house
+        # bool-reject convention; the scores walk is the laundering lane,
+        # and this pins that difference.)
         assert tors.score_fuse([[("a", 2), ("b", True)]]) == tors.score_fuse(
             [[("a", 2.0), ("b", 1.0)]]
         )

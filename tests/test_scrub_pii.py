@@ -974,6 +974,49 @@ class TestDomesticPhoneZoo:
             == f"{_phone_token('415-555-2671')}, {_phone_token('415-555-2672')}"
         )
 
+    def test_space_bridged_domestic_pairs_both_scrub(self) -> None:
+        # The width cut's group re-scan (the leak fix): a maximal run
+        # wider than the NANP shapes spent WHOLE leaked every number it
+        # bridged -- the space is a phone-class char, so two numbers
+        # joined by one are one 20-digit run to the single-run width
+        # test. The re-scan cuts the groups the domestic grammar
+        # accepts: each number tokens with its OWN GROUP's digest (the
+        # paren spelling's group span carries the parens, so its digest
+        # differs from the bare digits'), and the first group's digest
+        # equals the lone number's.
+        for text, groups in [
+            ("415-555-2671 415-555-2672", ("415-555-2671", "415-555-2672")),
+            ("(415) 555-2671 (415) 555-2672", ("(415) 555-2671", "(415) 555-2672")),
+            ("call 415-555-2671 415-555-2672 now", ("415-555-2671", "415-555-2672")),
+        ]:
+            out = scrub_pii(text, ["contact_phone"], salt="")
+            for group in groups:
+                assert _phone_token(group) in out, (text, group)
+            for group in groups:
+                assert group not in out, (text, group)
+        assert scrub_pii(
+            "415-555-2671 415-555-2672", ["contact_phone"], salt=""
+        ) == f"{_phone_token('415-555-2671')} {_phone_token('415-555-2672')}"
+        assert scrub_pii(
+            "call 415-555-2671 415-555-2672 now", ["contact_phone"], salt=""
+        ) == (
+            f"call {_phone_token('415-555-2671')} {_phone_token('415-555-2672')} now"
+        )
+
+    def test_the_group_recut_near_miss_neighbors_stay_out(self) -> None:
+        # The re-scan's false-positive guards: a 4-digit credit-card
+        # group's count passes through ten only INSIDE a digit run (a
+        # cut never fires mid-spelling), a dash-chained id overshoots
+        # between dashes (the cut is SPACE-only), and a bare 10-digit
+        # group has no separator to offer -- all three stay out; the
+        # bare id next to a real number stays out while the number
+        # scrubs.
+        for text in ["4111 1111 1111 1111", "415-555-2671-555-123-4567"]:
+            assert scrub_pii(text, ["contact_phone"], salt="") == text
+        assert scrub_pii("9876543210 415-555-2671", ["contact_phone"], salt="") == (
+            f"9876543210 {_phone_token('415-555-2671')}"
+        )
+
     def test_an_email_token_domain_that_spells_a_number_is_re_tokenized(self) -> None:
         # The documented over-redaction corner: the email pass tokens the
         # whole address, then the phone pass re-tokens the domestic shape

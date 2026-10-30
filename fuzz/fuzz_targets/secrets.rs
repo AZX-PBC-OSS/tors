@@ -6,20 +6,26 @@
 //! * The oracle side of this harness transcribes the five grammars in
 //!   char space, per position, in the scanner's own order (the shared
 //!   boundary gate, then the prefix table, then the legacy hex class,
-//!   then PEM): the AWS exact-16 tail run, the Slack section grammar
+//!   then PEM): the AWS 16-minimum tail consumed maximally (one long
+//!   key — the idempotence contract; a shorter run is the near-miss
+//!   refusal), the Slack section grammar
 //!   transcribed from the CITED detect-secrets detector as a chunk
 //!   classification (`xox(?:a|b|p|o|s|r)-(?:\d+-)+[a-z0-9]+` under
 //!   IGNORECASE: dash-terminated digit-run chunks are the `(?:\d+-)+`
 //!   repetitions, the first remaining chunk starts the maximal
 //!   `[a-z0-9]+` final run — the final class consumes digits, so a
 //!   digit-led final section matches), the Stripe six-prefix table
-//!   with the maximal 24+ tail, the GitHub modern exactly-36 run and
+//!   with the maximal 24+ tail, the GitHub modern 36-minimum tail
+//!   consumed maximally (the aws posture) and
 //!   the legacy exactly-40 hex run at a word boundary, and the PEM
 //!   span (the label words parse, the first verifying END wins). The
 //!   transform's output must be byte-identical to the oracle's splice
 //!   for the all-rules pipeline and for each single-rule pipeline.
-//!   This subsumes the accounting corners: span consumption, near-miss
-//!   exact-width refusals, the boundary gate's mid-token refusals, and
+//!   This subsumes the accounting corners: span consumption, the
+//!   width minimums and their near-miss refusals (a short run is a
+//!   longer word's fragment; a longer run is ONE LONG key consumed
+//!   maximally — the keys rule's own doctrine, the idempotence
+//!   contract), the boundary gate's mid-token refusals, and
 //!   the escape carve-outs (which the oracle transcribes too). The
 //!   oracle is anchored to the cited detector spellings, NOT to the
 //!   implementation — a bug-for-bug transcription cannot catch grammar
@@ -196,7 +202,7 @@ fn aws_match_at(chars: &[char], pos: usize) -> Option<usize> {
         while end < chars.len() && is_aws_tail(chars[end]) {
             end += 1;
         }
-        return (end - tail_start == 16).then_some(end);
+        return (end - tail_start >= 16).then_some(end);
     }
     None
 }
@@ -305,7 +311,7 @@ fn github_modern_match_at(chars: &[char], pos: usize) -> Option<usize> {
         while end < chars.len() && chars[end].is_ascii_alphanumeric() {
             end += 1;
         }
-        return (end - tail_start == 36).then_some(end);
+        return (end - tail_start >= 36).then_some(end);
     }
     None
 }

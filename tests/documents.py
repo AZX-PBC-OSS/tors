@@ -1585,6 +1585,49 @@ def generate_docx_blocks(count: int) -> bytes:
     )
 
 
+def generate_docx_cells(cells: int) -> bytes:
+    """A document whose ONE table carries `cells` `<w:tc>` cells (one
+    row per cell — the grid is rows × 1): the entry cap's NESTED-entry
+    fixture. A cell is an entry object the cap must count; pre-fix the
+    cells rode inside ONE table block (blocks=1, marker false, the full
+    cell list in the payload), post-fix the running budget stops the
+    build and flips `entries_truncated`."""
+    rows = "".join(
+        '<w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>'
+        for _ in range(cells)
+    )
+    document = (
+        _XML_DECL
+        + f'<w:document xmlns:w="{_W_NS}"><w:body>'
+        + '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>'
+        + rows
+        + "</w:tbl>"
+        + "</w:body></w:document>"
+    )
+    return _zip_bytes(
+        [
+            ("[Content_Types].xml", DOCX_CONTENT_TYPES.encode("utf-8")),
+            ("_rels/.rels", DOCX_RELS.encode("utf-8")),
+            ("word/document.xml", document.encode("utf-8")),
+        ]
+    )
+
+
+def generate_html_grid_cells(cells: int) -> bytes:
+    """A document whose ONE table carries `cells` `<td>` cells (one row
+    per cell): the html leg's nested-entry fixture — pre-fix the cells
+    rode inside ONE table node (nodes=1), post-fix the running budget
+    stops the mapping and flips `entries_truncated`."""
+    rows = "<tr><td>x</td></tr>" * cells
+    document = (
+        "<!DOCTYPE html>\n"
+        "<html><head><title>Big grid</title></head><body>"
+        f"<table>{rows}</table>"
+        "</body></html>\n"
+    )
+    return document.encode("utf-8")
+
+
 def generate_html_nodes(count: int) -> bytes:
     """A document with `count` `<p>` nodes: the entry cap's html
     boundary fixture (one node per paragraph, no headings so no
@@ -1900,6 +1943,29 @@ LAYOUT_RED_1X1 = (
 )
 
 
+def generate_pdf_page_labels_value(count: int, fragment: str) -> bytes:
+    """A `count`-page PDF whose catalog carries ONE `/PageLabels` range
+    declared as `fragment` (the `/Nums` entry: e.g. `<< /S /r /St
+    4294967294 >>`): the bounded-label probes' fixture. The tree is
+    catalog data, so no page needs content — a 200-page hostile-label
+    document is a few KB, and the label render (not the parse) is what
+    the probe measures."""
+    kids = " ".join(f"{3 + page} 0 R" for page in range(count))
+    return _pdf_from_objects(
+        [
+            (
+                f"<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums "
+                f"[0 {fragment}] >> >>"
+            ).encode("ascii"),
+            f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
+            *(
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+                for _ in range(count)
+            ),
+        ]
+    )
+
+
 def generate_pdf_layout(
     content: bytes,
     *,
@@ -2109,6 +2175,89 @@ def generate_pdf_layout_dct(*, garbage: bool = False) -> bytes:
                 data,
             )
         ],
+    )
+
+
+def generate_pdf_layout_flate_dct(container_size: int = 4_000_000) -> bytes:
+    """The Flate→DCT chain fixture: `/Filter [/FlateDecode /DCTDecode]`
+    on a stream whose INFLATED body is a `container_size`-byte
+    JPEG-shaped container (magic + filler) stored in a few KB. The
+    engine applies the filters innermost-first, so the container decode()
+    returns is the INFLATED stream while byte_size_compressed reads the
+    STORED bytes — the under-estimate class the actual-bytes cap check
+    exists for (measured: 3,898 stored → 4,000,000 container;
+    max_image_bytes=1_000_000 SERVED the 4 MB container pre-fix)."""
+    container = b"\xff\xd8\xff\xe0" + b"\x42" * (container_size - 4)
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8"
+                " /Filter [/FlateDecode /DCTDecode]",
+                zlib.compress(container),
+            )
+        ],
+    )
+
+
+def _flate_bomb_stream(target: int) -> bytes:
+    """The deflate stream of `target` zero bytes, built chunked (no
+    target-sized allocation in the builder — the bombs' cumulative cell
+    builds three 200 MB inflations from a ~584 KB file, and the builder
+    must not hold three 200 MB buffers to do it)."""
+    compressor = zlib.compressobj()
+    out = bytearray()
+    chunk = bytes(1 << 20)
+    left = target
+    while left > 0:
+        step = min(left, len(chunk))
+        out += compressor.compress(chunk[:step])
+        left -= step
+    out += compressor.flush()
+    return bytes(out)
+
+
+def generate_pdf_layout_flate_dct_chain(
+    images: int = 3, container_size: int = 200_000_000
+) -> bytes:
+    """`images` Flate→DCT image streams each inflating to
+    `container_size` bytes (zeros — maximal compression), drawn on one
+    page: the cumulative-budget probe's fixture. Measured shape: three
+    200 MB inflations ride in a ~584 KB PDF; the stored bytes' estimates
+    sail under every cap, so the per-call budget was pushed to 572 MiB
+    served against the documented 512 MiB/call (pre-fix) — the actuals
+    law refuses the third entry, scope `call`."""
+    content = b"".join(
+        b"q 100 0 0 100 50 600 cm /Im%d Do Q\n" % (index + 1) for index in range(images)
+    )
+    stream = _flate_bomb_stream(container_size)
+    return generate_pdf_layout(
+        content,
+        images=[
+            _image_xobject(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 8"
+                " /ColorSpace /DeviceRGB /BitsPerComponent 8"
+                " /Filter [/FlateDecode /DCTDecode]",
+                stream,
+            )
+            for _ in range(images)
+        ],
+    )
+
+
+def generate_pdf_layout_zero_mediabox() -> bytes:
+    """A page whose MediaBox is degenerate (`[0 0 0 0]`) with one drawn
+    image: the frame-gate fixture. Every surface answers geometry `None`;
+    the image's bytes still enumerate (R11: the enumeration is
+    frame-independent) while its bbox is `None` — a zero-extent frame
+    maps boxes into invented coordinates (measured pre-fix:
+    `((-50, 500, 100, 100))` out of page_images where every other
+    surface served nothing)."""
+    return generate_pdf_layout(
+        b"q 100 0 0 100 50 600 cm /Im1 Do Q",
+        mediabox="[0 0 0 0]",
+        images=[LAYOUT_RED_1X1],
     )
 
 

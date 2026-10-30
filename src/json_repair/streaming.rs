@@ -349,6 +349,24 @@
 //!   key no longer diverges (the key lane's string semantics commit
 //!   `{: 1, : 2}` -> `{"1,": 2}` the engine's own way); the outputs
 //!   stay valid JSON on both sides.
+//! - **The object-lane comma-glue's split residual**: the engine's
+//!   classify_object_value_comma re-decides a comma glued into an
+//!   object-lane number run from the WHOLE tail; the stream re-decides
+//!   it at the `:` that proves the post-comma text a key (the run
+//!   splits there: the value renders up to the comma, the post-comma
+//!   text re-enters the key lane — `{"a": 1,7Z: 8}` -> `{"a": "1",
+//!   "7Z": 8}`, `{Z7:8,7Z:8` -> `{"Z7": "8", "7Z": 8}`, the engine's
+//!   own shapes). The half of the engine's classification the linear
+//!   machine cannot see at that `:` — the recoverable-value check
+//!   needs the post-colon value's OWN tail to the object's `}` — is
+//!   decided optimistically: a value led by a bare word whose tail
+//!   holds a quote before the close, or a cut before the close, flips
+//!   the engine to keep-the-comma where the split already fired
+//!   (`{"a": 1,b: x"y}` -> the engine `{"a": "1,b: x"}`, the stream
+//!   `{"a": "1", "b": "x\"y"}`; the cut `{"a": 1,b: x` -> the engine
+//!   `{"a": "1,b: x"}`, the stream `{"a": "1", "b": "x"}`). Both
+//!   outputs stay valid JSON; the parity harness's comma gate keeps
+//!   the class out of the differential.
 //! - **The unquoted-value run's container/whitespace absorption**: the
 //!   engine's unquoted-value lane eats container chars and internal
 //!   whitespace into the string and re-decides literal prefixes
@@ -2164,6 +2182,80 @@ impl StreamingRepairer {
                     // that follows is the member's value, already counted.
                     self.pos = Pos::MemberValue;
                     return Ok(());
+                }
+                // The object-lane comma-glue SPLIT (the rewind's
+                // member-boundary re-entry): a rewind-born word holding
+                // the run's ONE absorbed comma, meeting the `:` that
+                // proves the post-comma text a KEY. The engine's
+                // classify_object_value_comma re-decided that comma a
+                // MEMBER separator at the value parse (the bare-key +
+                // recoverable-value shape: `{"a": 1,7Z: 8}` -> the
+                // engine `{"a": "1", "7Z": 8}`, `{Z7:8,7Z:8` -> the
+                // engine `{"Z7": "8", "7Z": 8}`); without the split the
+                // rewound word rides the `:` as literal text and the
+                // member shape disappears inside one string
+                // (`{"a": "1,7Z:8"}`). The value renders up to the
+                // comma -- the engine's rewind re-entry, the STRING
+                // lane's entry-skip spelling (`render_word`'s: the
+                // stray-sign/underscore/dot leads drop, `-8` -> `"8"`,
+                // `1e2` stays the string `"1e2"`) -- and the post-comma
+                // text re-enters the KEY lane, whose own commit the
+                // reprocessed `:` runs. The gate is the engine's own
+                // bare-key branch, all of it in hand at the `:` (no
+                // lookahead): exactly one absorbed comma (a second
+                // comma is the engine's "string" classification -- the
+                // bare-key loop stops at it: `{"a": 1,7,9Z: 8}` keeps
+                // the run whole, both sides), the key part bare-key
+                // spelled (alnum/`_`/`-` runs with trailing whitespace
+                // only; a `-`/`.`/container char leads or body stops
+                // the engine's loop short of the `:`: `{"a": 1,-b: 2}`
+                // keeps the comma), and the object lane (the comma
+                // only ever glued there). The RESIDUAL (the half the
+                // linear machine cannot see at the `:`): the engine's
+                // recoverable-value check needs the post-colon value's
+                // own tail to the object's `}` -- a value led by a bare
+                // word whose tail holds a quote, or a CUT before the
+                // object's close, flips the engine to keep-the-comma
+                // where the split already fired (`{"a": 1,b: x"y}`,
+                // `{"a": 1,b: x`); those stay the documented divergence
+                // below, the fuzz Scan's comma gate keeps them out of
+                // the parity assert.
+                if !key
+                    && from_number_run
+                    && c == ':'
+                    && matches!(self.frames.last().map(|f| &f.kind), Some(FrameKind::Obj))
+                    && text.matches(',').count() == 1
+                {
+                    let comma = text.find(',').expect("the count proved one comma");
+                    let (value_part, key_part) = (text[..comma].trim(), text[comma + 1..].trim());
+                    // The engine's bare-key branch: alnum-or-`_` LED, and
+                    // the run to the `:` is bare-key chars ONLY (internal
+                    // whitespace stops the engine's loop short of the `:`
+                    // -- `{"a": 1,7Z x: 8}` keeps the comma -- so the
+                    // trimmed key part admits no ws inside either).
+                    let key_led = key_part
+                        .starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
+                        && key_part
+                            .chars()
+                            .all(|ch: char| ch.is_alphanumeric() || ch == '_' || ch == '-');
+                    if key_led {
+                        self.repair_decided = true;
+                        let value = render_word(value_part, true);
+                        self.out
+                            .push_str(&serializer::dumps(&value, self.ensure_ascii));
+                        // The second member's bookkeeping: the same
+                        // begin_common the structural comma's key start
+                        // runs (the member_start lands BEFORE the
+                        // separator, so a later dangling-member drop
+                        // takes the separator with it).
+                        self.begin_common();
+                        self.pending = Some(Pending::Word {
+                            text: key_part.to_string(),
+                            key: true,
+                            from_number_run: false,
+                        });
+                        return self.process(c);
+                    }
                 }
                 if c == ',' || c == '}' || c == ']' {
                     if key {

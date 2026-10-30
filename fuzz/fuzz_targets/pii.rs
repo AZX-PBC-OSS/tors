@@ -587,14 +587,9 @@ fn pem_head_after_dash_run_at(chars: &[char], i: usize) -> bool {
     if chars[i - 1] == '-' {
         return true;
     }
-    if !chars[i - 1].is_ascii_alphanumeric() {
-        return false;
-    }
-    let mut w = i - 1;
-    while w > 0 && chars[w - 1].is_ascii_alphanumeric() {
-        w -= 1;
-    }
-    true
+    // Shared close: any word byte directly before the head carves —
+    // the block grammar downstream self-validates the match.
+    chars[i - 1].is_ascii_alphanumeric()
 }
 
 /// The key match set at one lane mask: every position whose grammar
@@ -714,6 +709,107 @@ fn intl_match_at(chars: &[char], start: usize) -> Option<usize> {
         .map(|idx| idx + 1)
 }
 
+/// The width cut's group re-scan — char-space twin of the transform's
+/// `domestic_group_spans`: a maximal un-plussed run wider than the NANP
+/// shapes may be several numbers BRIDGED by a space
+/// (`415-555-2671 415-555-2672`), and the width test spending it whole
+/// would silently leak every number in it. Walk the run once, cutting
+/// the groups the domestic grammar accepts: the digit count reaches
+/// exactly 10 (or 11 with an ASCII leading `1`) at a digit whose
+/// following separator run — up to the NEXT digit, or the run's end —
+/// carries a SPACE, or reaches the run's end (the idempotence
+/// contract, the transform's own cut rule — see its doc). The group
+/// carries an internal separator (the bare cut, re-checked on the
+/// space-trimmed span), and the group starts clean (the single-run
+/// clean-boundary rule, digest composition impossible). A cut never
+/// fires mid-spelling: a 4-digit credit-card group's count passes
+/// through 10 only inside a digit run, and a dash-chained id has
+/// digits after every completing digit whose separator run holds no
+/// space. Overshoot re-anchors at the last space since the group
+/// start (or here, when the segment holds none), rewinding the walk —
+/// the re-walked segment holds no space (the anchor IS the last one),
+/// so the next overshoot cannot rewind again and the pass stays
+/// linear.
+fn domestic_group_spans_at(
+    chars: &[char],
+    run_start: usize,
+    run_end: usize,
+) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    // Group 1 starts where the single-run match would (leading spaces
+    // are word separation); a later group starts after the previous
+    // group's last digit, its own bridge spaces skipped.
+    let mut gs = run_start;
+    while gs < run_end && chars[gs] == ' ' {
+        gs += 1;
+    }
+    let mut count = 0usize;
+    let mut first: Option<char> = None;
+    let mut last_space: Option<usize> = None;
+    let mut i = gs;
+    while i < run_end {
+        let c = chars[i];
+        if oracle_is_nd(c) {
+            i += 1;
+            count += 1;
+            if first.is_none() {
+                first = Some(c);
+            }
+            let complete = count == 10 || (count == 11 && first == Some('1'));
+            // The separator run after the completing digit, up to the
+            // next digit or the run's end (the transform's own cut
+            // rule: the idempotence contract — see
+            // domestic_group_spans_at's doc).
+            let mut e = i;
+            while e < run_end && !oracle_is_nd(chars[e]) {
+                e += 1;
+            }
+            let bridged = e < run_end && chars[i..e].contains(&' ');
+            if complete && (e == run_end || bridged) {
+                // Candidate group [gs, i): trim its leading spaces, then
+                // the two cuts on the trimmed span.
+                let mut s = gs;
+                while s < i && chars[s] == ' ' {
+                    s += 1;
+                }
+                let clean_start = s == 0
+                    || !matches!(chars[s - 1], '~' | 'a'..='f')
+                    || token_ends_at_chars(chars, s);
+                if chars[s..i].iter().any(|&c| is_phone_sep_char(c)) && clean_start {
+                    spans.push((s, i));
+                }
+                // Spent: the next group starts past the bridge spaces.
+                let mut j = i;
+                while j < run_end && chars[j] == ' ' {
+                    j += 1;
+                }
+                gs = j;
+                i = j;
+                count = 0;
+                first = None;
+                last_space = None;
+                continue;
+            }
+            if count == 12 || (count == 11 && first != Some('1')) {
+                let anchor = last_space.unwrap_or(i);
+                gs = anchor;
+                i = anchor;
+                count = 0;
+                first = None;
+                last_space = None;
+            }
+        } else if is_phone_sep_char(c) {
+            if c == ' ' {
+                last_space = Some(i + 1);
+            }
+            i += 1;
+        } else {
+            break; // not class material: the run ended (defensive)
+        }
+    }
+    spans
+}
+
 /// The full phone match set: the international grammar at every `+`,
 /// and the domestic extension over un-plussed runs — a FULL class run
 /// of exactly ten Nd digits, or eleven with an ASCII leading `1`,
@@ -802,6 +898,14 @@ fn phone_matches_of(s: &str) -> Vec<(usize, usize)> {
                     i = end;
                     continue;
                 }
+            }
+            // The width cut spent this run whole: the group re-scan
+            // emits every space-bridged number the run bridges (the
+            // bare/id/dash-chain neighbors stay out); the scan resumes
+            // after the run either way. A digit-less run (separators
+            // only) holds no group by construction.
+            if last_digit_idx.is_some() {
+                found.extend(domestic_group_spans_at(&chars, run_start, j));
             }
         }
         i = j; // a non-matching run is spent whole: no partial matches

@@ -63,12 +63,19 @@ import tors
 # differential lanes race the scanner against ``re`` per rule so a drift
 # on either side fails as a mismatch naming the input.
 
-AWS_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])")
+# The prefixed grammars' tail minimums, consumed MAXIMALLY (one long
+# key -- the keys rule's own doctrine, and what keeps the pass strictly
+# idempotent: the POSTURE CHANGE named at the aws tests below; a
+# width-cut residue glued behind the token's own digest composes the
+# prefixless legacy class's 40-hex shape). The lookbehind is the
+# scanner's shared boundary gate; a SHORTER run is the near-miss
+# refusal the {16,}/{36,} minimum spells.
+AWS_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:AKIA|ASIA)[0-9A-Z]{16,}")
 # detect-secrets' SlackDetector denylist[0], verbatim (IGNORECASE).
 SLACK_RE = re.compile(r"xox(?:a|b|p|o|s|r)-(?:\d+-)+[a-z0-9]+", re.IGNORECASE)
 STRIPE_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{24,}")
 GITHUB_MODERN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9_-])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}"
 )
 # The legacy class: a maximal exactly-40 hex run at a word boundary (the
 # extension classes are word chars; the shared glue class's dash/
@@ -141,21 +148,34 @@ class TestAwsAccessKey:
             assert out == f"{key[:4]}~{_digest('', key)}"
 
     def test_extension_attacks_never_match(self) -> None:
+        # POSTURE CHANGE (the glued-credential fix): a tail extension of
+        # the aws class no longer refuses the whole candidate -- the old
+        # exact-width refusal LEAKED a real key glued to one more class
+        # char. The tail consumes the extension maximally (one long
+        # key, the keys rule's own doctrine); the head-glue attacks are
+        # the boundary gate's and still refuse outright.
         key = f"AKIA{_AWS_TAIL}"
-        for attacked in [
-            f"X{key}", f"x{key}", f"_{key}", f"{key}X", f"{key}9", f"{key}{_AWS_TAIL}"
-        ]:
+        for attacked in [f"X{key}", f"x{key}", f"_{key}"]:
             assert tors.scrub_secrets(attacked, ["aws_access_key"]) == attacked, attacked
+        for attacked in [f"{key}X", f"{key}9", f"{key}{_AWS_TAIL}"]:
+            assert tors.scrub_secrets(attacked, ["aws_access_key"], salt="") == (
+                f"AKIA~{_digest('', attacked)}"
+            ), attacked
 
     def test_lowercase_variants_are_rejected(self) -> None:
         text = f"akia{_AWS_TAIL} Akia{_AWS_TAIL} aKIA{_AWS_TAIL}"
         assert tors.scrub_secrets(text, ["aws_access_key"]) == text
 
-    def test_short_and_long_tails_are_rejected(self) -> None:
+    def test_short_tails_are_rejected_long_tails_cut_at_the_width(self) -> None:
+        # A 15-char tail is still the near-miss refusal (a shorter run
+        # is not the shape); a longer run consumes the whole tail (one
+        # long key).
         short = f"AKIA{_AWS_TAIL}"[:-1]
         assert tors.scrub_secrets(short, ["aws_access_key"]) == short
         long_run = f"AKIA{_AWS_TAIL}EXTRA"
-        assert tors.scrub_secrets(long_run, ["aws_access_key"]) == long_run
+        assert tors.scrub_secrets(long_run, ["aws_access_key"], salt="") == (
+            f"AKIA~{_digest('', long_run)}"
+        )
 
     def test_clean_boundaries_scrub(self) -> None:
         key = f"AKIA{_AWS_TAIL}"
@@ -272,8 +292,17 @@ class TestGithubToken:
             assert out == f"{prefix}~{_digest('', token)}"
 
     def test_modern_extension_attacks(self) -> None:
+        # POSTURE CHANGE (the glued-credential fix), the aws grammar's
+        # own: a base62 tail extension no longer refuses the whole
+        # candidate -- the old exact-width refusal leaked a real token
+        # glued to one more base62 char. The tail consumes the extension
+        # maximally (one long key); the `_`-stop case is unchanged (the
+        # tail was already exactly 36) and the head-glue/short-tail
+        # refusals are the boundary gate's.
         token = f"ghp_{_GH_BODY36}"
-        assert tors.scrub_secrets(f"{token}x", ["github_token"]) == f"{token}x"
+        assert tors.scrub_secrets(f"{token}x", ["github_token"], salt="") == (
+            f"ghp_~{_digest('', token + 'x')}"
+        )
         # `_` is not base62: the token matches, the suffix survives.
         assert (
             tors.scrub_secrets(f"{token}_suffix", ["github_token"], salt="")
@@ -303,9 +332,59 @@ class TestGithubToken:
             f"x{_LEGACY40}", f"{_LEGACY40}x", f"_{_LEGACY40}", f"{_LEGACY40}a", f"-{_LEGACY40}"
         ]:
             assert tors.scrub_secrets(attacked, ["github_token"]) == attacked, attacked
-        # 39 and 41 hex chars: not the shape.
+        # 39 and 41 hex chars: not the shape. The prefixless class keeps
+        # the exact-width refusal under the glued posture change (no
+        # prefix to anchor a width cut on; a 41-hex run is a longer word).
         assert tors.scrub_secrets(_LEGACY40[1:], ["github_token"]) == _LEGACY40[1:]
         assert tors.scrub_secrets(f"{_LEGACY40}f", ["github_token"]) == f"{_LEGACY40}f"
+
+
+# --- the glued-credential posture (the width cut) ------------------------
+
+
+class TestGluedCredentialPosture:
+    """The deliberate posture change: a maximal run matching a prefixed
+    grammar's PREFIX structure at more than the pinned width consumes the
+    WHOLE run (one long key — the keys rule's own doctrine, the safe
+    direction) instead of refusing whole and leaking the credential. One
+    agreed outcome on all three surfaces: the credential — and everything
+    glued to it — never survives in the clear. The near-miss neighbors
+    (a SHORTER run) still refuse."""
+
+    def test_glued_aws_vector_through_all_three_surfaces(self) -> None:
+        # Amazon's own documented spelling glued to one more tail char.
+        glued = _AMAZON_EXAMPLE + "X"
+        credential = _AMAZON_EXAMPLE[4:]  # the 16-char secret tail
+        # scrub_secrets: the maximal tail, one span.
+        out = tors.scrub_secrets(glued, ["aws_access_key"], salt="")
+        assert out == f"AKIA~{_digest('', glued)}"
+        assert credential not in out
+        # scrub_log_text's secret_tokens rule: the same span, ***-masked.
+        assert tors.scrub_log_text(glued, ["secret_tokens"]) == "***"
+        # scrub_pii's keys rule: the SAME maximal-tail span (the same
+        # doctrine), the digest at the keys rule's own salt — the agreed
+        # outcome: no tail in the clear on any surface.
+        keys_out = tors.scrub_pii(glued, ["api_keys"], salt="")
+        assert credential not in keys_out and keys_out.startswith("AKIA~")
+
+    def test_glued_github_vector_through_all_three_surfaces(self) -> None:
+        glued = f"ghp_{_GH_BODY36}x"
+        assert tors.scrub_secrets(glued, ["github_token"], salt="") == (
+            f"ghp_~{_digest('', glued)}"
+        )
+        assert _GH_BODY36 not in tors.scrub_secrets(glued, ["github_token"], salt="")
+        assert tors.scrub_log_text(glued, ["secret_tokens"]) == "***"
+        keys_out = tors.scrub_pii(glued, ["api_keys"], salt="")
+        assert _GH_BODY36 not in keys_out
+        assert keys_out.startswith("ghp_~")
+
+    def test_near_miss_neighbors_still_refuse(self) -> None:
+        # A 15-char run after AKIA and a 35-char token body are shorter
+        # than the pinned widths: not the shape, on every surface.
+        for text in [f"AKIA{_AWS_TAIL[:-1]}", f"ghp_{_GH_BODY36[:-1]}"]:
+            assert tors.scrub_secrets(text, salt="") == text
+            assert tors.scrub_log_text(text, ["secret_tokens"]) == text
+            assert tors.scrub_pii(text, ["api_keys"], salt="") == text
 
 
 # --- pem_key ------------------------------------------------------------
@@ -659,7 +738,7 @@ def test_report_matches_scrub_and_spans_round_trip(text: str) -> None:
         matched = text[span["start"]:span["end"]]
         assert matched, "a span must re-derive from the input text"
         if matched[:4].lower() == "xoxb" or re.fullmatch(
-            r"(?:AKIA|ASIA)[0-9A-Z]{16}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}", matched
+            r"(?:AKIA|ASIA)[0-9A-Z]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}", matched
         ):
             rebuilt.append(text[cursor:span["start"]])
             head = matched[: 8 if matched[2:3] == "_" and matched[:2] in ("sk", "rk", "pk") else 4]
@@ -819,22 +898,27 @@ class TestRedteamLeakHunts:
     ) -> None:
         # Back-to-back with no separator: the second head is glued to
         # the first token's tail, and the joined run re-reads per
-        # grammar -- exact-width refusals (aws, github modern+legacy)
-        # near-miss to zero matches; the 24+ stripe tail matches once
-        # (its `_`-stop keeps the second head glue-refused); the slack
-        # final alnum run rides into the second token's `xoxb` head and
-        # matches once. Pinned as the runs actually read.
+        # grammar. POSTURE CHANGE (the glued-credential fix): the
+        # prefixed width-minimum grammars no longer near-miss to ZERO --
+        # the old exact-width refusal leaked the whole joined run. The
+        # maximal tail consumes the join ONCE (one long key: aws's tail
+        # class runs straight through the second `AKIA` head, github's
+        # base62 through the second `ghp`); the prefixless legacy class
+        # keeps the exact-40 refusal (no prefix to anchor a minimum on):
+        # zero. The 24+ stripe tail matches once (its `_`-stop keeps the
+        # second head glue-refused); the slack final alnum run rides
+        # into the second token's `xoxb` head and matches once. Pinned
+        # as the runs actually read.
         run = token + token
         rep = tors.scrub_secrets_report(run, [rule], salt="")
-        # Both parametrized github_token tokens are exact-width classes
-        # (36 base62 behind `ghp_`, 40 hex): the joined run near-misses
-        # to zero. aws is exact-16 behind `AKIA` -- zero. slack's final
-        # alnum run and stripe's 24+ tail each match once.
         expected = {
-            "aws_access_key": 0,
+            "aws_access_key": 1,
             "slack_token": 1,
             "stripe_key": 1,
-            "github_token": 0,
+            # Two parametrized github_token rows: the modern prefixed
+            # class consumes the join once; the prefixless legacy class
+            # refuses.
+            "github_token": 0 if re.fullmatch(r"[0-9a-fA-F]{40}", token) else 1,
         }[rule]
         assert sum(rep["redacted"].values()) == expected, (rule, run)
 

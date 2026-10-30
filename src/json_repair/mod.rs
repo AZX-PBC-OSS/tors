@@ -608,10 +608,35 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
             let rep = parser
                 .take_repairer()
                 .expect("the schema path always carries the repairer");
-            rep.validate(
+            if let Err(message) = rep.validate(
                 &value,
                 schema_value.as_ref().expect("schema path implies a schema"),
-            )?;
+            ) {
+                // The repair parser's Str("") sentinel refusing a top-level
+                // SCALAR: the parser's grammar skips top-level digits (and
+                // unwinds inline-repaired scalars) outside containers, so
+                // `5` under an integer schema that already refused the
+                // fast-path value surfaces as `"" is not of type
+                // "integer"` -- the verdict is the sentinel's (the document
+                // does not validate; the fast path's own is_valid said so),
+                // the operand names nothing. When the strict fast path can
+                // still produce the real scalar, re-validate IT for the
+                // message: the same refusal naming the value (the enum/
+                // const/pattern miss, or the not-JSON-compatible overflow
+                // refusal `1e400` hits). A fast value that PASSES is the
+                // skip_json_loads caller's deliberate stand-down of the
+                // strict lane: the repair parser's answer rules, the
+                // sentinel error stands.
+                let sentinel = matches!(&value, Value::Str(s) if s.is_empty());
+                if sentinel
+                    && let Ok(fast) = loads_strict(text)
+                    && !matches!(fast, Value::Array(_) | Value::Object(_))
+                    && let Err(real) = rep.validate(&fast, schema_value.as_ref().unwrap())
+                {
+                    return Err(real);
+                }
+                return Err(message);
+            }
             (value, rep.take_diagnostics())
         }
         // No schema: no diagnostics in v1 (schema-layer actions only).

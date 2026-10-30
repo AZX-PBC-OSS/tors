@@ -278,7 +278,7 @@ pub fn decode_utf16(py: Python<'_>, raw: &[u8], errors: &str, byteorder: &str) -
     match mode {
         ErrorsMode::Strict => py
             .detach(|| utf16_impl::decode_strict(raw, order))
-            .map(|(text, _encoding)| text.into_owned())
+            .map(|(text, _encoding)| text)
             .map_err(|(err, encoding)| decode_utf16_error_into_pyerr(py, raw, err, encoding)),
         ErrorsMode::Replace => Ok(py.detach(|| utf16_impl::decode_replace(raw, order).0)),
     }

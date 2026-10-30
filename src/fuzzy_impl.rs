@@ -339,13 +339,23 @@ fn jaro_core(a: &[char], b: &[char], budget: &Budget) -> Result<f64, DeadlineExc
     let mut matches = 0usize;
     // The match pass: for each a[i], the first unmatched equal b[j] in
     // [i−w, i+w] (clamped). O(a_len·window) worst case; the deadline
-    // check every 1024 outer steps is the bound for that pass.
+    // check every 1024 outer steps AND every 2^20 window-width units of
+    // inner work (the work counter: the outer cadence alone leaves ~5e8
+    // char-compares between checks on 1M-char operands — a ~1s deadline
+    // overshoot on a GIL-released thread — so wide windows check on the
+    // work they actually do, not just the row count).
+    let mut work = 0usize;
     for i in 0..a_len {
         if i % 1024 == 0 {
             budget.expired()?;
         }
         let lo = i.saturating_sub(window);
         let hi = b_len.min(i.saturating_add(window).saturating_add(1));
+        work += hi.saturating_sub(lo);
+        if work >= 1 << 20 {
+            budget.expired()?;
+            work = 0;
+        }
         for j in lo..hi {
             if !b_flags[j] && a[i] == b[j] {
                 a_flags[i] = true;

@@ -1029,7 +1029,6 @@ impl Scan {
                     // becomes the member's key: recorded for the
                     // duplicate-key check at its `:`
                     let recording_key = f.obj && !matches!(f.expect, Expect::Value | Expect::Colon);
-                    let frame_is_obj = f.obj;
                     if recording_key {
                         self.bare_key_run.clear();
                         self.bare_key_run.push(c);
@@ -1119,21 +1118,27 @@ impl Scan {
                             return;
                         }
                         if !obj_key_run && matches!(d, ',' | '}' | ']' | ':') {
-                            // the object-lane number-run's
-                            // currency-comma: the machine absorbs the
-                            // comma into the run and the rewind-word
-                            // absorbs past the member boundary when an
-                            // ALPHABETIC member key follows directly
-                            // (`{"a": 1,c: 1}` -> the engine
-                            // `{"a": "1", "c": 1}`) (out)
-                            if d == ','
-                                && frame_is_obj
-                                && matches!(self.run_first, Some('0'..='9') | Some('-') | Some('.'))
-                                && chars.get(i + 1).is_some_and(|nx| nx.is_alphabetic())
-                            {
-                                self.divergent = true;
-                                return;
-                            }
+                            // NOTE: no guard on the object-lane
+                            // currency-comma here. The machine SPLITS the
+                            // comma-glued run at the `:` that proves the
+                            // post-comma text a key (the rewind's
+                            // member-boundary re-entry:
+                            // `{"a": 1,7Z: 8}` -> the stream
+                            // `{"a": "1", "7Z": 8}`, the engine's own
+                            // classify_object_value_comma split), so a
+                            // comma the engine classifies MEMBER stays
+                            // parity; a comma the engine classifies
+                            // STRING (no bare-key+recoverable-value
+                            // shape) is flagged by the
+                            // object_comma_is_member gate at the walk's
+                            // own `,` arm below, and the split's
+                            // optimistic side (the engine's
+                            // recoverable-value check needs the
+                            // post-colon value's tail: `{"a": 1,b: x"y}`,
+                            // the cut `{"a": 1,b: x`) is flagged by the
+                            // same gate. The linear machine needs no
+                            // lookahead it does not have: the split waits
+                            // for the `:`.
                             terminated = true;
                             break;
                         }
@@ -1418,6 +1423,46 @@ impl Scan {
 }
 
 fuzz_target!(|s: &str| {
+    // The regression seeds: the crash corpus's repro inputs, replayed
+    // through the SAME parity gate on every invocation (CI's 15s smoke
+    // included -- no seed-directory infrastructure to drift). The first
+    // is the minimized crash artifact
+    // (artifacts/json_repair_streaming/crash-4114e3f094e25e9854fe273a65273690fba07f79):
+    // the object-lane comma-glue run rewinding at an ALPHABETIC char one
+    // digit-run later (`8,7` then `Z`), the class the rewind-split fix
+    // closed (the machine re-enters the key lane at the `:`);
+    // `{"a": 1,b: 2}` is the finding's second repro (the comma glued,
+    // the key directly alphabetic), and the last two pin the split's
+    // OPTIMISTIC residual -- the engine's recoverable-value check needs
+    // the post-colon value's tail (`{"a": 1,b: x"y}`: a quote before the
+    // object's `}` flips the engine to keep-the-comma) and the cut
+    // (`{"a": 1,b: x`: no `}` ever comes) -- both Scan-flagged, both
+    // asserted here only to stay valid JSON (the documented divergence).
+    for seed in [
+        "{Z7:8,7Z:8",
+        "{\"a\": 1,b: 2}",
+        "{\"a\": 1,b: x\"y}",
+        "{\"a\": 1,b: x",
+    ] {
+        let mut r = StreamingRepairer::new(true);
+        r.push(seed).expect("seed push never errors");
+        let out = r.end().expect("end never fails");
+        assert!(
+            out.is_empty() || loads_strict(&out).is_ok(),
+            "seed render not strict-loadable: {out}"
+        );
+        let engine_out = match repair(seed, &RepairConfig::default()) {
+            Ok((Value::Str(empty), _)) if empty.is_empty() => String::new(),
+            Ok((v, _)) => dumps(&v, true),
+            Err(_) => String::new(),
+        };
+        let mut scan = Scan::new();
+        scan.walk(seed);
+        if !scan.divergent {
+            assert_eq!(out, engine_out, "seed parity broke: {seed:?}");
+        }
+    }
+
     // Several deterministic split sets per input: one-push (no splits),
     // three-char chunks (escape/pair straddling), single-char pushes,
     // and a strided scatter. Every assertion below runs per split set.

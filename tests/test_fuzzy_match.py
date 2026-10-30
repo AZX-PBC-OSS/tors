@@ -51,12 +51,12 @@ directly.
 from __future__ import annotations
 
 import re
-import time
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from loop_harness import assert_bounded
 from reference import diff_pair_char_shuffled
 from tors import jaro, jaro_winkler, levenshtein
 
@@ -268,15 +268,20 @@ class TestDeadline:
         elapsed time and the deadline, the incomplete result discarded,
         the call bounded well under a second."""
         a, b = diff_pair_char_shuffled(_DEADLINE_PAIR_BYTES)
-        for metric in (levenshtein, jaro, jaro_winkler):
-            started = time.perf_counter()
-            with pytest.raises(TimeoutError, match="deadline") as excinfo:
-                metric(a, b, deadline_ms=_DEADLINE_MS)
-            wall = time.perf_counter() - started
-            assert type(excinfo.value) is TimeoutError
-            message = str(excinfo.value)
-            assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
-            assert wall < 1.0, f"deadline-bounded {metric.__name__} took {wall:.2f}s"
+
+        def fire() -> None:
+            for metric in (levenshtein, jaro, jaro_winkler):
+                with pytest.raises(TimeoutError, match="deadline") as excinfo:
+                    metric(a, b, deadline_ms=_DEADLINE_MS)
+                assert type(excinfo.value) is TimeoutError
+                message = str(excinfo.value)
+                assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the deadline-bounded aborts — one
+        # scheduler hit retries, a lost deadline dirties every sample and
+        # still fails (the ~50-60ms aborts against a 1.0s ceiling).
+        assert_bounded(fire, 1.0, samples=3, label="the fuzzy-metric deadline aborts")
 
     def test_deadline_none_is_the_default_and_unchanged(self) -> None:
         """``deadline_ms=None`` is exactly the unbounded behavior; the

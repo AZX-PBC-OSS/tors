@@ -201,6 +201,82 @@ def _token_ends_at(text: str, pos: int) -> bool:
     )
 
 
+def _domestic_group_spans(
+    text: str, run_start: int, run_end: int
+) -> list[tuple[int, int]]:
+    """The width cut's group re-scan — the Python twin of
+    `pii_impl::domestic_group_spans`: a maximal run wider than the NANP
+    shapes may be several numbers BRIDGED BY A SPACE
+    (`415-555-2671 415-555-2672`), and the width test spending it whole
+    silently leaks every number in it. Walk the run once, cutting the
+    groups the domestic grammar accepts: the digit count reaches
+    exactly 10 (or 11 with an ASCII leading `1`) at a digit whose
+    following separator run — up to the NEXT digit, or the run's end —
+    carries a SPACE, or reaches the run's end (the idempotence
+    contract, the transform's own cut rule — see its doc). The group
+    carries an internal separator (the bare cut, re-checked on the
+    space-trimmed span), and the group starts clean (the single-run
+    clean-boundary rule, so digest composition stays impossible).
+    Overshoot re-anchors at the last space since the group start (or
+    here, when the segment holds none), rewinding the walk — the
+    re-walked segment holds no space (the anchor IS the last one), so
+    the next overshoot cannot rewind again and the pass stays linear."""
+    spans: list[tuple[int, int]] = []
+    # Group 1 starts where the single-run match would (leading spaces
+    # are word separation); a later group starts after the previous
+    # group's last digit, its own bridge spaces skipped.
+    gs = run_start
+    while gs < run_end and text[gs] == " ":
+        gs += 1
+    count = 0
+    first: str | None = None
+    last_space: int | None = None
+    i = gs
+    while i < run_end:
+        c = text[i]
+        if _is_nd(c):
+            i += 1
+            count += 1
+            if first is None:
+                first = c
+            complete = count == 10 or (count == 11 and first == "1")
+            # The separator run after the completing digit, up to the
+            # next digit or the run's end.
+            e = i
+            while e < run_end and not _is_nd(text[e]):
+                e += 1
+            bridged = e < run_end and " " in text[i:e]
+            if complete and (e == run_end or bridged):
+                # Candidate group [gs, i): trim its leading spaces, then
+                # the two cuts on the trimmed span.
+                s = gs
+                while s < i and text[s] == " ":
+                    s += 1
+                clean = (
+                    s == 0
+                    or text[s - 1] not in _TOKEN_INTERIOR
+                    or _token_ends_at(text, s)
+                )
+                if any(ch in _DOMESTIC_SEPARATORS for ch in text[s:i]) and clean:
+                    spans.append((s, i))
+                # Spent: the next group starts past the bridge spaces.
+                j = i
+                while j < run_end and text[j] == " ":
+                    j += 1
+                gs, i, count, first, last_space = j, j, 0, None, None
+                continue
+            if count == 12 or (count == 11 and first != "1"):
+                anchor = last_space if last_space is not None else i
+                gs, i, count, first, last_space = anchor, anchor, 0, None, None
+        elif c in _DOMESTIC_SEPARATORS:
+            if c == " ":
+                last_space = i + 1
+            i += 1
+        else:
+            break  # not class material: the run ended (defensive)
+    return spans
+
+
 def has_domestic_shape(text: str) -> bool:
     i = 0
     n = len(text)
@@ -243,6 +319,12 @@ def has_domestic_shape(text: str) -> bool:
                     )
                     if clean:
                         return True
+            # The width cut spent this run whole: the group re-scan —
+            # space-bridged pairs each match (routed to the extension
+            # lane, where the pins live); the bare/id/dash-chain
+            # neighbors yield no group and stay in this lane.
+            if not plussed and _domestic_group_spans(text, run_start, j):
+                return True
             i = j
         else:
             i += 1
@@ -427,20 +509,15 @@ def _pem_head_carve(text: str, i: int) -> bool:
     of pem_head_after_dash_run: a dash directly before the head (the
     previous close's own run), or the SHARED CLOSE, the head's dash run
     entirely the preceding close's — a PEM word byte directly before
-    the head (`…CERTIFICATE-----BEGIN `). The lookback walks the
-    marker's own word class backward from that byte; the carve only
+    the head (`…CERTIFICATE-----BEGIN `). The carve fires on any word
+    byte directly before the head; it only
     opens the boundary, and the block grammar `_pem_span_at` checks
     downstream still requires both markers with the same words."""
     if not text.startswith(_PEM_BEGIN, i):
         return False
     if text[i - 1] == "-":
         return True
-    if text[i - 1] not in _PEM_WORD_CHARS:
-        return False
-    w = i - 1
-    while w > 0 and text[w - 1] in _PEM_WORD_CHARS:
-        w -= 1
-    return True
+    return text[i - 1] in _PEM_WORD_CHARS
 
 
 def _backslash_run_before(text: str, at: int) -> int:
@@ -776,6 +853,48 @@ class TestDomesticExtension:
         assert tors.scrub_pii(text, salt="") == text
 
     @pytest.mark.parametrize(
+        ("text", "matched"),
+        [
+            ("415-555-2671 415-555-2672", ("415-555-2671", "415-555-2672")),
+            ("(415) 555-2671 (415) 555-2672", ("(415) 555-2671", "(415) 555-2672")),
+            (
+                "call 415-555-2671 415-555-2672 now",
+                ("415-555-2671", "415-555-2672"),
+            ),
+        ],
+        ids=["dash-spelled-pair", "paren-spelled-pair", "prose-bridged-pair"],
+    )
+    def test_space_bridged_pairs_scrub_per_group(self, text: str, matched: tuple) -> None:
+        # The width cut's group re-scan (the leak fix): a maximal run
+        # wider than the NANP shapes spent WHOLE leaked every number it
+        # bridged. Each group tokens with its own span's digest; the
+        # quoted oracle (no domestic rule) still leaves the shape, and
+        # the router now flags it into this lane.
+        assert has_domestic_shape(text)
+        assert reference_scrub_pii(text, None, salt="") == text
+        expected = text
+        for m in matched:
+            token = f"~{hashlib.sha256(m.encode('utf-8')).hexdigest()[:12]}"
+            expected = expected.replace(m, token, 1)
+        assert tors.scrub_pii(text, salt="") == expected
+
+    def test_the_group_recut_guards_are_shared_non_matches(self) -> None:
+        # The re-scan's false-positive guards: a 4-digit credit-card
+        # group's count passes through ten only INSIDE a digit run (a
+        # cut never fires mid-spelling), a bare 10-digit group has no
+        # separator to offer, and the bare id next to a real number
+        # stays out while the number scrubs.
+        for text in ["4111 1111 1111 1111"]:
+            assert reference_scrub_pii(text, None, salt="") == text
+            assert tors.scrub_pii(text, salt="") == text
+            assert not has_domestic_shape(text)
+        text = "9876543210 415-555-2671"
+        assert has_domestic_shape(text)
+        assert reference_scrub_pii(text, None, salt="") == text
+        token = f"~{hashlib.sha256(b'415-555-2671').hexdigest()[:12]}"
+        assert tors.scrub_pii(text, salt="") == f"9876543210 {token}"
+
+    @pytest.mark.parametrize(
         "text",
         [
             "job255128-4096",
@@ -891,13 +1010,20 @@ class TestEmailTokenAdjacentNumbers:
 class TestBothLaneTrimmedRuns:
     """P1: the email local removal trims a too-long digit run into exactly
     10 (or 11-with-1) — the matcher runs on the EMAIL-PASS OUTPUT, so
-    the BOTH lanes route there. Pinned in both directions."""
+    the BOTH lanes route there. POSTURE CHANGE (the domestic group
+    re-scan): the INPUT guard now fires on these directly — the trimmed
+    shape is itself a qualifying GROUP of the wider run (its digit count
+    completes at the space before the eaten tail), so
+    `has_domestic_shape` no longer misses what the email pass would
+    trim into a phone. The both-lane router keeps its output-side guard
+    (the conservative posture: input-flagged OR output-flagged routes).
+    Pinned in both directions."""
 
     _CASES = ["1415 555 2671 12345a@b.co", "415 555 2671 123456a@b.co"]
 
     @pytest.mark.parametrize("text", _CASES)
-    def test_the_input_guard_misses_but_the_email_pass_output_hits(self, text: str) -> None:
-        assert not has_domestic_shape(text)
+    def test_the_input_guard_hits_and_the_output_guard_backs_it_up(self, text: str) -> None:
+        assert has_domestic_shape(text)
         assert _both_lane_has_domestic_shape(text, "")
         assert _both_lane_has_domestic_shape(text, None)
 
@@ -1061,6 +1187,12 @@ def _fuzz_domestic_match_present(text: str) -> bool:
                     )
                     if clean:
                         return True
+            # The width cut's group re-scan (the same `_domestic_group_spans`
+            # transcription the guard runs — the fuzz oracle's
+            # `domestic_group_spans_at` arm): space-bridged groups make the
+            # run a domestic shape here too.
+            if not plussed and _domestic_group_spans(text, run_start, j):
+                return True
             i = j
         else:
             i += 1
