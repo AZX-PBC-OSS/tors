@@ -36,4 +36,4 @@ crate-type = ["cdylib"]
 # The extraction cores (src/pdf_impl.rs, src/documents_impl.rs,
 # src/gfm_strip_impl.rs); the engines come in through this feature.
 tors-core = { path = "..", features = ["documents"] }
-pyo3 = { version = "0.29", features = ["abi3-py310", "extension-module"] }
+pyo3 = { version = "0.30", features = ["abi3-py310", "extension-module"] }
