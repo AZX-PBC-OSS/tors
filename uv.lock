@@ -2172,7 +2172,7 @@ wheels = [
 
 [[package]]
 name = "tors"
-version = "0.18.0"
+version = "0.18.1"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -2230,7 +2230,7 @@ docs = [
 
 [[package]]
 name = "tors-documents"
-version = "0.18.0"
+version = "0.18.1"
 source = { editable = "tors-documents" }
 
 [[package]]
