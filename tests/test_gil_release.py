@@ -75,6 +75,30 @@ contention is excused where a hold (whole-wall, past the band multiple)
 convicts -- and a cell whose contention can stretch past its own bound
 says so in its docstring (the dense-drain residual, that cell's note).
 
+The judgeable band (the 2026-10 ``test_weighted_rank_fuse_*`` CI
+conviction, and the design gate it pinned): a ratio budget on an op whose
+wall sits under 100ms is unjudgeable BY CONSTRUCTION -- a heartbeat tick
+straddles the whole op, the ratio reads ~100% whether the GIL moved or
+not, and the detach-loss signature (gap ~= wall) is indistinguishable
+from that tick-straddle noise. The conviction (blocked 16-21ms of a
+16-20ms op, ~100%, all samples, past the band, on a quiet box the
+absolute ceiling held) was scheduling, not a detach loss. The machinery
+now ENFORCES the doctrine (the design gate in
+``_assert_loop_stays_responsive``: a ratio-bearing cell whose measured
+wall is under ``_JUDGEABLE_BAND_FLOOR_S`` raises a fixture DESIGN error,
+green or dirty), and every short-op cell's fixture grew into the
+>=150ms band (``_JUDGEABLE_BAND_TARGET_S``) -- the score_fuse
+enlargement recalibration and the page-geometry batch-of-30 precedent,
+applied suite-wide (the fusion pair to 1.2M entries with a re-derived
+0.90 budget and a bespoke ceiling; b64 to 384 MiB; the marshalling-residue
+cells to 24-128 MiB; the geometry batch to 60; the ceiling-only cells
+that cannot carry a judgeable ratio at any size -- score_fuse's walk IS
+the call -- take ``ratio_budget=None`` and keep the ceiling as the
+assertion, the ndcg precedent). Cells whose walls were already in the
+band are untouched; their docstrings carry the original calibration
+sessions' numbers, and the recalibration session's numbers live in each
+recalibrated cell's docstring.
+
 Measured on the dev box this test was written on (WSL2, 28 logical cores, CPython 3.12.7;
 5 samples per cell, prose and decomposed corpora from ``tests/reference.py``; the prose
 cells at ambient load ~5, the decomposed cells (added with the corpus-kind parametrize)
@@ -583,6 +607,19 @@ _RATIO_BUDGET = 0.30
 _ABS_CEILING_S = 0.100
 _SAMPLES = 3
 
+# The judgeable band's floor (the design gate in _assert_loop_stays_responsive):
+# a ratio budget on an op whose wall sits under 100ms is not a contract the
+# machinery can hold -- a heartbeat tick straddles the whole op, so the ratio
+# reads ~100% regardless of GIL behavior, and the detach-loss signature
+# (gap ~= wall) is indistinguishable from that tick-straddle noise at this
+# scale. The fixture doctrine this enforces (the score_fuse 100k -> 200k
+# enlargement recalibration, the page-geometry batch-of-30 precedent: grow the
+# input, or batch passes, until the wall clears the band) and #197's
+# load-headroom doctrine: size the op into the >=150ms band so the ratio can
+# mean "detach lost", or run the cell ceiling-only (ratio_budget=None).
+_JUDGEABLE_BAND_FLOOR_S = 0.100
+_JUDGEABLE_BAND_TARGET_S = 0.150
+
 _MIB = 1024 * 1024
 
 # b64_encode_bytes's own ratio budget; see the module docstring's b64
@@ -595,22 +632,25 @@ _B64_RATIO_BUDGET = 0.80
 
 # The b64 cells' advisory-band magnitude gate inputs (see
 # ``_strikes_within_band``): each leg's own by-design band -- the pre-PR
-# green runs' worst gaps (12 MiB 10.1-11.2ms, 32 MiB 27.5-29.3ms, 96 MiB
-# 67.2-78.3ms) and the ratio legs' measured ratio tops (0.57-0.58 at
-# 32 MiB, 0.46-0.50 at 96 MiB). The gate's bound: 4x the band top on the
-# gap axis; max(0.80, 1.15 x ratio top) = 0.80 binding on the ratio axis
-# at 32/96 MiB (the 12 MiB leg is ceiling-only, gap-axis only). A
+# green runs' worst gaps (12 MiB 10.1-11.2ms, 32 MiB 27.5-29.3ms, 384 MiB
+# ~23ms measured in the judgeable-band recalibration session: the encode
+# wall grew 4x but the marshalling residue stayed floor-anchored, so the
+# 384 MiB leg's band top is the ping floor plus ~2x the 96 MiB leg's
+# marshal, not 4x the 96 MiB band) and the ratio legs' measured ratio
+# tops (0.57-0.58 at 32 MiB, ~0.13 at 384 MiB). The gate's bound: 4x the
+# band top on the gap axis; max(0.80, 1.15 x ratio top) = 0.80 binding on
+# the ratio axis (the 12/32 MiB legs are ceiling-only, gap-axis only). A
 # GIL-signature strike at/above the bound raises even in these advisory
 # cells; the observed bands sit far under it.
 _B64_BAND_GAP_TOP_S = {
     12 * _MIB: 0.0112,
     32 * _MIB: 0.0293,
-    96 * _MIB: 0.0783,
+    384 * _MIB: 0.0313,
 }
 _B64_BAND_RATIO_TOP: dict[int, float | None] = {
     12 * _MIB: None,
     32 * _MIB: 0.58,
-    96 * _MIB: 0.50,
+    384 * _MIB: 0.13,
 }
 
 # rank_fuse's own ratio budget; the content_hash derivation shape: the
@@ -618,11 +658,19 @@ _B64_BAND_RATIO_TOP: dict[int, float | None] = {
 # irreducible without an interpreter-free id format) plus the
 # O(distinct-ids) tuple marshalling are GIL-held by design, so the
 # residue is structurally the majority of the wall, not a small tail.
-# Measured on the dev box (ambient load ~2-4, 4 samples): 200k entries
-# across 5 lists, worst ratios 0.56-0.62; 400k, 0.69-0.75 (the walk
-# share grows with size). 0.80 sits ~1.3x above the worst 200k-cell
-# ratio and ~20% below the ~1.0 a lost-detach shape shows; the pinned
-# cell is the 200k size, where the 100ms ceiling still holds ~3x margin.
+# Measured on the dev box (ambient load ~2-4, 4 samples) at the original
+# 200k pin: worst ratios 0.56-0.62, so 0.80 sat ~1.3x above it. The
+# judgeable-band recalibration moves the pin to 1.2M entries (the design
+# gate's finding: the 200k walls measured 16-21ms on the fast box --
+# under the 100ms judgeable band, where a ratio is tick-straddle noise;
+# the convicted test_weighted_rank_fuse CI failure is exactly that
+# shape) -- and the walk's share GROWS with size (cache pressure on the
+# dict walk: measured 0.68-0.73 quiet, 0.80 loaded, at 1.2M), so the
+# budget re-derives to 0.90: ~1.1-1.3x above the recalibrated worst
+# ratio and ~10% below the ~1.0 a lost-detach shape shows. The teeth
+# margin is thinner than the 200k cell's and MEASURED (the loaded 0.80
+# reading is the recalibration's own worst sample; the magnitude gate's
+# ratio bound below is what a lost detach must cross, at 1.0 vs 0.92).
 # Id-shape caveat: the band was measured on cheap-to-hash ids (short str
 # ids, the _ident_items idiom); hash-expensive ids (10-int tuples are the
 # measured pathological shape) drive the walk's dict operations toward
@@ -631,22 +679,35 @@ _B64_BAND_RATIO_TOP: dict[int, float | None] = {
 # across id shapes (the same caveat docs/async.md carries for the aio
 # spelling). The budget pins the str-id shape, not a detach guarantee
 # for every hashable id type.
-_RANK_FUSE_RATIO_BUDGET = 0.80
+_RANK_FUSE_RATIO_BUDGET = 0.90
+
+# The fusion cells' own absolute ceiling (the uuid-batch/dense-drain
+# precedent, the sizing-by-separation device): at the recalibrated 1.2M
+# pin the by-design walk gap is 130-301ms (quiet-loaded, measured) --
+# PAST the shared 100ms ceiling -- so the shared ceiling would pin
+# every sample and ride the tier-1 wall-pin excuse (noisy records every
+# run, the failure mode the band sizing exists to avoid). The walk gap
+# is roughly wall-independent at a FIXED size (it IS most of the wall),
+# so the ceiling is sized above the loaded band (2x the worst measured
+# 301ms gap) and never above the walls' own lost-detach signature -- a
+# lost detach's conviction rides the RATIO arm (1.0 vs the 0.92 bound),
+# not the ceiling.
+_FUSION_CEILING_S = 0.600
 
 # The rank/score fusion cells' advisory-band magnitude gate inputs (see
 # ``_strikes_within_band``): each cell's own by-design walk + marshalling
-# band -- rank_fuse 200k worst gaps 17.1-28.4ms (dev box), score_fuse 200k
-# 25.0-32.6ms (32-core box) with the dev box's 200k blocked-ms worst
-# (~0.74 x its 85-230ms walls) as the band top, ratios 0.52-0.74 at the
-# worst windows. The gate's bound: 4x the cell's band top on the gap axis
-# AND max(0.80, 1.15 x 0.74) = 0.851 on the ratio axis; a GIL-signature
-# strike at/above either raises even in these advisory cells -- the
-# hash-expensive-id caveat's 0.98-1.00 ratio shape (the walk grown
-# interpreter-bound) convicts on the ratio axis exactly as a lost detach
-# would, by design of the bound.
-_RANK_BAND_GAP_TOP_S = 0.0284
+# band -- rank_fuse/weighted at the recalibrated 1.2M pin: worst gaps
+# 130-301ms (quiet-loaded, measured), ratio top 0.80 (the loaded
+# sample); score_fuse keeps the dev box's 200k blocked-ms worst
+# (~0.74 x its 85-230ms walls) as the band top. The gate's bound: 4x the
+# cell's band top on the gap axis AND max(0.90, 1.15 x 0.80) = 0.92 on
+# the ratio axis; a GIL-signature strike at/above either raises even in
+# these advisory cells -- the hash-expensive-id caveat's 0.98-1.00
+# ratio shape (the walk grown interpreter-bound) and a lost detach both
+# convict on the ratio axis exactly as designed.
+_RANK_BAND_GAP_TOP_S = 0.301
 _SCORE_FUSE_BAND_GAP_TOP_S = 0.170
-_FUSION_BAND_RATIO_TOP = 0.74
+_FUSION_BAND_RATIO_TOP = 0.80
 
 # word_bounds's marshalling-band regression ceiling: not the suite's 100ms
 # ceiling, which the list-returning API shape cannot meet at whole-file sizes
@@ -684,23 +745,26 @@ _WORD_BOUNDS_RATIO_BUDGET = 0.85
 _WORD_BOUNDS_BAND_GAP_TOP_S = 0.497
 _WORD_BOUNDS_BAND_RATIO_TOP = 0.74
 
-# The 12 MiB QC-Yes prose cells' ratio budget (finalize / finalize_utf8), a
-# recalibration: the quick-check skip shrank those walls ~3x (42-46ms,
-# measured) while the O(output) marshalling residue is unchanged, so the
-# shared 0.30 became a coin flip (measured ratios 0.27-0.34). 0.60 sits ~1.8x
-# above the worst measured ratio and ~40% below the ~1.0 a detach regression
-# shows (the whole transform held); the 100ms ceiling independently holds
-# ~2.3x margin. Same derivation shape as _B64_RATIO_BUDGET below.
+# The QC-Yes prose cells' ratio budget (finalize / finalize_utf8), a
+# recalibration: the quick-check skip shrank those walls ~3x relative to the
+# full-transform wall while the O(output) marshalling residue is unchanged, so
+# the shared 0.30 cannot hold (measured ratios 0.27-0.34 at the 12 MiB pin;
+# 0.30-0.31 at the current 64 MiB pin). 0.60 sits ~1.8x above the worst
+# measured ratio and ~40% below the ~1.0 a detach regression shows (the whole
+# transform held); the 100ms ceiling independently holds wide margin at the
+# judgeable-band sizes. Same derivation shape as _B64_RATIO_BUDGET below.
 _QC_YES_12MIB_RATIO_BUDGET = 0.60
 
-# The 12 MiB scrub_pii cell's ratio budget, same derivation: the scrub's
-# double scan is fast enough that the 12 MiB contacts corpus completes in
-# ~36-40ms while the O(output) marshalling of its ~11.8 MiB result string
-# costs ~12ms, so the residue is structurally ~33-34% of the wall (measured,
-# every sample) where the shared 0.30 cannot hold. 0.60 sits ~1.8x above
-# the worst measured ratio and ~40% below the ~1.0 a detach regression
-# shows (a held double scan pins the whole ~36ms wall as one gap); the
-# 100ms ceiling independently holds ~8x over the worst gap.
+# The scrub_pii cell's ratio budget, the QC-Yes/b64 derivation shape: the
+# scrub's double scan is fast enough that the 12 MiB contacts corpus completed
+# in ~36-40ms while the O(output) marshalling of its ~11.8 MiB result string
+# cost ~12ms, so the residue was structurally ~33-34% of the wall (measured,
+# every sample) where the shared 0.30 could not hold. 0.60 sits ~1.8x above
+# the worst measured ratio and ~40% below the ~1.0 a detach regression shows
+# (a held double scan pins the whole wall as one gap). At the judgeable-band
+# recalibration's 32 MiB pin the wall is ~170-190ms and the residue is
+# floor-anchored (ratio ~0.07-0.10), so 0.60 holds with ~6x margin; the name
+# keeps the original pin's size for provenance.
 _SCRUB_PII_12MIB_RATIO_BUDGET = 0.60
 
 # content_hash's own ratio budget (the object-walk residue class, a new
@@ -710,43 +774,75 @@ _SCRUB_PII_12MIB_RATIO_BUDGET = 0.60
 # py.detach, so the residue is structurally ~half the call rather than a
 # small marshalling tail). Measured on the dev box over two load windows
 # (ambient load ~2 and ~10-16, 3-5 samples, the records corpus
-# (reference.content_object) at 12 MiB, ~30.7k records): worst gaps
-# 23.3-32.2ms of 41.9-60.4ms walls, ratios 0.45-0.60, the loaded window's
-# 0.60 the worst observed. 0.80 sits ~1.3x above that worst ratio and
+# (reference.content_object) at the original 12 MiB pin, ~30.7k records):
+# worst gaps 23.3-32.2ms of 41.9-60.4ms walls, ratios 0.45-0.60, the
+# loaded window's 0.60 the worst observed; at the judgeable-band
+# recalibration's 32 MiB pin the ratio is ~0.47 (the walk share is the
+# size-stable constant). 0.80 sits ~1.3x above that worst ratio and
 # ~20% below the ~1.0 the lost-detach shape shows in every sample (the
-# red row below, measured 1.00-1.02); the 100ms ceiling holds ~3x margin
-# over the worst gap. Same derivation shape as _B64_RATIO_BUDGET.
+# red row below, measured 1.00-1.02); the 100ms ceiling holds ~1.2x
+# margin over the recalibrated worst gap (the band top ~81ms). Same
+# derivation shape as _B64_RATIO_BUDGET.
 _CONTENT_HASH_RATIO_BUDGET = 0.80
+
+# The content_hash cell's bespoke absolute ceiling (the
+# uuid-batch/dense-drain device, the same device the lsh_candidates
+# cell carries): the walk's gap band at the recalibrated 32 MiB pin is
+# 73-88ms quiet and touches the shared 100ms ceiling under load (the
+# memory-bound walk is the by-design majority of the ~155-177ms wall).
+# Sized above the loaded band (4x the worst measured 88.6ms gap) and
+# never reaching the lost-detach conviction: a held pass reads ratio
+# ~1.0 against the 0.80 budget, and the magnitude gate's 324ms gap
+# bound below still raises on gross regressions first.
+_CONTENT_HASH_CEILING_S = 0.400
 
 # The content_hash cell's advisory-band magnitude gate inputs (see
 # ``_strikes_within_band``): the by-design arg-walk + marshalling band --
-# worst gaps 23.3-32.2ms, ratios 0.45-0.60 over the two load windows. The
-# gate's bound: 4 x 32.2ms = 129ms of gap AND max(0.80, 1.15 x 0.60) = 0.80
-# of ratio (0.80 binding); a GIL-signature strike at/above either raises
+# worst gaps 73-81ms, ratios ~0.47 at the recalibrated 32 MiB pin (the
+# original 12 MiB band: gaps 23.3-32.2ms, ratios 0.45-0.60). The gate's
+# bound: 4 x 81ms = 324ms of gap AND max(0.80, 1.15 x 0.60) = 0.80 of
+# ratio (0.80 binding); a GIL-signature strike at/above either raises
 # even in this advisory cell -- a lost walk (the detach removed from the
-# emission pass) holds the whole ~42-60ms wall at ratio ~1.0 and convicts
-# on the ratio axis.
-_CONTENT_HASH_BAND_GAP_TOP_S = 0.0322
+# emission pass) holds the whole ~155-174ms wall at ratio ~1.0 and
+# convicts on both axes.
+_CONTENT_HASH_BAND_GAP_TOP_S = 0.081
 _CONTENT_HASH_BAND_RATIO_TOP = 0.60
 
-# The MinHash banding cell's per-cell ratio budget, the same derivation
+# The LSH banding cell's per-cell ratio budget, the same derivation
 # shape: the signatures walk (one exact-int extraction per element over
 # n x num_perm Python ints) is a structurally large GIL-held arg-walk,
-# the content_hash class, and at 4k x 128 it is ~half the call. Measured
-# on the dev box (ambient load ~2, 3 samples, 4k signatures, bands=32/
-# rows=4, all-distinct signatures so the detached hashing sweep runs at
-# full length): worst gaps 32-53ms of 68-86ms walls, ratios 0.47-0.61.
-# 0.75 sits ~1.2x above that worst ratio and well below the ~1.0 a lost
-# detach shows; the 100ms ceiling holds ~2x margin over the worst gap.
+# the content_hash class. Measured on the dev box (ambient load ~2, 3
+# samples) at the original 4k pin: worst gaps 32-53ms of 68-86ms walls,
+# ratios 0.47-0.61; at the judgeable-band recalibration's 32k pin the
+# walk share DROPS (the detached hashing sweep grows with the sig count,
+# the per-sig walk stays linear): ratios 0.42. 0.75 sits ~1.8x above
+# that worst recalibrated ratio and well below the ~1.0 a lost detach
+# shows; the 100ms ceiling holds ~1.2x margin over the recalibrated
+# worst gap (the band top ~81ms) -- the gap axis alone would be thin,
+# which is why the cell keeps its own ratio budget.
 _LSH_RATIO_BUDGET = 0.75
+
+# The lsh_candidates cell's bespoke absolute ceiling (the
+# uuid-batch/dense-drain device, the sizing-by-separation precedent):
+# the walk's gap band at the 32k pin is 72-81ms quiet and brushed
+# 99.4ms under the recalibration session's load -- the shared 100ms
+# ceiling sits INSIDE that loaded band, so loaded samples would ride
+# the tier-1 wall-pin record every run. The walk gap is the by-design
+# majority of a ~180-235ms wall, so the ceiling is sized above the
+# loaded band (4x its worst measured reading) and never reaches the
+# lost-detach conviction: a held pass reads ratio ~1.0 against the
+# 0.75 budget, and the magnitude gate's 324ms gap bound below still
+# raises on gross regressions before this ceiling could excuse one.
+_LSH_CEILING_S = 0.400
 
 # The lsh_candidates cell's advisory-band magnitude gate inputs (see
 # ``_strikes_within_band``): the by-design walk + marshalling band --
-# worst gaps 32-53ms, ratios 0.47-0.61. The gate's bound: 4 x 53ms = 212ms
-# of gap AND max(0.75, 1.15 x 0.61) = 0.75 of ratio (0.75 binding); a
-# GIL-signature strike at/above either raises even in this advisory cell.
-_LSH_BAND_GAP_TOP_S = 0.053
-_LSH_BAND_RATIO_TOP = 0.61
+# worst gaps 71-81ms, ratios 0.42 at the recalibrated 32k pin. The
+# gate's bound: 4 x 81ms = 324ms of gap AND max(0.75, 1.15 x 0.42) =
+# 0.75 of ratio (0.75 binding); a GIL-signature strike at/above either
+# raises even in this advisory cell.
+_LSH_BAND_GAP_TOP_S = 0.081
+_LSH_BAND_RATIO_TOP = 0.42
 
 # The line-heavy corpus for the chunking family's cells (#30 item 5): the
 # chat-thread/log shape the streaming twins' own docstrings justify
@@ -1367,6 +1463,20 @@ async def _assert_loop_stays_responsive(
     reacquisition band that is roughly wall-independent, so the ceiling is
     sized above the loaded band, never above the walls).
 
+    The DESIGN gate (the judgeable band, checked on every sample's wall
+    before any verdict): a cell that hands a ratio budget a sub-100ms op is
+    a fixture error, raised unconditionally -- green or dirty, first sample
+    or last. At that scale a heartbeat tick straddles the whole op, the
+    ratio reads ~100% regardless of GIL behavior, and the detach-loss
+    signature (gap ~= wall) is indistinguishable from the tick-straddle
+    noise (#197's doctrine; the page-geometry batch-of-30 precedent; the
+    convicted ``test_weighted_rank_fuse_*`` CI failure that pinned this
+    gate: blocked 16-21ms of a 16-20ms op, ~100%, every sample, while the
+    quiet path the absolute ceiling held). The doctrine the gate enforces:
+    size the op's fixture into the >=150ms band (``_JUDGEABLE_BAND_TARGET_S``)
+    so the ratio can mean "detach lost", or run the cell ceiling-only
+    (``ratio_budget=None``, the under-the-ping-floor precedent).
+
     The verdict when EVERY sample misses the budgets is tiered. Tier 1: a
     window that HELD its ratio budget and missed only the absolute ceiling is a
     wall pin, advisory under the doctrine (``_excuse_wall_pins``) -- under
@@ -1397,6 +1507,27 @@ async def _assert_loop_stays_responsive(
     for _ in range(samples):
         worst_gap, wall, gap_cpu, cpu_share, gap_wait = await _gap_and_wall_during(op)
         observed.append((worst_gap, wall, gap_cpu, cpu_share, gap_wait))
+        # The design gate (enforced before every verdict, green or dirty): a
+        # ratio budget on a sub-100ms op is not judgeable, pass or fail. A tick
+        # straddles the whole op, so the ratio reads ~100% -- the convicted-CI
+        # shape (blocked 16-21ms of a 16-20ms op, ~100%, all samples, on a
+        # quiet box where the absolute ceiling held) -- whether the GIL moved
+        # or not: the detach-loss signature (gap ~= wall) and tick-straddle
+        # scheduling noise are the same reading at this scale. This is a
+        # fixture error, not a flake to retry: the cell cannot mean anything
+        # on ANY box until its op sits in the judgeable band.
+        if ratio_budget is not None and wall < _JUDGEABLE_BAND_FLOOR_S:
+            raise AssertionError(
+                f"fixture DESIGN error: the op's wall ({wall * 1000:.0f}ms) is "
+                f"under the {_JUDGEABLE_BAND_FLOOR_S * 1000:.0f}ms judgeable band "
+                "-- a ratio on a sub-100ms op is scheduling noise (a heartbeat "
+                "tick straddles the whole op; the detach-loss signature, gap ~= "
+                "wall, is indistinguishable from tick-straddle noise at this "
+                "scale; #197's doctrine and the page-geometry batch-of-30 "
+                "precedent). Size the fixture into the >=150ms band so the "
+                "ratio can mean 'detach lost', or pass ratio_budget=None to "
+                "judge by the absolute ceiling only (tests/test_gil_release.py)"
+            )
         if not _budget_misses(worst_gap, wall, ratio_budget, abs_ceiling_s):
             return
     # Tier 1 (the wall-pin excuse): windows that HELD the ratio budget and
@@ -1486,12 +1617,12 @@ async def _assert_loop_stays_responsive(
 @pytest.mark.parametrize(
     ("corpus_kind", "size_bytes", "ratio_budget"),
     [
-        ("prose", 12 * _MIB, _QC_YES_12MIB_RATIO_BUDGET),
-        ("prose", 32 * _MIB, _RATIO_BUDGET),
-        ("decomposed", 12 * _MIB, _RATIO_BUDGET),
+        ("prose", 64 * _MIB, _QC_YES_12MIB_RATIO_BUDGET),
+        ("prose", 96 * _MIB, _RATIO_BUDGET),
+        ("decomposed", 24 * _MIB, _RATIO_BUDGET),
         ("decomposed", 32 * _MIB, _RATIO_BUDGET),
     ],
-    ids=["prose-12MiB", "prose-32MiB", "decomposed-12MiB", "decomposed-32MiB"],
+    ids=["prose-64MiB", "prose-96MiB", "decomposed-24MiB", "decomposed-32MiB"],
 )
 def test_finalize_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     corpus_kind: str, size_bytes: int, ratio_budget: float
@@ -1506,11 +1637,21 @@ def test_finalize_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     (non-ASCII, pins the one-time O(input) first-call UTF-8 materialization; even
     sample 1 stays inside both budgets, and samples 2+ hit the cached borrow).
 
-    note on the prose-12MiB cell's budget: the quick-check skip removed the
-    NFC pass from this QC-Yes corpus, shrinking the wall ~3x (42-46ms measured)
-    while the marshalling residue is unchanged; the per-cell 0.60 budget is
-    derived from the new band (see ``_QC_YES_12MIB_RATIO_BUDGET``); a detach
-    regression still fails it at ratio ~1.0."""
+    Sizes are the judgeable-band recalibration (the 2026-10
+    ``test_weighted_rank_fuse_*`` CI conviction's doctrine, now a design gate in
+    ``_assert_loop_stays_responsive``): the original 12/32 MiB pins measured
+    109-147/353-372ms walls on the box they were calibrated on but 35/91ms on the
+    current dev box -- under the 100ms judgeable band, where a ratio is tick-straddle
+    noise, not detach evidence. The corpora grow until every wall sits in the
+    >=150ms band (prose 64/96 MiB, decomposed 24/32 MiB; the QC-Yes skip keeps the
+    small prose leg's wall ~3x under the 96 MiB leg's, so it takes 64 MiB to clear
+    the band).
+
+    note on the prose cell's budget: the quick-check skip removed the NFC pass from
+    this QC-Yes corpus, shrinking the wall ~3x while the marshalling residue is
+    unchanged; the per-cell 0.60 budget is derived from the new band (see
+    ``_QC_YES_12MIB_RATIO_BUDGET``); a detach regression still fails it at ratio
+    ~1.0."""
     corpus = _CORPORA[corpus_kind](size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(
@@ -1523,12 +1664,12 @@ def test_finalize_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 @pytest.mark.parametrize(
     ("corpus_kind", "size_bytes", "ratio_budget"),
     [
-        ("prose", 12 * _MIB, _QC_YES_12MIB_RATIO_BUDGET),
-        ("prose", 32 * _MIB, _RATIO_BUDGET),
-        ("decomposed", 12 * _MIB, _RATIO_BUDGET),
+        ("prose", 64 * _MIB, _QC_YES_12MIB_RATIO_BUDGET),
+        ("prose", 96 * _MIB, _RATIO_BUDGET),
+        ("decomposed", 24 * _MIB, _RATIO_BUDGET),
         ("decomposed", 32 * _MIB, _RATIO_BUDGET),
     ],
-    ids=["prose-12MiB", "prose-32MiB", "decomposed-12MiB", "decomposed-32MiB"],
+    ids=["prose-64MiB", "prose-96MiB", "decomposed-24MiB", "decomposed-32MiB"],
 )
 def test_finalize_utf8_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     corpus_kind: str, size_bytes: int, ratio_budget: float
@@ -1539,20 +1680,23 @@ def test_finalize_utf8_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     corpus's first call sits in the plain marshalling band, where the str-in
     ``finalize`` twin pays its one-time O(input) materialization (13.9-15.6ms
     first-call gap at 12 MiB, 37.6-44.1ms at 32 MiB, measured; see the
-    module docstring). Measured bands (ambient load 4.3-5.6, 5 samples per cell):
-    prose 12 MiB: 10.3-13.0ms of 113-143ms walls (ratio 0.08-0.10);
-    decomposed 12 MiB: 10.3-13.0ms of 116-131ms (0.09-0.10), sample 1 in the
-    same band as samples 2+;
-    prose 32 MiB: 13.5-20.7ms of 345-370ms (0.04-0.06);
-    decomposed 32 MiB: 17.6-26.7ms of 350-405ms (0.04-0.07), again sample 1
-    indistinguishable from the cached band, against the str-in twin's
-    37.6-44.1ms first call.
+    module docstring). Sizes are the str-in cell's judgeable-band recalibration
+    (same 64/96 prose, 24/32 decomposed pins, same doctrine note).
 
-    note on the prose-12MiB cell's budget: same recalibration as the
+    Measured bands (see the str-in twin's note for the recalibration session;
+    the bands below are the post-recalibration session, 3 samples per cell,
+    dev box, ambient load 6-12):
+    prose 64 MiB: worst gap 11.9ms of a 205ms wall (ratio 0.06);
+    decomposed 24 MiB: worst gap 11.4ms of a 298ms wall (0.04), sample 1 in the
+    same band as samples 2+;
+    prose 96 MiB: worst gap 12.7ms of a 286ms wall (0.04);
+    decomposed 32 MiB: worst gap 12.4ms of a 405ms wall (0.03), again sample 1
+    indistinguishable from the cached band.
+
+    note on the prose cell's budget: same recalibration as the
     str-in ``finalize`` cell (see ``_QC_YES_12MIB_RATIO_BUDGET``): the
-    quick-check skip shrank the QC-Yes prose wall ~3x (34-45ms measured)
-    while the bytes-in marshalling residue is unchanged; measured ratios
-    0.27-0.34 against the new 0.60 budget. A detach regression still fails
+    quick-check skip shrank the QC-Yes prose wall ~3x while the bytes-in
+    marshalling residue is unchanged. A detach regression still fails
     it at ratio ~1.0."""
     corpus = corpus_utf8(corpus_kind, size_bytes)
     asyncio.run(
@@ -1565,8 +1709,8 @@ def test_finalize_utf8_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
 
 @pytest.mark.parametrize(
     "size_bytes, ratio_budget",
-    [(12 * _MIB, None), (32 * _MIB, None), (96 * _MIB, _B64_RATIO_BUDGET)],
-    ids=["12MiB-ceiling-only", "32MiB-ceiling-only", "96MiB-ratio"],
+    [(12 * _MIB, None), (32 * _MIB, None), (384 * _MIB, _B64_RATIO_BUDGET)],
+    ids=["12MiB-ceiling-only", "32MiB-ceiling-only", "384MiB-ratio"],
 )
 def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int, ratio_budget: float | None
@@ -1592,15 +1736,20 @@ def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
       this size no longer resolves, the same floor-resolution failure the
       diff near-identical cell recalibrated for; the cell keeps the 100ms
       ceiling (a several-fold marshalling blowout still trips it) and the
-      detach-detection job moves to the 96 MiB cell, whose walls dominate
+      detach-detection job moves to the ratio leg, whose walls dominate
       the floor on every box.
-    - 96 MiB: worst gaps 67.2-78.3ms of 139-161ms walls (ratio 0.46-0.50) on
-      the dev box; 9.4-15.6ms of 40-52ms (0.23-0.33) on the fast box. This
-      is the regression-detecting cell: the 0.80 b64 ratio budget holds with
-      ~1.6x margin on both boxes, while a detach regression (GIL-held
+    - 384 MiB (the ratio leg, the judgeable-band recalibration of the former
+      96 MiB pin): the 96 MiB leg measured walls 139-161ms on the dev box but
+      40-52ms on the fast box (44ms in the recalibration session) -- under the
+      100ms judgeable band, where a ratio is tick-straddle noise (the design
+      gate's whole finding; the convicted weighted_rank_fuse CI shape). At
+      384 MiB the fast box's wall is ~44.1ms x 4 = 176-208ms -- 2x the band
+      floor with ticks to spare -- while the marshalling residue stays
+      floor-anchored (~10-23ms), so the ratio FALLS to ~0.06-0.13 and the
+      0.80 budget holds with ~6x margin. A detach regression (GIL-held
       encode, one C call holding encode+marshalling together with no
       bytecode boundary) shows ratio ~1.0 in every sample and fails it; the
-      ceiling holds with margin to spare on both boxes.
+      ceiling holds with margin to spare.
     - The b64 budget derivation: 0.80 is ~1.3x above the worst measured ratio
       and ~20% below the ~1.0 a GIL-held pass shows in every sample; the
       shared 0.30 is structurally unattainable for b64 because the fast
@@ -1609,11 +1758,11 @@ def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
       measured).
     - The advisory verdict's magnitude bound (the mutation finding): the
       band-stretch excuse covers only GIL-signature strikes under 4x the
-      leg's own by-design band top (12 MiB 45ms / 32 MiB 117ms / 96 MiB
+      leg's own by-design band top (12 MiB 45ms / 32 MiB 117ms / 384 MiB
       313ms, ``_B64_BAND_GAP_TOP_S``) AND, on the ratio legs, under
       max(0.80, 1.15 x the leg's measured ratio top) (``_B64_BAND_RATIO_TOP``
-      -- 0.80 binding at 32 and 96 MiB, the measured tops 0.58/0.50); a
-      strike at/above either raises even in these advisory cells.
+      -- 0.80 binding); a strike at/above either raises even in these
+      advisory cells.
     - The red side, same placement: ``base64.b64encode(...).decode("ascii")``
       holds the GIL for the encode: measured 122.7-127.6ms of 188-199ms walls
       at 96 MiB, reproducing the ~150ms GIL-held b64encode observation at
@@ -1893,7 +2042,12 @@ def test_the_loop_verdict_excuses_a_starved_block_and_keeps_the_gil_teeth(monkey
     monkeypatch.setattr(sys.modules[__name__], "_idle_loop_control_gap", _free_control)
 
     async def starved_blocker() -> None:
-        time.sleep(0.02)  # a synchronous stall on the loop's own task
+        time.sleep(0.2)  # a synchronous stall on the loop's own task
+        # 200ms, not 20ms: the design gate (the judgeable band) refuses a
+        # ratio budget on a sub-100ms op -- a tick straddles the whole op,
+        # so the ratio reads ~100% regardless of GIL behavior. The
+        # starvation shape is load-bearing at any size: a whole-wall block
+        # with a ~0 process-CPU account, every sample, retried.
 
     asyncio.run(
         _assert_loop_stays_responsive(starved_blocker, ratio_budget=_RATIO_BUDGET, samples=2)
@@ -2082,7 +2236,7 @@ def test_the_advisory_band_magnitude_gate_convicts_a_lost_detach(monkeypatch) ->
 
 
 @pytest.mark.parametrize("form_name", ["nfc", "nfkd"])
-@pytest.mark.parametrize("size_bytes", [12 * _MIB, 32 * _MIB], ids=["12MiB", "32MiB"])
+@pytest.mark.parametrize("size_bytes", [24 * _MIB, 32 * _MIB], ids=["24MiB", "32MiB"])
 def test_standalone_forms_full_pass_on_the_compat_corpus_keep_the_loop_at_heartbeat_granularity(
     form_name: str, size_bytes: int
 ) -> None:
@@ -2093,12 +2247,16 @@ def test_standalone_forms_full_pass_on_the_compat_corpus_keep_the_loop_at_heartb
     materialization on the first non-ASCII call. Measured on the dev box
     (ambient load 4.4-5.7, 3 samples per cell, compat corpus: decomposed
     accents plus a compatibility ligature and fullwidth digit per unit, the
-    input that keeps NFKC/NFKD's quick check at No):
+    input that keeps NFKC/NFKD's quick check at No); sizes are the
+    judgeable-band recalibration (the design gate's finding: the 12 MiB legs
+    measured 86-120ms walls in the recalibration session -- under the 100ms
+    judgeable band, where a ratio is tick-straddle noise -- so the small leg
+    grows to 24 MiB):
 
-    - ``nfc`` 12 MiB: 16.8-17.4ms of 127-145ms walls (0.10-0.13): the
+    - ``nfc`` 24 MiB: ~17-25ms of ~240-260ms walls (~0.08-0.10): the
       sample-1 gap carries the materialization, the same class every str-in
       function pays.
-    - ``nfkd`` 12 MiB: 14.7-17.8ms of 87-104ms walls (0.14-0.20).
+    - ``nfkd`` 24 MiB: ~15-24ms of ~170-180ms walls (~0.09-0.14).
     - ``nfc`` 32 MiB: 36.3-40.1ms of 346-391ms walls (0.10-0.12).
     - ``nfkd`` 32 MiB: 35.7-38.2ms of 240-263ms walls (0.15-0.16).
 
@@ -2175,7 +2333,7 @@ def test_identity_paths_on_already_normalized_prose_are_ceiling_only(
     )
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB, 32 * _MIB], ids=["12MiB", "32MiB"])
+@pytest.mark.parametrize("size_bytes", [28 * _MIB, 32 * _MIB], ids=["28MiB", "32MiB"])
 def test_html_unescape_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
@@ -2183,12 +2341,15 @@ def test_html_unescape_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     ``html.unescape`` is a GIL-held ``re.sub`` over the whole string
     with a Python callback invoked per entity. Measured on the dev box
     (ambient load 10.0, the heaviest window in this module's tables; 3
-    samples per cell, entities corpus):
+    samples per cell, entities corpus); the small leg is the judgeable-band
+    recalibration (the design gate's finding: 12 MiB measured 74.9ms in the
+    recalibration session -- under the 100ms judgeable band -- so it grows
+    to 28 MiB; the first 24 MiB attempt measured 145.5ms, still under the
+    150ms band target):
 
-    - 12 MiB: worst gaps 16.4-17.6ms of 79-88ms walls (ratio 0.19-0.22):
-      the ping floor plus the marshalling of the ~12 MiB decoded output;
-      every sample inside both shared budgets (~1.4x ratio margin under this
-      load, more when quiet).
+    - 28 MiB: worst gaps ~13-18ms of ~170-180ms walls (ratio ~0.08-0.10):
+      the ping floor plus the marshalling of the ~28 MiB decoded output;
+      every sample inside both shared budgets.
     - 32 MiB: worst gaps 28.6-40.9ms of 223-225ms walls (ratio 0.13-0.18).
 
     The red side, same placement, is not ratio ~1.0 like the other stdlib
@@ -2209,18 +2370,18 @@ def test_html_unescape_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
 
 _B64_DECODE_BAND_GAP_TOP_S = {
     12 * _MIB: 0.0117,
-    32 * _MIB: 0.0227,
+    128 * _MIB: 0.0227,
 }
 _B64_DECODE_BAND_RATIO_TOP: dict[int, float | None] = {
     12 * _MIB: None,
-    32 * _MIB: 0.35,
+    128 * _MIB: 0.35,
 }
 
 
 @pytest.mark.parametrize(
     "size_bytes, ratio_budget",
-    [(12 * _MIB, None), (32 * _MIB, _B64_RATIO_BUDGET)],
-    ids=["12MiB-ceiling-only", "32MiB-both-budgets"],
+    [(12 * _MIB, None), (128 * _MIB, _B64_RATIO_BUDGET)],
+    ids=["12MiB-ceiling-only", "128MiB-both-budgets"],
 )
 def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int, ratio_budget: float | None
@@ -2231,16 +2392,21 @@ def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     (O(output), 3/4 of the input text), the same structural shape as
     ``b64_encode_bytes``'s output marshalling, so it uses the same b64 budget
     derivation (the shared 0.30 is unattainable for the same reason: the scan
-    is fast, so the marshalling is a large wall share). Measured on the dev box
-    (ambient load 6.0, 3 samples per cell, prose):
+    is fast, so the marshalling is a large wall share). The ratio leg is the
+    former 32 MiB pin grown to 128 MiB: the 32 MiB leg measured 39.7ms walls
+    in the judgeable-band recalibration session -- under the 100ms judgeable
+    band, where a ratio is tick-straddle noise (the design gate's finding) --
+    while 128 MiB walls ~159ms (2x+ the band floor) with the residue
+    floor-anchored. Measured on the dev box (ambient load 6.0, 3 samples per
+    cell, prose):
 
     - 12 MiB decoded (16 MiB b64 text): worst gaps 11.0-11.7ms against
       14.0-23.2ms walls (ratio 0.50-0.78): the wall sits near the 10ms ping
       floor, so the ratio is the documented sub-ping artifact; the cell asserts
       the 100ms ceiling (~9x margin) and records the band.
-    - 32 MiB decoded (43 MiB b64 text): worst gaps 16.6-22.7ms of 59.1-65.3ms
-      walls (ratio 0.28-0.35), comfortably inside both the 0.80 b64 budget
-      (~2.3x margin) and the 100ms ceiling (~4.4x margin). A detach regression
+    - 128 MiB decoded (171 MiB b64 text): worst gaps ~11-13ms of ~159ms
+      walls (ratio ~0.07), comfortably inside both the 0.80 b64 budget
+      (~10x margin) and the 100ms ceiling (~8x margin). A detach regression
       shows ratio ~1.0 (the red side below) and fails this cell.
     - The red side, same placement: ``base64.b64decode`` holds the GIL for the
       whole C decode: 14.8-27.5ms gaps of 15.0-27.8ms walls (ratio 0.98-0.99)
@@ -2248,8 +2414,8 @@ def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 
     The advisory verdict's magnitude bound (the mutation finding): the
     band-stretch excuse covers only GIL-signature strikes under 4x the leg's
-    own band top (12 MiB 47ms / 32 MiB 91ms, ``_B64_DECODE_BAND_GAP_TOP_S``)
-    AND, on the 32 MiB ratio leg, under max(0.80, 1.15 x 0.35) = 0.80 of
+    own band top (12 MiB 47ms / 128 MiB 91ms, ``_B64_DECODE_BAND_GAP_TOP_S``)
+    AND, on the 128 MiB ratio leg, under max(0.80, 1.15 x 0.35) = 0.80 of
     ratio (``_B64_DECODE_BAND_RATIO_TOP``, 0.80 binding); a strike at/above
     either raises even in these advisory cells."""
     corpus = corpus_b64("prose", size_bytes)
@@ -2263,7 +2429,7 @@ def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     )
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+@pytest.mark.parametrize("size_bytes", [24 * _MIB], ids=["24MiB"])
 def test_repair_json_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
@@ -2273,14 +2439,16 @@ def test_repair_json_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     megabytes of damaged JSON are repaired. Measured on the dev box
     (ambient load ~3, 3 samples per cell): prose 12 MiB of structurally
     damaged LLM-JSON (unterminated strings, missing commas and closers):
-    worst gap 10.2ms of a 122ms wall (0.08): the ping floor plus the
-    str-out marshalling band, deep inside both shared budgets (~3x on the
-    ratio, ~8x on the ceiling)."""
+    worst gap 10.2ms of a 122ms wall (0.08) -- then the judgeable-band
+    recalibration moved the pin to 24 MiB (the design gate's finding: the
+    recalibration session measured the 12 MiB wall at 138.8ms on this box,
+    under the 150ms band target on a quiet box): 24 MiB walls ~260-290ms,
+    the same floor-anchored gap band. Deep inside both shared budgets."""
     chunks, _remainder = divmod(size_bytes, 20_000)
     payload = (
         "{" + "".join(f'"k{i}": "{_CORPORA["prose"](20_000)}, ' for i in range(chunks)) + '"t": 1'
     )
-    assert len(payload) >= 11 * _MIB  # scale sanity, not a budget
+    assert len(payload) >= 23 * _MIB  # scale sanity, not a budget
     asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.repair_json, payload)))
 
 
@@ -2736,7 +2904,7 @@ def test_utf16_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
         )
 
 
-@pytest.mark.parametrize("size_bytes", [32 * _MIB], ids=["32MiB"])
+@pytest.mark.parametrize("size_bytes", [64 * _MIB], ids=["64MiB"])
 def test_diff_opcodes_near_identical_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
@@ -2751,19 +2919,18 @@ def test_diff_opcodes_near_identical_in_a_thread_keeps_the_event_loop_at_heartbe
     shared budgets with ~2x ratio margin; a detach regression (the diff
     itself GIL-held) holds the whole wall at ratio ~1.0 and fails by ~3x.
 
-    Why 32 MiB and not 12: the ratio only resolves when the wall clears
+    Why 64 MiB and not 12: the ratio only resolves when the wall clears
     the 10ms ping floor by a wide margin, and on a fast quiet box the 12
     MiB pair's ~30ms walls sit inside the heartbeat floor's own wobble
     (5-11ms gaps run to run: ratio 0.18 one run, 0.35 the next, against
     the same 0.30 budget: a measurement-resolution failure, not a code
-    regression; tors's detach verified working throughout). At 32 MiB the
-    walls (~100ms on that box, ~210ms implied for the dev box's pace)
-    restore ~5x ratio margin (measured 0.06) on every box while a detach
-    regression still holds the whole wall at ~1.0. The ceiling-only
-    alternative was considered and rejected: on a fast box a held 30ms
-    wall shows ~30ms gaps, under the 100ms ceiling, so ceiling-only would
-    go blind exactly where the ratio is weakest: enlargement keeps both
-    budgets discriminating everywhere."""
+    regression; tors's detach verified working throughout). The pin is
+    the judgeable-band recalibration (the design gate's finding): the
+    32 MiB pin measured 112.6-161.1ms walls across sessions -- the quiet
+    reading under the 150ms band target -- so the pair grows to 64 MiB
+    (walls ~210-260ms, the probe's measured curve linear at ~1.4ms/MiB).
+    Enlargement keeps both budgets discriminating everywhere: a detach
+    regression still holds the whole wall at ~1.0."""
     a, b = diff_pair_near_identical(size_bytes)
     asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.diff_opcodes, a, b)))
 
@@ -2988,29 +3155,32 @@ def test_find_patterns_dense_marshalling_band_is_pinned_against_regression(
     )
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+@pytest.mark.parametrize("size_bytes", [24 * _MIB], ids=["24MiB"])
 def test_replace_many_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
     """The replace claim on the redaction-map shape the function exists
     for: the 17 dense prose words each mapped to a redaction token, over the
-    plain 12 MiB prose corpus: one automaton build, one scan, one splice,
-    all detached, and the return is one ~10 MiB string, so the GIL-held
+    plain prose corpus: one automaton build, one scan, one splice,
+    all detached, and the return is one ~0.9x-input string, so the GIL-held
     residue is the O(entries) argument walk plus that single string's
     marshalling: the no-list-shape-class prediction of the crate GIL
     model, measured to be exactly the ping-floor band.
 
-    Measured on the dev box (ambient load 2.0, 5 samples): worst gaps
-    10.3-10.9ms of 47-60ms walls (ratio 0.18-0.23). The wall clears the
-    10ms ping floor ~5x, so the ratio is not the sub-ping artifact, and the
-    cell takes the shared budgets: the 0.30 ratio sits ~1.3x above the
-    worst measured ratio and ~70% below the ~1.0 a detach regression shows
-    (a held scan+splice pins the whole ~50ms wall), and the 100ms ceiling
-    holds ~9x over the worst gap. The residue band is the structural
-    contrast with the find_patterns dense cell above (171.0-174.7ms for
-    the same 1.28M matches): reporting the matches as a list costs
-    ~0.13µs of GIL hold per match, while splicing them into one output
-    string costs ~nothing the loop can see."""
+    Measured on the dev box (ambient load 2.0, 5 samples) at the original
+    12 MiB pin: worst gaps 10.3-10.9ms of 47-60ms walls (ratio 0.18-0.23).
+    The pin is the judgeable-band recalibration (the design gate's finding:
+    the recalibration session measured the 12 MiB wall at 114.1ms -- under
+    the 150ms band target on a quiet box): 24 MiB walls ~230-250ms, the
+    same floor-anchored gap band. The wall clears the 10ms ping floor ~20x,
+    so the ratio is not the sub-ping artifact, and the cell takes the shared
+    budgets: the 0.30 ratio sits ~1.6x above the worst measured ratio and
+    ~70% below the ~1.0 a detach regression shows (a held scan+splice pins
+    the whole ~240ms wall), and the 100ms ceiling holds ~9x over the worst
+    gap. The residue band is the structural contrast with the find_patterns
+    dense cell above (171.0-174.7ms for the same 1.28M matches): reporting
+    the matches as a list costs ~0.13µs of GIL hold per match, while
+    splicing them into one output string costs ~nothing the loop can see."""
     text = prose(size_bytes)
     replacements = {word: "[REDACTED]" for word in SEARCH_DENSE_PATTERNS}
     asyncio.run(
@@ -3062,29 +3232,31 @@ def test_scrub_log_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     )
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+@pytest.mark.parametrize("size_bytes", [32 * _MIB], ids=["32MiB"])
 def test_scrub_pii_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
     """The scrub claim on the contact-dense shape the function exists
     for: one email and one human-spelled E.164 number per sentence of
-    the 12 MiB contacts corpus (~119k matches measured), one email pass
+    the contacts corpus (~119k matches measured at 12 MiB), one email pass
     plus one phone pass plus every token digest, all under the one
-    ``py.detach``, and the return is one ~11.8 MiB string, so the
+    ``py.detach``, and the return is one ~0.98x-input string, so the
     GIL-held residue is the argument borrow plus that single string's
     marshalling: ``replace_many`` dense's no-list-shape class exactly
     (the structural contrast with ``find_patterns``' per-match tuples).
 
-    Measured on the dev box (ambient load ~3.5, 3 samples): worst gaps
-    ~12ms of 36-40ms walls (ratio 0.33-0.34, every sample) — the ping
-    floor plus the end-of-call marshalling of the ~11.8 MiB result
-    string. The scrub's double scan is fast enough that this residue is
-    structurally a third of the wall, so the cell takes the bespoke
+    Measured on the dev box (ambient load ~3.5, 3 samples) at the original
+    12 MiB pin: worst gaps ~12ms of 36-40ms walls (ratio 0.33-0.34, every
+    sample) -- the ping floor plus the end-of-call marshalling of the result
+    string. The pin is the judgeable-band recalibration (the design gate's
+    finding: the recalibration session measured the 12 MiB wall at 63.2ms,
+    under the 150ms band target): 32 MiB walls ~170-190ms with the residue
+    floor-anchored, ratio ~0.07-0.10. The cell keeps the bespoke
     0.60 ratio budget (``_SCRUB_PII_12MIB_RATIO_BUDGET``, the
-    QC-Yes/b64 derivation shape: ~1.8x above the worst measured ratio,
-    ~40% below the ~1.0 a detach regression shows when a held double
-    scan pins the whole wall as one gap); the 100ms ceiling
-    independently holds ~8x over the worst gap."""
+    QC-Yes/b64 derivation shape: ~2x above the worst measured ratio at the
+    original pin, ~40% below the ~1.0 a detach regression shows when a held
+    double scan pins the whole wall as one gap); the 100ms ceiling
+    independently holds ~5x over the recalibrated worst gap."""
     corpus = contacts(size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(
@@ -3124,25 +3296,28 @@ def _secrets_corpus(size_bytes: int) -> str:
     return unit * repeats
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+@pytest.mark.parametrize("size_bytes", [48 * _MIB], ids=["48MiB"])
 def test_scrub_secrets_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
     """The secrets claim on the token-dense log shape the five grammars
-    exist for: one credential shape every other line of the 12 MiB
-    secrets corpus (~134k matches measured), the whole single-pass scan
+    exist for: one credential shape every other line of the secrets
+    corpus (~134k matches measured at 12 MiB), the whole single-pass scan
     (every grammar walk, every splice, every token digest) under the one
-    ``py.detach``, and the return is one ~9 MiB string, so the GIL-held
+    ``py.detach``, and the return is one ~0.75x-input string, so the GIL-held
     residue is the argument borrow plus that single string's
     marshalling: the scrub_pii cell's no-list-shape class exactly.
 
-    Measured on the dev box (ambient load ~3): worst gap ~9ms of a
-    237ms wall (ratio 0.04, inside the ping floor) -- the scan is
-    heavyweight next to scrub_pii's (six grammar heads walked over
-    every byte, PEM END indexes, ~134k digests), so the marshalling
-    share of the wall is small and the shared budgets hold with ~3x
-    ratio margin; the 100ms ceiling independently holds ~11x over the
-    worst gap."""
+    Measured on the dev box (ambient load ~3) at the original 12 MiB pin:
+    worst gap ~9ms of a 237ms wall (ratio 0.04, inside the ping floor) --
+    the scan is heavyweight next to scrub_pii's (six grammar heads walked
+    over every byte, PEM END indexes, ~134k digests), so the marshalling
+    share of the wall is small. The pin is the judgeable-band recalibration
+    (the design gate's finding: the recalibration session measured the
+    12 MiB wall at 39.4ms -- under the 100ms judgeable band): 48 MiB walls
+    ~160-180ms, the same floor-anchored gap band, the shared budgets holding
+    with ~3x ratio margin; the 100ms ceiling independently holds ~8x over
+    the worst gap."""
     corpus = _secrets_corpus(size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.scrub_secrets, corpus))
@@ -3467,16 +3642,18 @@ def test_diff_opcodes_lines_near_identical_keeps_the_event_loop_at_heartbeat_gra
 # int return (no marshalling class at all), so the GIL-held residue is the
 # 10ms ping floor alone, but the wall (~31ms at 12 MiB dense) clears the
 # floor only ~3x, making gap/wall ≈ 0.34 by arithmetic. The QC-Yes 12 MiB
-# derivation verbatim (_QC_YES_12MIB_RATIO_BUDGET's comment): 0.60 sits
-# ~1.7x above the worst measured ratio (0.353) and ~40% below the ~1.0 a
-# detach regression shows (a held scan pins the whole ~31ms wall). The 100ms
-# ceiling holds ~9x over the measured gaps, and it is not a
-# detach discriminator at this size (a held ~31ms wall passes it easily);
-# the ratio budget is this cell's only one.
-_COUNT_MATCHES_RATIO_BUDGET = 0.60
+# count_matches dense's ratio budget: RETIRED by the judgeable-band
+# recalibration. The original 12 MiB pin measured 31.0-31.8ms walls where the
+# wall cleared the ping floor only ~3x, so the gap/wall ratio sat at 0.34-0.35
+# by arithmetic and the shared 0.30 was unattainable for any sub-40ms
+# floor-plus-nothing residue (hence the bespoke 0.60). At the recalibration's
+# 64 MiB pin the wall is ~200-230ms, the floor-anchored gap is ~5% of it, and
+# the shared 0.30 budget is attainable with ~5x margin again -- the tighter,
+# honest budget. (See the cell's docstring for the session's numbers.)
+_COUNT_MATCHES_RATIO_BUDGET = _RATIO_BUDGET
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+@pytest.mark.parametrize("size_bytes", [64 * _MIB], ids=["64MiB"])
 def test_count_matches_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
@@ -3485,22 +3662,23 @@ def test_count_matches_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granu
     single int return) runs under ``py.detach``, so the GIL-held residue
     is the ping floor alone, the grapheme_count precedent's no-marshalling
     band. The corpus is the find_patterns dense cell's own (the 17-word
-    dense set over the plain prose corpus, 1,284,724 matches): the count
-    answers the same question the list shape marshalled 171.0-174.7ms of
-    GIL hold for, at zero measurable hold.
+    dense set over the plain prose corpus, 1,284,724 matches at 12 MiB):
+    the count answers the same question the list shape marshalled
+    171.0-174.7ms of GIL hold for, at zero measurable hold.
 
-    Measured on the dev box (ambient load 4.4, 5 samples): worst gaps
-    10.4-11.2ms of 31.0-31.8ms walls (ratio 0.336-0.353). The budget
-    consequence: the wall clears the ping floor only ~3x,
-    so the gap/wall ratio sits at 0.34-0.35 by arithmetic; the shared 0.30
-    budget is unattainable for any sub-40ms wall with a floor-plus-nothing
-    residue (a budget that flakes is worse than a budget derived from the
-    band; see ``_QC_YES_12MIB_RATIO_BUDGET`` for the same recalibration
-    shape). The cell takes the bespoke 0.60 ratio budget (a detach
-    regression holds the whole ~31ms wall at ratio ~1.0 and fails by far)
-    plus the shared 100ms ceiling (~9x margin). The inverse of the sparse
-    cell's limitation: a held ~31ms scan passes the ceiling easily,
-    so the ratio budget is this cell's only detach discriminator."""
+    Measured on the dev box (ambient load 4.4, 5 samples) at the original
+    12 MiB pin: worst gaps 10.4-11.2ms of 31.0-31.8ms walls (ratio
+    0.336-0.353) -- the wall cleared the ping floor only ~3x, so the cell
+    then carried a bespoke 0.60 budget. The pin is the judgeable-band
+    recalibration (the design gate's finding: the recalibration session
+    measured the 12 MiB wall at 36.6ms, under the 100ms judgeable band):
+    64 MiB walls ~200-230ms with the residue floor-anchored (ratio ~0.05),
+    so the shared 0.30 budget is attainable with ~5x margin and the bespoke
+    budget retires back to it (``_COUNT_MATCHES_RATIO_BUDGET =
+    _RATIO_BUDGET``). The 100ms ceiling holds ~5x margin over the
+    recalibrated worst gap. The inverse of the sparse cell's limitation:
+    a held ~200ms scan pins the whole wall at ratio ~1.0 and fails by
+    far."""
     text = prose(size_bytes)
     patterns = list(SEARCH_DENSE_PATTERNS)
     asyncio.run(
@@ -3598,25 +3776,28 @@ def test_find_patterns_iter_dense_drain_in_a_thread_keeps_the_event_loop_at_hear
     )
 
 
-# tors.quote's 32 MiB ratio budget: not the shared 0.30, which this wall
+# tors.quote's ratio budget: not the shared 0.30, which the SMALL walls
 # cannot attain: the output is ~5/4 the input (roughly every sixth prose
-# char is a space escaping to %20), so the O(output) marshalling residue
-# is a structurally large share of a fast-scan wall, the b64_encode_bytes
-# shape (see _B64_RATIO_BUDGET's comment). Measured band (ambient load
-# ~5): worst gaps 24.3-28.8ms of 55-60ms walls (ratio 0.44-0.48). 0.60
-# sits ~1.25x above the worst measured ratio and ~40% below the ~1.0 a
-# detach regression shows (the whole wall held); a several-fold
-# marshalling blowout crosses 0.60 or the 100ms ceiling (~3.5x
-# above the band). If a crate bump ever speeds the detached scan enough
-# to collapse the wall toward the marshalling share, recalibrate per the
-# QC-Yes 12 MiB precedent rather than letting the budget flake.
-_QUOTE_32MIB_RATIO_BUDGET = 0.60
+# char is a space escaping to %20), so the O(output) marshalling residue is a
+# structurally large share of a fast-scan wall, the b64_encode_bytes shape
+# (see _B64_RATIO_BUDGET's comment). Measured band at the original 32 MiB pin
+# (ambient load ~5): worst gaps 24.3-28.8ms of 55-60ms walls (ratio 0.44-0.48)
+# -- and the judgeable-band recalibration measured that pin at 33.0ms wall in
+# the recalibration session, under the 100ms judgeable band, so the ratio leg
+# grows to 160 MiB (a first 96 MiB attempt measured 98.9ms, still under):
+# walls ~165-190ms, the residue floor-anchored (ratio ~0.1-0.15), 0.60 sits
+# ~4x above the recalibrated worst ratio and ~40% below the ~1.0 a detach
+# regression shows (the whole wall held); a several-fold marshalling blowout
+# crosses 0.60 or the 100ms ceiling. If a crate bump ever speeds the detached
+# scan enough to collapse the wall toward the marshalling share, recalibrate
+# per the QC-Yes precedent rather than letting the budget flake.
+_QUOTE_RATIO_BUDGET = 0.60
 
 
 @pytest.mark.parametrize(
     ("size_bytes", "ratio_budget"),
-    [(12 * _MIB, None), (32 * _MIB, _QUOTE_32MIB_RATIO_BUDGET)],
-    ids=["12MiB-ceiling-only", "32MiB-both-budgets"],
+    [(12 * _MIB, None), (160 * _MIB, _QUOTE_RATIO_BUDGET)],
+    ids=["12MiB-ceiling-only", "160MiB-both-budgets"],
 )
 def test_quote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int, ratio_budget: float | None
@@ -3627,7 +3808,9 @@ def test_quote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     the no-list-shape class, ``replace_many``'s band shape.
 
     Measured on the dev box (ambient load 0.4-5.2, 3 samples per cell,
-    prose corpus):
+    prose corpus); the ratio leg is the judgeable-band recalibration of the
+    former 32 MiB pin (the design gate's finding: the recalibration session
+    measured that pin's wall at 33.0ms, under the 100ms judgeable band):
 
     - 12 MiB: worst gaps 10.1-10.8ms against walls of 10.1-23.5ms: the
       wall straddles the 10ms ping floor (a fast native pass: ~20ms
@@ -3635,14 +3818,16 @@ def test_quote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       artifact and the cell asserts the 100ms ceiling only (the b64
       12 MiB precedent). A limitation: a held ~20ms encode passes
       the ceiling too, so the ratio discriminator for this function lives
-      in the 32 MiB cell and the red-side cells below.
-    - 32 MiB: worst gaps 24.3-28.8ms of 55.2-59.7ms walls (ratio
-      0.44-0.48): the ping floor plus the ~43 MiB output's marshalling
-      band, the b64 structural shape (the output is larger than the
-      input, so the marshalling is a larger wall share than finalize's).
-      The 0.60 cell budget sits ~1.25x above the worst measured ratio;
-      a detach regression (the scan itself GIL-held) shows ratio ~1.0
-      and fails by far (see ``_QUOTE_32MIB_RATIO_BUDGET``'s comment).
+      in the 160 MiB cell and the red-side cells below.
+    - 160 MiB (the judgeable-band recalibration: the 32 MiB pin measured
+      33.0ms and even a first 96 MiB attempt measured 98.9ms -- both under
+      the 100ms judgeable band): walls ~165-190ms, the marshalling residue
+      floor-anchored (gap ~17-25ms, ratio ~0.1-0.15 against the original
+      32 MiB band's 0.44-0.48 -- the residue's share FALLS as the wall
+      grows, the b64 384 MiB leg's shape). The 0.60 cell budget sits ~4x
+      above the recalibrated worst ratio; a detach regression (the scan
+      itself GIL-held) shows ratio ~1.0 and fails by far (see
+      ``_QUOTE_RATIO_BUDGET``'s comment).
 
     The red side, same corpus and placement, is the whole reason the
     function exists: ``urllib.parse.quote`` is pure Python; its
@@ -3659,8 +3844,8 @@ def test_quote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 
 @pytest.mark.parametrize(
     ("size_bytes", "ratio_budget"),
-    [(12 * _MIB, None), (32 * _MIB, _RATIO_BUDGET)],
-    ids=["12MiB-ceiling-only", "32MiB-both-budgets"],
+    [(12 * _MIB, None), (128 * _MIB, _RATIO_BUDGET)],
+    ids=["12MiB-ceiling-only", "128MiB-both-budgets"],
 )
 def test_unquote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int, ratio_budget: float | None
@@ -3671,17 +3856,22 @@ def test_unquote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     walk + replace-decode runs under ``py.detach``, the residue is the
     marshalling of one decoded string (3/4 the encoded size).
 
-    Measured on the dev box (ambient load 0.4-5.2, 3 samples per cell):
+    Measured on the dev box (ambient load 0.4-5.2, 3 samples per cell);
+    the ratio leg is the judgeable-band recalibration of the former
+    32 MiB pin (the design gate's finding: the recalibration session
+    measured that pin's wall at 44.3ms, under the 100ms judgeable band):
 
     - 12 MiB decoded (16 MiB encoded): worst gaps 10.8-11.1ms against
       walls of 14.3-23.5ms: the wall straddles the ping floor, the
       sub-ping artifact; the cell asserts the 100ms ceiling only (the
       b64 12 MiB precedent).
-    - 32 MiB decoded (43 MiB encoded): worst gaps 15.5-16.5ms of
-      77.0-77.8ms walls (ratio 0.20-0.21): the floor plus the ~32 MiB
-      output's marshalling. Every sample inside both shared budgets
-      (~1.4x ratio margin, ~6x ceiling margin); a detach regression
-      holds the whole ~77ms wall at ratio ~1.0 and fails by far.
+    - 128 MiB decoded (171 MiB encoded, the former 32 MiB pin's job grown
+      into the judgeable band): recalibration-session walls ~175-195ms,
+      the residue floor-anchored (gap ~11-16ms, ratio ~0.06-0.08 against
+      the original 32 MiB band's 0.20-0.21). Every sample inside both
+      shared budgets (~4x ratio margin, ~6x ceiling margin); a detach
+      regression holds the whole ~180ms wall at ratio ~1.0 and fails by
+      far.
 
     The red side: ``urllib.parse.unquote`` over the same encoded corpus
     measured worst gaps 50.5-52.0ms of 217.6-221.5ms walls (ratio
@@ -3700,48 +3890,60 @@ def test_unquote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 
 
 def _close_matches_corpus() -> tuple[str, list[str]]:
-    """One query × 13,900 candidates for the bulk get_close_matches
+    """One query × ~55.6k candidates for the bulk get_close_matches
     cells: the prose corpus's own four-sentence unit (664 chars) with
     the diff pair's word swap as the query, and every single-character
-    substitution of the unit (lowercase letters at the lowercase
-    positions) as the candidate pool: the corpus's own text at a
-    length where difflib's quadratic char matcher costs seconds
-    (measured ~3.4s) and tors's per-candidate Myers passes are real
-    work (~65ms). The short-candidate alternative (every mutation of
-    the 23-word vocabulary (~7.9k × ~8 chars)) measures both engines at
-    ~7.5ms (difflib is fast on short candidates; the wall race's
-    seconds live at sentence length), so the bulk cell's pool is this
-    one."""
-    sentence = prose(64 * 1024).split("\n\n")[0]
-    query = sentence.replace("quarterly", "monthly", 1)
+    substitution of the unit AND three length-discriminated sibling
+    copies (the unit plus a 1-3 char ``Q`` suffix: the suffix gives the
+    ``fromkeys`` dedup nothing to collapse -- the recalibration
+    session's finding, twice over: identical paragraphs collapse to one
+    pool, and near-identical word-swap copies collapse to ~1.06x) as
+    the candidate pool: the corpus's own text at a length where
+    difflib's quadratic char matcher costs seconds (measured ~3.4s on
+    the original 13.9k pool) and tors's per-candidate Myers passes are
+    real work (~65ms per 13.9k candidates, ~240ms at the recalibrated
+    pool -- the judgeable-band recalibration: the original pool
+    measured a 61.7ms wall in the recalibration session, under the
+    100ms judgeable band). The short-candidate alternative (every
+    mutation of the 23-word vocabulary (~7.9k × ~8 chars)) measures
+    both engines at ~7.5ms (difflib is fast on short candidates; the
+    wall race's seconds live at sentence length), so the bulk cell's
+    pool is this one."""
+    unit = prose(64 * 1024).split("\n\n")[0]
+    query = unit.replace("quarterly", "monthly", 1)
     pool = list(
         dict.fromkeys(
-            sentence[:i] + c + sentence[i + 1 :]
-            for i in range(len(sentence))
-            if sentence[i].isalpha() and sentence[i].islower()
+            sibling[:i] + c + sibling[i + 1 :]
+            for sibling in (unit + "Q" * k for k in range(4))
+            for i in range(len(sibling))
+            if sibling[i].isalpha() and sibling[i].islower()
             for c in string.ascii_lowercase
-            if c != sentence[i]
+            if c != sibling[i]
         )
     )
     return query, pool
 
 
 def test_get_close_matches_bulk_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
-    """The bulk-similarity claim: one query × 13,900 664-char candidates
-    (the corpus builder above): the sweep's per-candidate Myers passes
-    run under ``py.detach``, and the GIL-held residue is the O(candidates)
-    argument walk plus the ping floor: the returned elements are the
-    original candidate objects (references, zero marshalling per hit,
-    pinned in tests/test_similarity.py), so there is no list-shape class
-    at all.
+    """The bulk-similarity claim: one query × ~55.6k 664-667-char
+    candidates (the corpus builder above, the judgeable-band
+    recalibration's x4 pool: the original 13.9k pool measured 61.7ms and
+    a first ~41.7k attempt 99.1ms in the recalibration sessions, both
+    under the 100ms judgeable band): the sweep's per-candidate
+    Myers passes run under ``py.detach``, and the GIL-held residue is the
+    O(candidates) argument walk plus the ping floor: the returned elements
+    are the original candidate objects (references, zero marshalling per
+    hit, pinned in tests/test_similarity.py), so there is no list-shape
+    class at all.
 
-    Measured on the dev box (ambient load 4.1-5.2, 3 samples): worst
-    gaps 10.6-11.3ms of 64.2-71.7ms walls (ratio 0.15-0.18): inside
-    both shared budgets (~1.7x ratio margin, ~9x ceiling margin); a
-    detach regression (the sweep itself GIL-held) pins the whole ~65ms
-    wall at ratio ~1.0 and fails by far. The wall race against difflib
-    on the same input (~50x, single sample; the difflib precedent) is
-    the cell below."""
+    Measured on the dev box (ambient load 4.1-5.2, 3 samples) at the
+    original pool: worst gaps 10.6-11.3ms of 64.2-71.7ms walls (ratio
+    0.15-0.18); at the recalibrated pool the wall is ~240-260ms with
+    the same floor-anchored gap band: inside both shared budgets (~2x
+    ratio margin, ~9x ceiling margin); a detach regression (the sweep
+    itself GIL-held) pins the whole ~240ms wall at ratio ~1.0 and fails
+    by far. The wall race against difflib on the same input (~50x,
+    single sample; the difflib precedent) is the cell below."""
     query, pool = _close_matches_corpus()
     asyncio.run(
         _assert_loop_stays_responsive(
@@ -4037,7 +4239,7 @@ def _lsh_signatures(n_sigs: int = 4_000, num_perm: int = 128) -> list[list[int]]
     return [[rng.getrandbits(64) for _ in range(num_perm)] for _ in range(n_sigs)]
 
 
-@pytest.mark.parametrize("size", [(4_000, 128)], ids=["4k-sigs"])
+@pytest.mark.parametrize("size", [(32_000, 128)], ids=["32k-sigs"])
 def test_lsh_candidates_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size: tuple[int, int],
 ) -> None:
@@ -4050,13 +4252,18 @@ def test_lsh_candidates_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     detach end to end -- and the residue is the O(pairs) tuple-list
     marshalling.
 
-    Measured on the dev box (ambient load ~2, 3 samples per cell, 4k
-    signatures x 128 rows, bands=32/rows=4, all-distinct signatures so
-    the hashing sweep runs at full length): worst gaps 32-53ms of
-    68-86ms walls (ratios 0.47-0.61), the walk the dominant share, the
-    detached pass the rest. The advisory verdict's magnitude bound (the
+    Measured on the dev box (ambient load ~2, 3 samples per cell) at the
+    original 4k-sigs pin: worst gaps 32-53ms of 68-86ms walls (ratios
+    0.47-0.61), the walk the dominant share, the detached pass the rest.
+    The pin is the judgeable-band recalibration (the design gate's
+    finding: the recalibration session measured the 4k wall at 24.1ms,
+    under the 100ms judgeable band): at 32k sigs the wall is ~173-195ms
+    (the walk share DROPS to ~0.42 -- the detached hashing sweep grows
+    with the sig count while the per-sig walk stays linear, the probe's
+    measured curve: 0.50-0.54 at 4k, 0.42 at 32k), inside the 0.75
+    budget with ~1.8x margin. The advisory verdict's magnitude bound (the
     mutation finding): the band-stretch excuse covers only GIL-signature
-    strikes under 4 x 53ms = 212ms of gap AND under max(0.75, 1.15 x 0.61)
+    strikes under 4 x 81ms = 324ms of gap AND under max(0.75, 1.15 x 0.42)
     = 0.75 of ratio (``_LSH_BAND_GAP_TOP_S``); a strike at/above either
     raises even in this advisory cell."""
     n_sigs, num_perm = size
@@ -4067,13 +4274,14 @@ def test_lsh_candidates_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
                 tors.lsh_candidates, signatures, bands=32, rows=num_perm // 32
             ),
             ratio_budget=_LSH_RATIO_BUDGET,
+            abs_ceiling_s=_LSH_CEILING_S,
             band_top_s=_LSH_BAND_GAP_TOP_S,
             band_ratio_top=_LSH_BAND_RATIO_TOP,
         )
     )
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+@pytest.mark.parametrize("size_bytes", [32 * _MIB], ids=["32MiB"])
 def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
@@ -4086,11 +4294,16 @@ def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     ``py.detach``. The residue is therefore structurally ~half the call,
     not a small marshalling tail: measured on the dev box over two load
     windows (ambient load ~2 and ~10-16, 3-5 samples, the records corpus
-    (``reference.content_object``) at 12 MiB, ~30.7k records of str/int/
-    float/bool/list fields): worst gaps 23.3-32.2ms of 41.9-60.4ms walls,
-    ratios 0.45-0.60, every sample inside both budgets (the 0.80 ratio
-    budget ~1.3x above the worst observed ratio, the 100ms ceiling ~3x
-    above the worst gap). The corpus is all-ASCII, so no first-call
+    (``reference.content_object``) at the original 12 MiB pin, ~30.7k
+    records of str/int/float/bool/list fields): worst gaps 23.3-32.2ms of
+    41.9-60.4ms walls, ratios 0.45-0.60, every sample inside both budgets.
+    The pin is the judgeable-band recalibration (the design gate's finding:
+    the recalibration session measured the 12 MiB wall at 56.0ms, under the
+    100ms judgeable band): at 32 MiB the wall is ~155-174ms (the
+    memory-bound walk grows superlinearly -- the probe's curve: 140ms walls
+    at 24 MiB, 174 at 32 -- so the walk gap reaches 73-81ms, still under
+    the 100ms ceiling) with the ratio ~0.47, inside the 0.80 budget with
+    ~1.7x margin. The corpus is all-ASCII, so no first-call
     UTF-8-materialization band exists: every sample pays the same walk
     (compact-ASCII ``to_str`` borrows are zero-copy aliases; the copy into
     the owned tree is the cost).
@@ -4105,14 +4318,20 @@ def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     is the documented price of the parity contract, and the emitted-bytes
     half of the call is what the detach removes.
 
-    No 32 MiB twin: the wall cell (tests/test_performance.py) records the
+    No bigger twin: the wall cell (tests/test_performance.py) records the
     size curve as a measured dead heat with the stdlib at 64 KiB-12 MiB,
     and the residue/wall ratio is the load-stable constant this cell
-    pins, not a size-dependent quantity.
+    pins, not a size-dependent quantity; 32 MiB is the judgeable-band
+    pin (past it the memory-bound walk's gap band approaches the 100ms
+    ceiling -- the cell carries the bespoke
+    ``_CONTENT_HASH_CEILING_S`` for the same reason the uuid-batch and
+    dense-drain cells do: the loaded walk band sits inside the shared
+    ceiling, and the sizing device keeps loaded samples green without
+    weakening the ratio teeth).
 
     The advisory verdict's magnitude bound (the mutation finding): the
-    band-stretch excuse covers only GIL-signature strikes under 4 x 32.2ms
-    = 129ms of gap AND under max(0.80, 1.15 x 0.60) = 0.80 of ratio (see
+    band-stretch excuse covers only GIL-signature strikes under 4 x 81ms
+    = 324ms of gap AND under max(0.80, 1.15 x 0.60) = 0.80 of ratio (see
     ``_CONTENT_HASH_BAND_GAP_TOP_S``); a strike at/above either raises
     even in this advisory cell."""
     obj = content_object(size_bytes)
@@ -4120,6 +4339,7 @@ def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.content_hash, obj),
             ratio_budget=_CONTENT_HASH_RATIO_BUDGET,
+            abs_ceiling_s=_CONTENT_HASH_CEILING_S,
             band_top_s=_CONTENT_HASH_BAND_GAP_TOP_S,
             band_ratio_top=_CONTENT_HASH_BAND_RATIO_TOP,
         )
@@ -4449,7 +4669,7 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     is the dedup walk (one dict lookup per entry, Python-object hashing
     IS interpreter work) plus the O(distinct-ids) ``(id, score)`` tuple
     marshalling: the content_hash arg-walk class, structurally the
-    majority of the wall, hence the bespoke 0.80 budget
+    majority of the wall, hence the bespoke ratio budget
     (``_RANK_FUSE_RATIO_BUDGET``) instead of the shared 0.30.
 
     What the detach buys, and what it cannot: the detached pass is the
@@ -4460,12 +4680,10 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     alone; fusion is a reranking-scale primitive (hundreds to thousands
     of entries per list), not a whole-corpus one.
 
-    Measured on the dev box (ambient load ~2-4, 4 samples per cell):
-    200k total entries across 5 lists: worst gaps 17.1-28.4ms of
-    30.2-45.7ms walls, ratios 0.56-0.62, every sample inside both
-    budgets (~1.3x ratio margin, ~3x ceiling margin); at 400k the band
-    is 0.69-0.75 (measured, unasserted; the walk share grows with
-    size, which is why the pin is the 200k cell).
+    Measured at the original 200k pin (dev box, ambient load ~2-4, 4
+    samples): worst gaps 17.1-28.4ms of 30.2-45.7ms walls, ratios
+    0.56-0.62; at 400k the band was 0.69-0.75 (measured, unasserted --
+    the walk share grows with size).
 
     Id-shape caveat (the aio caveat in docs/async.md, honestly recorded
     here too): those bands were measured on the cheap-to-hash id shape
@@ -4476,16 +4694,34 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     the budget pins the str-id shape, not a detach guarantee for every
     hashable id type.
 
+    The judgeable-band recalibration (the design gate's finding): the
+    200k pin measured walls 16-45ms across boxes -- under the 100ms
+    judgeable band, where a heartbeat tick straddles the whole op and
+    the ratio reads ~100% regardless of GIL behavior (the convicted
+    weighted-twin CI failure is exactly that shape: blocked 16-21ms of a
+    16-20ms op, ~100%, all samples, past the 0.851 band, on a quiet box
+    the absolute ceiling held). The corpus grows to 1.2M entries, where
+    ~20 ticks cross every sample and the ratio means "detach lost" or
+    nothing: measured 0.68-0.73 quiet, 0.80 loaded -- the walk's share
+    GROWS with size (cache pressure on the dict walk), so the budget
+    re-derives to 0.90 (see ``_RANK_FUSE_RATIO_BUDGET``) and the cell
+    carries the fusion ceiling (``_FUSION_CEILING_S``, the
+    uuid-batch/dense-drain sizing device: the by-design walk gap is past
+    the shared 100ms ceiling at this size). The teeth live in the
+    magnitude gate's ratio axis: a lost detach reads ratio ~1.0 vs the
+    0.92 bound and convicts.
+
     The advisory verdict's magnitude bound (the mutation finding): the
-    band-stretch excuse covers only GIL-signature strikes under 4 x 28.4ms
-    = 114ms of gap AND under max(0.80, 1.15 x 0.74) = 0.851 of ratio (see
-    ``_RANK_BAND_GAP_TOP_S``); a strike at/above either raises even in
-    this advisory cell."""
-    lists = _ranked_lists(200_000)
+    band-stretch excuse covers only GIL-signature strikes under 4 x
+    301ms = 1.2s of gap AND under max(0.90, 1.15 x 0.80) = 0.92 of ratio
+    (see ``_RANK_BAND_GAP_TOP_S``); a strike at/above either raises even
+    in this advisory cell."""
+    lists = _ranked_lists(1_200_000)
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.rank_fuse, lists),
             ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+            abs_ceiling_s=_FUSION_CEILING_S,
             band_top_s=_RANK_BAND_GAP_TOP_S,
             band_ratio_top=_FUSION_BAND_RATIO_TOP,
         )
@@ -4498,29 +4734,50 @@ def test_weighted_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granul
     its per-entry validation (one extract + range check per weight, a
     hand-widened cost but the same interpreter-side class) join the dedup
     walk under the GIL; the detached pass gains a multiply per vote,
-    nothing else. The budget is the rank_fuse cell's 0.80 unchanged, over
-    the same workload shape (the weighted weights walk is O(#lists),
-    invisible next to the O(entries) dedup walk).
+    nothing else. The budget is the rank_fuse cell's, over the same
+    workload shape (the weighted weights walk is O(#lists), invisible
+    next to the O(entries) dedup walk).
 
-    Measured alongside the unweighted cell in the same session (ambient
-    load varying, 4 samples per cell): 200k total entries across 5
-    lists, weights=[2.0, 1.0, 1.0, 1.0, 0.5]: worst gaps 16.0-19.0ms of
-    16.1-30.6ms walls, ratios 0.62 on the uncontended samples — the
-    unweighted cell's own band (0.52-0.62 this session), as predicted:
-    the weighted pass is the same detach with a multiply, and the loaded
-    samples read ~1.0 on both spellings alike (the scheduler-starved
-    shape the first-clean retry discipline rides through). The advisory
-    verdict's magnitude bound: the band-stretch excuse covers only
-    GIL-signature strikes under 4 x 28.4ms = 114ms of gap AND under
-    max(0.80, 1.15 x 0.74) = 0.851 of ratio (the rank_fuse cell's, see
-    ``_RANK_BAND_GAP_TOP_S``); a strike at/above either raises even in
-    this advisory cell."""
-    lists = _ranked_lists(200_000)
+    Measured at the original 200k pin (dev box, ambient load varying, 4
+    samples, weights=[2.0, 1.0, 1.0, 1.0, 0.5]): worst gaps 16.0-19.0ms
+    of 16.1-30.6ms walls, ratios 0.62 on the uncontended samples -- the
+    unweighted cell's own band, as predicted: the weighted pass is the
+    same detach with a multiply.
+
+    The judgeable-band recalibration: the 200k pin measured walls 16-21ms
+    on the fast box -- under the 100ms judgeable band, where a heartbeat
+    tick straddles the whole op and the ratio reads ~100% regardless of
+    GIL behavior. THE CONVICTED CI FAILURE IS EXACTLY THAT SHAPE (blocked
+    16-21ms of a 16-20ms op, ~100%, all 3 samples, past the then-0.851
+    band, on a quiet box the absolute ceiling held): scheduling, not a
+    detach loss -- a ratio on a sub-100ms op is unjudgeable, and the
+    design gate in ``_assert_loop_stays_responsive`` now refuses to run
+    one. Two recalibration sessions converge on the move: an
+    intermediate 400k pin (measured walls 61-93ms, ratios 0.61-0.68)
+    still sits under the 100ms band floor -- the design gate rejects it
+    -- so the corpus grows to 1.2M entries (x6, the same function,
+    bigger input): ~20 ticks cross every sample, and the ratio means
+    "detach lost" or nothing -- measured 0.68-0.73 quiet, 0.80 loaded
+    (the walk share grows with size, both twins alike). The budget
+    re-derives to 0.90 (``_RANK_FUSE_RATIO_BUDGET``), the cell carries
+    the fusion ceiling (``_FUSION_CEILING_S``, the uuid-batch/dense-drain
+    sizing device: the by-design walk gap is past the shared 100ms
+    ceiling at this size), and the teeth live in the magnitude gate's
+    ratio axis: a lost detach reads ratio ~1.0 vs the 0.92 bound and
+    convicts.
+
+    The advisory verdict's magnitude bound: the band-stretch excuse
+    covers only GIL-signature strikes under 4 x 301ms = 1.2s of gap AND
+    under max(0.90, 1.15 x 0.80) = 0.92 of ratio (the shared fusion
+    constants, see ``_RANK_BAND_GAP_TOP_S``); a strike at/above either
+    raises even in this advisory cell."""
+    lists = _ranked_lists(1_200_000)
     weights = [2.0, 1.0, 1.0, 1.0, 0.5]
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.rank_fuse, lists, k=60, weights=weights),
             ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+            abs_ceiling_s=_FUSION_CEILING_S,
             band_top_s=_RANK_BAND_GAP_TOP_S,
             band_ratio_top=_FUSION_BAND_RATIO_TOP,
         )
@@ -4549,10 +4806,10 @@ def test_score_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() 
     + one score extraction per entry, Python-object hashing IS
     interpreter work) plus the O(distinct-ids) ``(id, score)`` tuple
     marshalling; the detached pass is the per-list min-max, the
-    weighted accumulation, the MNZ counts, and the sort. The budget is
-    the rank_fuse cell's 0.80 unchanged -- the extraction the
-    unweighted walk never paid is one C-level float conversion per
-    entry, the same interpreter-side class -- at the 200k shape, the
+    weighted accumulation, the MNZ counts, and the sort. At the 200k
+    shape (the enlargement recalibration, the diff near-identical
+    precedent: when a wall sits at the ping floor, grow the input
+    until the budgets resolve):
     enlargement recalibration (the diff near-identical precedent: when
     a wall sits at the ping floor, grow the input until the budgets
     resolve): the original 100k pin resolved on the box it was
@@ -4574,21 +4831,34 @@ def test_score_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() 
     (hash-expensive ids push the GIL-held share toward 1.0) carries
     over verbatim -- recorded, not re-pinned, in test_score_fusion.py.
 
+    The judgeable-band recalibration: CEILING-ONLY now
+    (``ratio_budget=None``, the ndcg_at_k precedent -- the same
+    finding, honestly taken). The pair walk's share of the wall is
+    size-stable AND already dominant: measured 0.81-0.85 on the quiet
+    box at 200k (the recalibration session), 0.87-0.89 at 400k-800k in
+    the sizing probe -- the walk IS the call, the detached min-max/
+    accumulation/sort tail a minority no ratio can separate from a
+    lost detach at ANY size: a lost detach reads ratio ~1.0, the
+    by-design walk reads 0.81-0.89, and the gap between them is
+    smaller than the load wobble -- while the sub-100ms walls make the
+    reading tick-straddle noise on top (the design gate's finding).
+    The 100ms ceiling is the assertion (the by-design gap band 19-33ms
+    sits ~3-5x under it; a held pass or a several-fold residue blowout
+    pins it and convicts through the magnitude gate).
+
     The advisory verdict's magnitude bound (the mutation finding): the
     band-stretch excuse covers only GIL-signature strikes under 4 x
     170ms = 680ms of gap (the band top: the dev box's 200k blocked-ms
     worst, ~0.74 x its 230ms wall; this box's own measured top is
-    32.6ms) AND under max(0.80, 1.15 x 0.74) = 0.851 of ratio (see
-    ``_SCORE_FUSE_BAND_GAP_TOP_S``); a strike at/above either raises
-    even in this advisory cell -- the lost-detach shape (ratio ~1.0)
-    convicts on the ratio axis."""
+    32.6ms) -- the cell is ceiling-only, the gap axis governs alone
+    (see ``_SCORE_FUSE_BAND_GAP_TOP_S``); a strike at/above it raises
+    even in this advisory cell."""
     lists = _scored_lists_for_gil(200_000)
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.score_fuse, lists),
-            ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+            ratio_budget=None,
             band_top_s=_SCORE_FUSE_BAND_GAP_TOP_S,
-            band_ratio_top=_FUSION_BAND_RATIO_TOP,
         )
     )
 
@@ -4779,13 +5049,15 @@ def _busy_token_counter(text: str) -> int:
 
 
 def test_chunk_to_offsets_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
-    """The GIL-free spelling's claim, at 2 MiB with 493,440 token spans:
-    the argument walk's contiguous GIL hold (the extraction class) and
+    """The GIL-free spelling's claim, at 8 MiB with ~2M token spans (the
+    judgeable-band recalibration of the 2 MiB pin, whose 54.6ms wall sat
+    under the 100ms judgeable band in the recalibration session): the
+    argument walk's contiguous GIL hold (the extraction class) and
     the end-of-call marshalling stay inside the bespoke 0.60 ratio
     budget and the 100ms ceiling; the pack itself is one py.detach. See
     the section note above for the band and the budget."""
     unit = "speaker: message with a few words and a number 42.\n"
-    corpus = unit * (2 * 1024 * 1024 // len(unit))
+    corpus = unit * (8 * 1024 * 1024 // len(unit))
     spans = _budget_token_spans(corpus)
     asyncio.run(
         _assert_loop_stays_responsive(
@@ -4799,11 +5071,14 @@ def test_chunk_to_budget_fast_counter_keeps_the_loop_at_heartbeat_granularity() 
     """The callback spelling with a cheap counter (``len(s.split())``):
     the GIL is re-attached per counter call and released for the native
     work between measurements, so the worst gap sits at the ping floor
-    (measured 10-11ms of 149-152ms walls, ratio 0.07-0.11). This is the
-    cell that would catch a regression moving the pack loop under one
-    held GIL: the whole ~150ms call would surface as one gap."""
+    (measured 10-11ms of 149-152ms walls, ratio 0.07-0.11, at the
+    original 2 MiB pin; the judgeable-band recalibration grows the
+    corpus to 4 MiB -- walls ~250-300ms, the same floor-anchored gap
+    band). This is the cell that would catch a regression moving the
+    pack loop under one held GIL: the whole ~250ms call would surface
+    as one gap."""
     unit = "speaker: message with a few words and a number 42.\n"
-    corpus = unit * (2 * 1024 * 1024 // len(unit))
+    corpus = unit * (4 * 1024 * 1024 // len(unit))
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(

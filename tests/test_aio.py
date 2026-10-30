@@ -284,14 +284,14 @@ class TestAwaitCorrectness:
         whole wall instead."""
         from test_gil_release import _assert_loop_stays_responsive
 
-        # 16 MiB, not 2 MiB: the 2 MiB corpus measured ~4.6ms wall on a
-        # loaded CI runner, right at the razor's edge of the "must cost
-        # something" floor below and prone to landing under it on a
-        # faster or differently-loaded box: exactly what happened here.
-        # 16 MiB gives real margin toward the docstring's own "tens of
-        # milliseconds or more" claim rather than a threshold this test
-        # can trip on jitter alone.
-        a = prose(16 * 1024 * 1024)
+        # 128 MiB, not 16 MiB: the judgeable-band recalibration (the design
+        # gate in test_gil_release._assert_loop_stays_responsive — the
+        # convicted weighted_rank_fuse CI shape: a ratio on a sub-100ms op
+        # is tick-straddle noise). The 16 MiB corpus measured a ~27-31ms
+        # wall and a first 96 MiB attempt ~134ms — both under the 150ms
+        # band target; 128 MiB walls ~180-190ms with the ratio
+        # floor-anchored.
+        a = prose(128 * 1024 * 1024)
         b = a[: len(a) // 2] + "X" + a[len(a) // 2 :]
         walls: list[float] = []
 

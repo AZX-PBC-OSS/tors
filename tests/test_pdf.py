@@ -306,15 +306,19 @@ def test_pdf_extract_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     to a thread (tors.documents.aio.pdf_extract does exactly this) keeps a loop that ticks
     every ~10ms, where a GIL-held binding (the official pdf_oxide wheel,
     measured: worst gap ~= the whole call) blocks it for the full wall.
-    The ~470KB single-page document keeps the wall an order of magnitude over
-    the 10ms ping floor so the ratio resolves (the module docstring's guidance).
+    The ~1.4MB single-page document keeps the wall an order of magnitude over
+    the 10ms ping floor so the ratio resolves (the judgeable-band
+    recalibration: the design gate in
+    test_gil_release._assert_loop_stays_responsive refuses a ratio on a
+    sub-100ms op — the 6000-line (~470KB) pin measured a ~70ms wall in the
+    recalibration session, so the fixture grows to 18000 lines).
     A timing-lane cell: the load-sensitive band measurement CI's matrix legs
     deselect (`-m "not timing and not sweep"`), one 3.12 leg running it: the
     marker-split contract every lane cell carries.
     """
     import asyncio
 
-    path = _write(tmp_path, "big.pdf", _big_pdf(6000))
+    path = _write(tmp_path, "big.pdf", _big_pdf(18_000))
 
     def op() -> None:
         pdf_extract(path)

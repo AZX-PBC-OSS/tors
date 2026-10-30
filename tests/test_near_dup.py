@@ -1663,7 +1663,12 @@ class TestDedupWidthMixingAndTokenFree:
 
 class TestGilHeartbeat:
     def test_aio_dedup_near_dup_keeps_the_loop_responsive(self) -> None:
-        corpus = [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(8_000)]
+        # 12k docs, not 8k: the judgeable-band recalibration (the design
+        # gate in test_gil_release._assert_loop_stays_responsive — the
+        # convicted weighted_rank_fuse CI shape: a ratio on a sub-100ms op
+        # is tick-straddle noise). The sync twin's own GIL cell pins the
+        # same 12k corpus; walls ~250-420ms here.
+        corpus = [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(12_000)]
 
         from test_gil_release import _assert_loop_stays_responsive
 
@@ -1681,7 +1686,11 @@ class TestGilHeartbeat:
         asyncio.run(run())
 
     def test_aio_shingle_jaccard_keeps_the_loop_responsive(self) -> None:
-        text_a = ("the quarterly oil sample interval for field outages " * 8_000).strip()
+        # 48k repeats, not 8k: the judgeable-band recalibration (the
+        # design gate's finding — the 8k corpus measured a ~33-37ms wall,
+        # under the 100ms judgeable band where a ratio is tick-straddle
+        # noise). Walls ~200-220ms here.
+        text_a = ("the quarterly oil sample interval for field outages " * 48_000).strip()
         text_b = text_a.replace("quarterly", "QUARTERLY", 1)
 
         from test_gil_release import _assert_loop_stays_responsive

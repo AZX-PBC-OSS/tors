@@ -585,7 +585,7 @@ class TestGilClaimAudit:
         assert wall > 0.1 and worst > 0.1, (worst, wall)
 
     @pytest.mark.timing
-    @pytest.mark.parametrize("units", [24_000, 96_000, 212_000])  # ~1 / 4 / 9.5 MiB
+    @pytest.mark.parametrize("units", [96_000, 212_000])  # ~4 / 9.5 MiB
     def test_ground_sentences_heartbeat_at_hostile_sizes(self, units):
         big = _unit(units)
         # Detached pass + documented O(sentences) marshalling residue: the
@@ -595,6 +595,11 @@ class TestGilClaimAudit:
         # the tiered arbitration: a wall pin, a starved heartbeat thread,
         # or the idle-loop control the box cannot beat are excused with a
         # printed record; a lost detach fails through every tier.
+        # The ladder's small leg is the judgeable-band recalibration (the
+        # design gate in test_gil_release._assert_loop_stays_responsive: a
+        # ratio on a sub-100ms op is tick-straddle noise — the 24k leg
+        # measured a ~54ms wall in the recalibration session), so the
+        # ladder starts at the 96k leg.
         asyncio.run(
             _assert_loop_stays_responsive(
                 lambda: asyncio.to_thread(tors.ground_sentences, big, "torque spec")

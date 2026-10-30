@@ -1046,13 +1046,19 @@ def test_to_markdown_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 ) -> None:
     """The GIL-release claim as a test, the suite's shared methodology: the
     whole read+sniff+convert pass runs under py.detach, so a to_thread wrap
-    keeps a 10ms heartbeat alive through a ~470KB document conversion (the
-    official pdf_oxide wheel measures GIL-held per call instead: the
-    hazard this payload exists to remove)."""
+    keeps a 10ms heartbeat alive through a ~1.4MB document conversion (the
+    judgeable-band recalibration of the ~470KB pin, whose wall measured
+    ~76ms in the recalibration session; the official pdf_oxide wheel
+    measures GIL-held per call instead: the hazard this payload exists to
+    remove)."""
     from test_gil_release import _assert_loop_stays_responsive
 
+    # 18000 lines, not 6000: the judgeable-band recalibration (the design
+    # gate in test_gil_release._assert_loop_stays_responsive — a ratio on
+    # a sub-100ms op is tick-straddle noise; 6000 lines measured a ~76ms
+    # wall in the recalibration session).
     path = tmp_path / "big.pdf"
-    path.write_bytes(generate_pdf_big(6000))
+    path.write_bytes(generate_pdf_big(18_000))
 
     def op() -> None:
         to_markdown(str(path))
@@ -1102,8 +1108,12 @@ def test_to_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     both modes."""
     from test_gil_release import _assert_loop_stays_responsive
 
+    # 18000 lines, not 6000: the judgeable-band recalibration (the design
+    # gate in test_gil_release._assert_loop_stays_responsive — a ratio on
+    # a sub-100ms op is tick-straddle noise; 6000 lines measured a ~67ms
+    # wall in the recalibration session).
     path = tmp_path / "big.pdf"
-    path.write_bytes(generate_pdf_big(6000))
+    path.write_bytes(generate_pdf_big(18_000))
 
     def op() -> None:
         to_text(str(path))
@@ -1131,18 +1141,17 @@ def test_page_geometry_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     assert all(entry is not None for entry in entries)
 
     def op() -> None:
-        # 30 sequential passes per sample: the geometry probe is so cheap
-        # (a 500-page read is ~4-5ms) that a single pass cannot be judged
-        # by the ratio machinery on a loaded runner — an 11ms scheduler
-        # stall is 200% of the op's own wall, and the CPU-attribution
-        # excuse reads the detached core's burn as loop-thread work (the
-        # CI failure this band fixes: blocked 11ms of a 5ms operation,
-        # 194%, one sample of three, both on a PR run and on main). A
-        # 30-pass batch puts the op in the band the machinery can judge
-        # (~130ms), keeps the by-design loop blocking sub-ms per tick,
-        # and keeps the teeth: a lost detach blocks ~the batch wall (30x
-        # the O(pages) marshalling), convicted at any load.
-        for _ in range(30):
+        # 60 sequential passes per sample (the batch-of-30 precedent's own
+        # judgeable-band recalibration: the design gate in
+        # test_gil_release._assert_loop_stays_responsive now refuses a
+        # ratio budget under a 100ms op wall, and the 30-pass batch
+        # measured ~84ms in the recalibration session — 2x the batch puts
+        # the wall at ~170-200ms, still inside the shared ceiling's
+        # comfort): the geometry probe stays as cheap as it is (a 500-page
+        # read is ~4-5ms), keeps the by-design loop blocking sub-ms per
+        # tick, and keeps the teeth: a lost detach blocks ~the batch wall
+        # (60x the O(pages) marshalling), convicted at any load.
+        for _ in range(60):
             page_geometry(str(path))
 
     asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
@@ -3619,19 +3628,21 @@ class TestPageLayout:
         """§9 item 12's GIL cell, on the surface where it matters most:
         page_layout's post-detach marshalling is O(pages × boxes) NESTED
         Python-object construction (spans, lines, words, images — read
-        through every getter, the realistic consumer). The fixture: 500
-        pages × 12 lines (the native span walk makes the call's wall
-        ~120ms — several heartbeat ticks, the sibling cells' regime, so
-        the marshalling's GIL-held fraction is small against it) — and
-        the whole read+parse pass must keep the 10ms heartbeat alive in a
-        to_thread wrap."""
+        through every getter, the realistic consumer). The fixture: 1000
+        pages × 12 lines (the judgeable-band recalibration of the 500-page
+        pin, whose wall measured ~136ms in the recalibration session —
+        under the 150ms band target; the native span walk makes the
+        call's wall ~270ms here — several heartbeat ticks, the sibling
+        cells' regime, so the marshalling's GIL-held fraction is small
+        against it) — and the whole read+parse pass must keep the 10ms
+        heartbeat alive in a to_thread wrap."""
         from test_gil_release import _assert_loop_stays_responsive
 
-        data = generate_pdf_layout_pages(500, lines=12)
-        path = tmp_path / "layout_500x12.pdf"
+        data = generate_pdf_layout_pages(1000, lines=12)
+        path = tmp_path / "layout_1000x12.pdf"
         path.write_bytes(data)
         entries = page_layout(data=data)
-        assert len(entries) == 500
+        assert len(entries) == 1000
         assert all(len(entry.spans) == 12 for entry in entries)
 
         def op() -> None:
@@ -4220,17 +4231,19 @@ class TestPageTables:
         O(pages) entry construction and the getter access is O(pages ×
         tables × cells) nested construction (read through every getter,
         the realistic consumer). The fixture: the cap-adjacent ruled page
-        × 300 pages (the native walk makes the call's wall several
-        heartbeat ticks, the sibling cells' regime), and the whole
-        read+parse pass must keep the 10ms heartbeat alive in a to_thread
-        wrap."""
+        × 4000 pages (the judgeable-band recalibration of the 2000-page
+        pin, whose wall measured ~102ms in the recalibration session —
+        under the 150ms band target; the native walk makes the call's
+        wall ~200-230ms here, several heartbeat ticks, the sibling
+        cells' regime), and the whole read+parse pass must keep the 10ms
+        heartbeat alive in a to_thread wrap."""
         from test_gil_release import _assert_loop_stays_responsive
 
-        builder = generate_pdf_table_pages(2000)
-        path = tmp_path / "tables_2000x.pdf"
+        builder = generate_pdf_table_pages(4000)
+        path = tmp_path / "tables_4000x.pdf"
         path.write_bytes(builder)
         entries = page_tables(data=builder)
-        assert len(entries) == 2000
+        assert len(entries) == 4000
         assert all(len(entry.tables) == 1 for entry in entries)
 
         def op() -> None:
@@ -6123,15 +6136,29 @@ class TestDocumentStructure:
         leg): the whole read+resolve+structure pass runs under py.detach
         and the payload construction lands after the GIL is reacquired,
         so a to_thread wrap keeps the 10ms heartbeat alive through a
-        workbook big enough to make the pass measurable."""
+        workbook big enough to make the pass measurable (two passes of
+        it, the judgeable-band recalibration's batch device — see the
+        fixture comment)."""
         from test_gil_release import _assert_loop_stays_responsive
 
+        # Two sequential passes per sample (the page-geometry batch-of-30
+        # device): the structure surface CAPS its entries (400k cells
+        # reads entries_truncated=true — the cell's assert), so the
+        # fixture cannot grow by cells; the 200k workbook's single pass
+        # measured a ~99ms wall in the judgeable-band recalibration
+        # session — under the 100ms judgeable band, where the design
+        # gate refuses a ratio. Two passes put the op at ~180-200ms
+        # with the ratio floor-anchored, and keep the teeth: a lost
+        # detach holds ~the pass wall per pass (the payload
+        # construction is post-reacquire marshalling), chaining past
+        # the ratio budget, convicted at any load.
         path = tmp_path / "structure_cells.xlsx"
         path.write_bytes(generate_xlsx_cells(200_000))
 
         def op() -> None:
-            report = document_structure(str(path))
-            assert report.payload.entries_truncated is False
+            for _ in range(2):
+                report = document_structure(str(path))
+                assert report.payload.entries_truncated is False
 
         asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
 
