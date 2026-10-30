@@ -2546,7 +2546,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tors-core"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "aho-corasick",
  "anydoc",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "tors-documents"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "pyo3",
  "tors-core",
