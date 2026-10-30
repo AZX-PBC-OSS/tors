@@ -88,3 +88,45 @@ macro_rules! eager_iter_class {
     };
 }
 pub(crate) use eager_iter_class;
+
+/// Render the report bindings' byte-offset spans as
+/// `(type, char_start, char_end)` triples: one linear walk over the
+/// input's `char_indices`, consuming the sorted unique byte offsets —
+/// O(input + spans), never O(input × spans). Every span boundary the
+/// scanners emit sits on a char boundary (matches start and end at
+/// ASCII-adjacent positions); a mid-char offset would map to the
+/// following char, defensively. The one canonical spelling both
+/// `scrub_pii_report` and `scrub_secrets_report` run (the callers map
+/// their own span types to `(start, end, name)` triples), so the
+/// renderer cannot drift between the two reports.
+pub(crate) fn render_char_spans(
+    text: &str,
+    spans: &[(usize, usize, String)],
+) -> Vec<(String, usize, usize)> {
+    let mut offsets: Vec<usize> = spans.iter().flat_map(|(s, e, _)| [*s, *e]).collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    let mut char_at: Vec<usize> = Vec::with_capacity(offsets.len());
+    let mut chars = text.char_indices();
+    let mut ahead = chars.next();
+    let mut char_idx = 0usize;
+    for &b in &offsets {
+        while let Some((cb, _)) = ahead {
+            if cb >= b {
+                break;
+            }
+            char_idx += 1;
+            ahead = chars.next();
+        }
+        char_at.push(char_idx);
+    }
+    let index_of = |b: usize| {
+        char_at[offsets
+            .binary_search(&b)
+            .expect("every span offset was collected")]
+    };
+    spans
+        .iter()
+        .map(|(s, e, name)| (name.clone(), index_of(*s), index_of(*e)))
+        .collect()
+}

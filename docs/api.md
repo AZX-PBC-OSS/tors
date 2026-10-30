@@ -223,7 +223,15 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
     token is a clean boundary even when the digest ends hex-dirty, so
     an adjacent number still scrubs exactly; and
     (3) no partial match inside a longer run — twelve-plus digits is an
-    id, not a phone. Leading spaces are skipped (word separation); a
+    id, not a phone — EXCEPT the width cut's group re-scan: a wider run
+    that bridges numbers with SPACES (`415-555-2671 415-555-2672`) is
+    re-scanned at group granularity, and each group the domestic grammar
+    accepts (exactly 10 or 11-with-`1` digits, an internal separator, a
+    clean start, the completing digit followed by a space or the run's
+    end) scrubs with its own digest — the old whole-run skip silently
+    leaked every bridged number. The cut fires on SPACES only, which is
+    what keeps the near-miss neighbors out (see the residual list).
+    Leading spaces are skipped (word separation); a
     leading structural separator (`-`, `.`, `(`, `)`) is ABSORBED into
     the match, not stripped (`x -415-555-2671` scrubs `-415-555-2671`
     whole); trailing separators survive past the last digit, same as
@@ -388,6 +396,18 @@ timestamps:
 - Bare digit runs never match even at ten/eleven digits (`4155552671`,
   `14155552671` are order numbers), and short `+`-led runs never match
   (`+1234567`, seven digits, is the ported non-match).
+- The domestic group re-scan cuts on SPACES only: dash- or dot-bridged
+  pairs leak whole (`415-555-2671-415-555-2672`, `415-555-2671.415-555-2672`
+  — the same shape the dash-chained id spells, ambiguous with it), as do
+  pairs bridged by any other separator (`)`-close then space). A pair
+  separated by a comma or newline was never a single run (neither char is
+  phone-class) and always scrubbed as two matches. Canonicalize (map
+  `-`/`.` between digit groups to spaces) before scrubbing if those
+  spellings are in threat.
+- 4-digit credit-card groupings stay out of the same re-scan
+  (`4111 1111 1111 1111`): the digit count passes through ten only
+  INSIDE a digit run, and a cut never fires mid-spelling — the count
+  must complete at a space or the run's end.
 - Extensions survive past the last digit: `415-555-2671 x1234` scrubs
   `415-555-2671` and leaves ` x1234` untouched, same as international
   (trailing separators survive; the extension is not part of the match).
@@ -685,8 +705,9 @@ Six names, one closed set:
   > keeps the exact five-name contract.
 - `uri_query_creds_extended` — the SAME `[?&]` anchor over the EXTENDED
   credential-key set: the shared five plus the ops-standard
-  query-parameter names (`access_key`, `api_key`, `apikey`, `auth`,
-  `key`, `passkey`, `pw`, `sas_token`, `secret`, `sig`, `token`). The names
+  query-parameter names (`access_key`, `access_token`, `api_key`,
+  `apikey`, `auth`, `key`, `oauth_token`, `passkey`, `pw`,
+  `refresh_token`, `sas_token`, `secret`, `sig`, `token`). The names
   are the published scanner lists, transcribed and closed: ESLint
   `no-credentials-in-query-params` (eslint-plugin-browser-security)'s
   default sensitive terms (`password`, `token`, `secret`, `api_key`/
@@ -697,11 +718,12 @@ Six names, one closed set:
   access logs, proxy logs, browser history, and the `Referer` header of
   every outbound link). Judicious cuts, stated: no
   `session`/`sessionid`/`sid` (session identifiers are not credentials;
-  masking them corrupts a log line for nothing), no
-  `access_token`/`refresh_token`/`auth_token` (the `_token` suffix
-  family is real but open-ended — `oauth_token=` does not mask under
-  the closed set, the documented seam; more names arrive as evidence
-  names them, never by pattern).
+  masking them corrupts a log line for nothing), and no
+  `auth_token` (the `_token` suffix family is open-ended — the one
+  `_token` name left out after the evidenced trio arrived:
+  `access_token=` is the canonical CWE-598 leak shape,
+  `refresh_token=`/`oauth_token=` its OAuth siblings; more names
+  arrive as evidence names them, never by pattern).
 - `libpq_conninfo_creds` — the keyword/value anchor of the SAME pass:
   `name=value` where the name is not the tail of a longer word (the
   live chain's `(?<![A-Za-z0-9_])` lookbehind), so libpq conninfo text
@@ -861,22 +883,34 @@ head) glued to a preceding key-charset char `[A-Za-z0-9_-]` is
 mid-token and never fires (`XAKIA…`), unless that char ends a complete
 escape sequence (`%XX`, `\uXXXX`, …) or an ANSI CSI sequence
 (formatting material, not a word), or the position opens a PEM BEGIN
-head after a dash run. Exact-width grammars refuse a candidate inside a
-LONGER run of their own alphabet (a near-miss is a longer word, never a
-match).
+head after a dash run. The prefixed grammars consume their tails
+MAXIMALLY at the pinned minimum width: a SHORTER run is the near-miss
+refusal (a longer word's fragment, never a match), and a LONGER run is
+ONE LONG key — the keys rule's own doctrine, over-redaction in the safe
+direction, and what keeps the pass strictly idempotent (a width-cut
+residue glued behind the token's own 12-hex digest composes the
+prefixless legacy class's 40-hex shape — fuzz-proven). The prefixless
+legacy hex class keeps the full exact-width refusal (no prefix to
+anchor a minimum on; a 41-plus hex run is a longer word — a SHA-256, an
+identifier).
 
-- `aws_access_key` — `AKIA`/`ASIA` + exactly 16 chars of `[0-9A-Z]`.
-  The prefixes are the access-key-ID heads AWS's own docs spell
+- `aws_access_key` — `AKIA`/`ASIA` + at least 16 chars of `[0-9A-Z]`,
+  the tail consumed maximally (a key glued to further tail-class
+  material is one long key); a shorter run is the near-miss refusal.
+  The prefixes are the
+  access-key-ID heads AWS's own docs spell
   (the `AKIA` + `IOSFODNN7EXAMPLE` example, IAM's "Manage access keys"
   page); the tail
   alphabet is uppercase letters and digits — Amazon's example carries
   both `I` and `O`, so there is no I/O exclusion to implement. The
-  class matches detect-secrets' AWS detector and trufflehog's
+  class redacts a superset of detect-secrets' AWS detector (whose
+  pattern `(?:A3T[A-Z0-9]|ABIA|ACCA|AKIA|ASIA)[0-9A-Z]{16}` has no
+  trailing boundary) and of trufflehog's exact-width spelling
   (`\b(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}\b`); tors pins the two
   live/temporary credential prefixes. AWS documents no checksum for
   access key IDs, so none is validated and none is claimed. False
-  positives: 20-char `[0-9A-Z]` strings with an `AKIA`/`ASIA` head at a
-  clean boundary — rare outside real key material.
+  positives: `[0-9A-Z]` strings at least 20 chars with an `AKIA`/`ASIA`
+  head at a clean boundary — rare outside real key material.
 - `slack_token` — case-insensitive `xox[abprso]-` + one or more
   digit-run/dash sections + a final alphanumeric run: detect-secrets'
   Slack detector (`xox(?:a|b|p|o|s|r)-(?:\d+-)+[a-z0-9]+` under
@@ -904,7 +938,9 @@ match).
   docs) stays a documented exclusion. The REPORT says which environment
   a key belongs to (`stripe_live`/`stripe_test`).
 - `github_token` — two classes under one name. Modern:
-  `(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}`, exactly 36 — GitHub's
+  `(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}` — at least 36, the tail
+  consumed maximally (the aws grammar's own posture; a shorter run is
+  the near-miss refusal) — GitHub's
   token-format post pins the five prefixes, the `_` separator, and the
   base62 body (30 random chars plus a 6-char checksum tail). GitHub
   DEFINES that checksum (a 32-bit CRC32 base62-encoded) but does not
