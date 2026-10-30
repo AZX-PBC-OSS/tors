@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.18.0...v0.18.1) (2026-10-30)
+
+
+### Miscellaneous Chores
+
+* **deps-rust:** the pyo3 0.30 migration ([#234](https://github.com/AZX-PBC-OSS/tors/issues/234)) ([cfa6c22](https://github.com/AZX-PBC-OSS/tors/commit/cfa6c221bf2c2269eaf97ae7cc94d792828e72a1))
+
 ## [0.18.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.17.1...v0.18.0) (2026-10-30)
 
 
