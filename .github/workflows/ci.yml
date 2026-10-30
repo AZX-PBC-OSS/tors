@@ -46,7 +46,7 @@ jobs:
         # tors-documents/target: the payload crate is deliberately NOT a cargo workspace
         # member (its Cargo.toml's header), so it builds into its own target dir the
         # root key would never cache; the same reason the fuzz job maps fuzz/ below.
-        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
@@ -187,7 +187,7 @@ jobs:
       - name: Cache cargo
         # Same choice as the lint job's cache step (rationale there); the
         # workspaces list covers the payload crate's own target dir.
-        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
@@ -231,7 +231,7 @@ jobs:
         # the payload wheel's extension into tors-documents/target, which
         # the default root-only key never caches — without it every matrix
         # leg pays a cold engine-tree build per run.
-        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
@@ -299,7 +299,7 @@ jobs:
         # Same choice and workspaces list as the test job's cache step
         # (rationale there): the sync below also builds the payload into
         # tors-documents/target.
-        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
@@ -366,7 +366,7 @@ jobs:
           toolchain: nightly
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target\nfuzz -> target"
 
