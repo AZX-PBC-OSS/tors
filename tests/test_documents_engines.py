@@ -131,6 +131,7 @@ from documents import (
     generate_xlsx_macro,
     generate_xlsx_structure,
 )
+from loop_harness import assert_bounded
 
 try:  # the payload wheel (tors[documents])
     from tors_documents import (
@@ -5311,22 +5312,22 @@ class TestZipBombRefusals:
         sub-second wall (measured 0.03s on this box; inflating 600 MiB
         and parsing it would cost seconds and ~1.6 GiB, so the wall band
         is the pre-decompression proof that cannot flake)."""
-        import time
-
         path = tmp_path / "bomb_oxide.docx"
         _zip_bomb_docx(path, inflated_mib=600)
         assert path.stat().st_size < _MIB, "the fixture lost the bomb shape (stored > 1 MiB)"
-        started = time.perf_counter()
-        with pytest.raises(ValueError, match="decompression limit exceeded") as raised:
-            to_markdown(str(path), backend="oxide")
-        elapsed = time.perf_counter() - started
-        message = str(raised.value)
-        assert "word/document.xml" in message, message
-        assert "536870912" in message, message  # 512 MiB: the cap's own number, verbatim
-        assert elapsed < 2.0, (
-            f"the refusal took {elapsed:.2f}s — the pre-decompression guard "
-            "regressed (measured 0.03s; an inflated refusal costs seconds)"
-        )
+
+        def fire() -> None:
+            with pytest.raises(ValueError, match="decompression limit exceeded") as raised:
+                to_markdown(str(path), backend="oxide")
+            message = str(raised.value)
+            assert "word/document.xml" in message, message
+            assert "536870912" in message, message  # 512 MiB: the cap's own number, verbatim
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the ~0.03s refusal (a ~66x margin) — one
+        # scheduler hit retries, a regressed (inflating) refusal dirties
+        # every sample.
+        assert_bounded(fire, 2.0, samples=3, label="the oxide-lane zip-bomb refusal")
 
 
 # --- JSON-lines is not csv (the sniffer's record-shape guard) ---------------------

@@ -62,6 +62,18 @@ def _wall_s(fn) -> float:
     return time.perf_counter() - started
 
 
+def _assert_wall_under(fn, limit_s: float, label: str) -> float:
+    """The load-fair wall ceiling (tests/loop_harness.py's
+    pass-on-first-clean, samples=3): the single-shot elapsed assert this
+    replaces failed when one scheduler hit landed on its only sample; a
+    real regression inflates every sample, so the ceiling keeps its
+    teeth."""
+    def check(wall: float) -> None:
+        assert wall < limit_s, f"{label} took {wall:.2f}s (limit {limit_s}s)"
+
+    return first_clean(lambda: _wall_s(fn), check, samples=3, label=label)
+
+
 def _splice(text: str) -> str:
     """Remove the corpus's ``%%`` splice marker. A full-shape vendor
     token in a committed payload or a manifest needle is spelled with
@@ -94,8 +106,7 @@ def _check_scrub_pii(case: dict) -> None:
     out = tors.scrub_pii(text)
     limit = params.get("wall_limit_s")
     if limit is not None:
-        wall = _wall_s(lambda: tors.scrub_pii(text))
-        assert wall < limit, f"the scrub took {wall:.2f}s (limit {limit}s)"
+        _assert_wall_under(lambda: tors.scrub_pii(text), limit, "the scrub")
     for needle in params.get("needles", []):
         needle = _splice(needle)
         assert needle not in out, f"the credential survived the scrub: {needle[:30]!r}"
@@ -120,12 +131,13 @@ def _check_minhash(case: dict) -> None:
             text, num_perm=params["num_perm"], shingle_size=params["shingle_size"]
         )
     assert "shingle" in str(ei.value).lower(), f"the refusal did not name the knob: {ei.value}"
-    wall = _wall_s(
+    _assert_wall_under(
         lambda: tors.minhash_signature(
             text, num_perm=params["num_perm"], shingle_size=params["under_ceiling_shingle_size"]
-        )
+        ),
+        5.0,
+        "the under-ceiling call",
     )
-    assert wall < 5.0, f"the under-ceiling call took {wall:.2f}s"
 
 
 def _check_masked(case: dict) -> None:
@@ -136,10 +148,11 @@ def _check_masked(case: dict) -> None:
     assert len(out) == len(text), (
         f"the masked output is not length-preserving: {len(out)} vs {len(text)}"
     )
-    wall = _wall_s(
-        lambda: tors.replace_many_masked(text, {params["key"]: value}, params["mask"])
+    _assert_wall_under(
+        lambda: tors.replace_many_masked(text, {params["key"]: value}, params["mask"]),
+        params["wall_limit_s"],
+        "the masked replace",
     )
-    assert wall < params["wall_limit_s"], f"took {wall:.2f}s (limit {params['wall_limit_s']}s)"
 
 
 def _check_chunk_text_overlap(case: dict) -> None:
@@ -147,8 +160,7 @@ def _check_chunk_text_overlap(case: dict) -> None:
     limit = case["params"]["wall_limit_s"]
     n = len(text)
     m = n // 2
-    wall = _wall_s(lambda: tors.chunk_text(text, m, overlap=m - 1))
-    assert wall < limit, f"took {wall:.2f}s (limit {limit}s)"
+    _assert_wall_under(lambda: tors.chunk_text(text, m, overlap=m - 1), limit, "the chunk pass")
     chunks = tors.chunk_text(text, m, overlap=m - 1)
     assert len(chunks) == n - m + 1
 
@@ -172,8 +184,7 @@ def _check_documents_to_text(case: dict) -> None:
     data = (CORPUS / case["file"]).read_bytes()
     fmt = case["params"]["format"]
     limit = case["params"]["wall_limit_s"]
-    wall = _wall_s(lambda: documents.to_text(data=data, format=fmt))
-    assert wall < limit, f"to_text took {wall:.2f}s (limit {limit}s)"
+    _assert_wall_under(lambda: documents.to_text(data=data, format=fmt), limit, "to_text")
 
 
 class _LyingSequence(Sequence):
@@ -257,15 +268,25 @@ def _check_deadline_enum(case: dict) -> None:
     params = case["params"]
     doc = (CORPUS / case["file"]).read_text(encoding="utf-8")
     members = [("a" * params["member_len"]) + str(i) for i in range(params["member_count"])]
-    started = time.perf_counter()
-    with pytest.raises((TimeoutError, ValueError)):
-        tors.repair_json_loads(doc, schema={"enum": members}, deadline_ms=params["deadline_ms"])
-    elapsed = time.perf_counter() - started
     budget_s = params["deadline_ms"] / 1000.0
-    assert elapsed < params["overshoot_limit_x"] * budget_s, (
-        f"the deadline escape: {elapsed * 1000:.0f}ms elapsed against a "
-        f"{params['deadline_ms']}ms budget ({elapsed / budget_s:.0f}x overshoot)"
-    )
+
+    def measure() -> float:
+        started = time.perf_counter()
+        with pytest.raises((TimeoutError, ValueError)):
+            tors.repair_json_loads(doc, schema={"enum": members}, deadline_ms=params["deadline_ms"])
+        return time.perf_counter() - started
+
+    def check(elapsed: float) -> None:
+        assert elapsed < params["overshoot_limit_x"] * budget_s, (
+            f"the deadline escape: {elapsed * 1000:.0f}ms elapsed against a "
+            f"{params['deadline_ms']}ms budget ({elapsed / budget_s:.0f}x overshoot)"
+        )
+
+    # Load-robust spelling (tests/loop_harness.py): the ~5ms deadline abort
+    # measured single-shot convicted on one scheduler hit landing on its
+    # only sample; a real deadline escape inflates every sample, so the
+    # overshoot ceiling keeps its teeth.
+    first_clean(measure, check, samples=3, label="the deadline-enum overshoot cell")
 
 
 def _check_wide_schema(case: dict) -> None:
@@ -275,11 +296,10 @@ def _check_wide_schema(case: dict) -> None:
         "type": "object",
         "properties": {f"k{i}": {"type": "string"} for i in range(params["properties"])},
     }
-    wall = _wall_s(lambda: tors.repair_json_loads(doc, schema=schema))
-    assert wall < params["wall_limit_s"], (
-        f"the schema-aware repair took {wall * 1000:.0f}ms (limit "
-        f"{params['wall_limit_s'] * 1000:.0f}ms) at {params['properties']} properties: "
-        "the walk is superlinear in the property count"
+    _assert_wall_under(
+        lambda: tors.repair_json_loads(doc, schema=schema),
+        params["wall_limit_s"],
+        "the schema-aware repair",
     )
 
 
