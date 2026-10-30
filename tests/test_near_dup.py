@@ -1740,8 +1740,6 @@ class TestGilHeartbeat:
 
         asyncio.run(run())
 
-        asyncio.run(run())
-
 
 # ---------------------------------------------------------------------------
 # MEMORY / SCALE GUARDS
@@ -1850,7 +1848,7 @@ class TestScalingGateBites:
         def corpus(n: int) -> list[str]:
             return [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(n)]
 
-        def wall(fn, samples: int = 3) -> float:
+        def wall(fn, samples: int = 5) -> float:
             fn()
             best = float("inf")
             for _ in range(samples):
@@ -1876,14 +1874,19 @@ class TestScalingGateBites:
 
         # 2x input (one doubling): a cubic's 8x growth clears the 4.5x
         # gate; a quadratic's 4x does not (the documented class).
+        # Min-of-5 on BOTH measurements (was: the honest side min-of-3,
+        # the planted add-on single-shot — the single-shot ratio convicted
+        # 1-of-3 on a loaded runner, 658.5ms -> 2886.6ms = 4.4x against the
+        # 4.5x bar: one inflated draw on either side can hide an 8x under
+        # the gate; the min-of-5 spans the scheduler eras the way every
+        # load-fair measurement here does, and the true 8x clears the bar
+        # in every quiet window).
         small, large = corpus(200), corpus(400)
         honest_small, honest_large = wall(lambda: honest(small)), wall(lambda: honest(large))
         assert honest_large < self._gate(honest_small, honest_large, 2, 4.5), (
             "the honest call must pass its own gate"
         )
-        reg_small, reg_large = wall(lambda: regressed(small), samples=1), wall(
-            lambda: regressed(large), samples=1
-        )
+        reg_small, reg_large = wall(lambda: regressed(small)), wall(lambda: regressed(large))
         assert reg_large > self._gate(reg_small, reg_large, 2, 4.5), (
             "the gate MUST trip a worse-than-quadratic add-on: "
             f"{reg_small:.1f}ms -> {reg_large:.1f}ms"

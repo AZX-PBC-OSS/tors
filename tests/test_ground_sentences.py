@@ -38,6 +38,7 @@ from grounding_reference import (
 )
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from test_gil_release import _assert_loop_stays_responsive, _gap_and_wall_during, _gap_was_starved
 
 import tors
 from loop_harness import assert_bounded, first_clean
@@ -566,45 +567,6 @@ async def _gap_and_wall(op):
     return worst, wall
 
 
-_HEARTBEAT_RATIO_BUDGET = 0.35
-_HEARTBEAT_CEILING_S = 0.5
-_HEARTBEAT_SAMPLES = 3
-
-
-async def _assert_heartbeat_clean(op, samples: int = _HEARTBEAT_SAMPLES) -> None:
-    """Assert ``op`` leaves the event loop schedulable, over up to ``samples``
-    measurements, passing on the first clean one (the harness's
-    ``test_gil_release.py`` pattern): a GIL-held whole pass misses its
-    budgets in EVERY sample, scheduler starvation of the heartbeat process
-    does not, so one starved sample retries instead of failing the cell.
-    A sample is clean exactly when the worst tick gap stays under BOTH the
-    ratio budget (a held whole pass reads ~1.0; the detached pass's residue
-    is the documented O(sentences) marshalling, a small fraction of the
-    wall) and the absolute ceiling (the marshalling band at the hostile
-    sizes tops out ~0.5s under ambient load, which inflates the wall the
-    residue scales with; the ceiling still catches a bounded pathological
-    hold however long the wall runs)."""
-    observed: list[tuple[float, float]] = []
-    for _ in range(samples):
-        worst, wall = await _gap_and_wall(op)
-        assert wall > 0.02, wall
-        observed.append((worst, wall))
-        if worst < _HEARTBEAT_RATIO_BUDGET * wall and worst < _HEARTBEAT_CEILING_S:
-            return
-    detail = "; ".join(
-        f"worst {worst * 1000:.0f}ms of a {wall * 1000:.0f}ms operation ({worst / wall:.0%})"
-        for worst, wall in observed
-    )
-    raise AssertionError(
-        f"the heartbeat missed its budgets in every one of {samples} samples "
-        f"({detail}): tors's py.detach release is not freeing the loop while "
-        "ground_sentences runs, or the return marshalling regressed out of "
-        "its band (src/grounding_impl.rs)"
-    )
-
-
-
-
 class TestGilClaimAudit:
     """Both new surfaces claim py.detach end-to-end with no Python callback
     inside the detached pass.  Heartbeat at hostile sizes."""
@@ -627,9 +589,14 @@ class TestGilClaimAudit:
     def test_ground_sentences_heartbeat_at_hostile_sizes(self, units):
         big = _unit(units)
         # Detached pass + documented O(sentences) marshalling residue: the
-        # gap must stay far under the wall (a held whole pass reads ~1.0).
+        # shared verdict machinery (this file's local fork retired — it was
+        # the machinery MINUS the tier-1/2/3 excuses, so a starvation
+        # window convicted outright) holds the gap to the same budgets with
+        # the tiered arbitration: a wall pin, a starved heartbeat thread,
+        # or the idle-loop control the box cannot beat are excused with a
+        # printed record; a lost detach fails through every tier.
         asyncio.run(
-            _assert_heartbeat_clean(
+            _assert_loop_stays_responsive(
                 lambda: asyncio.to_thread(tors.ground_sentences, big, "torque spec")
             )
         )
@@ -637,19 +604,54 @@ class TestGilClaimAudit:
     @pytest.mark.timing
     @pytest.mark.parametrize("units", [24_000, 212_000])  # ~1 / 9.5 MiB
     def test_grounding_coverage_held_time_does_not_scale(self, units):
+        small = _unit(24_000)
         big = _unit(units)
-        small_gap, _ = asyncio.run(
-            _gap_and_wall(
-                lambda: asyncio.to_thread(tors.grounding_coverage, _unit(24_000), _unit(24_000))
+
+        def measure() -> tuple[float, float, float, float, bool]:
+            # The pair, each leg through the shared machinery's own
+            # measurement primitive (the accounts come back with it): the
+            # single-shot pair this replaced let one starvation window trip
+            # the band outright. A sample whose big-leg window carries the
+            # RUNNER's starvation signature is not evidence — check()
+            # rejects it and first_clean retries; a GIL-signature window
+            # convicts.
+            small_gap, small_wall, *_ = asyncio.run(
+                _gap_and_wall_during(
+                    lambda: asyncio.to_thread(tors.grounding_coverage, small, small)
+                )
             )
-        )
-        worst, wall = asyncio.run(
-            _gap_and_wall(lambda: asyncio.to_thread(tors.grounding_coverage, big, big))
-        )
-        # The point of detach: held time must not scale with input.  The
-        # DP is 100x the cells at 10x the side; the GIL-held gap must stay
-        # flat (measured 10.8ms -> 15.3ms for 1MB -> 10MB).
-        assert worst < max(2.0 * small_gap + 0.02, 0.05), (small_gap, worst, wall)
+            big_gap, big_wall, big_cpu, big_share, big_wait = asyncio.run(
+                _gap_and_wall_during(lambda: asyncio.to_thread(tors.grounding_coverage, big, big))
+            )
+            big_starved = _gap_was_starved((big_gap, big_wall, big_cpu, big_share, big_wait))
+            return small_gap, small_wall, big_gap, big_wall, big_starved
+
+        def check(measured: tuple[float, float, float, float, bool]) -> None:
+            small_gap, small_wall, big_gap, big_wall, big_starved = measured
+            # The point of detach: held time must not scale with input.  The
+            # DP is 100x the cells at 10x the side; the GIL-held gap must
+            # stay flat (measured 10.8ms -> 15.3ms for 1MB -> 10MB).
+            if big_gap < max(2.0 * small_gap + 0.02, 0.05):
+                return
+            # The band missed: a GIL-signature window convicts, a starved
+            # window (the runner's own runqueue account) is not evidence —
+            # the machinery's arbitration order, applied to this bespoke
+            # band (a clean ping-floor gap never reaches here).
+            if big_starved:
+                raise AssertionError(
+                    f"starved sample: the {big_wall:.1f}s call's worst window "
+                    f"({big_gap * 1000:.0f}ms) carries the runner's starvation "
+                    "signature, not the GIL's — not evidence for or against"
+                )
+            assert big_gap < max(2.0 * small_gap + 0.02, 0.05), (
+                small_gap,
+                big_gap,
+                big_wall,
+            )
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the pair measurement.
+        first_clean(measure, check, samples=3, label="the coverage held-time flatness pair")
 
     @pytest.mark.timing
     def test_tiny_text_huge_query_heartbeat(self):
