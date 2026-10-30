@@ -61,9 +61,10 @@
 //! * `uri_query_creds_extended`: the SAME `[?&]` anchor over the
 //!   EXTENDED credential-key set — the five shared names plus the
 //!   ops-standard query-parameter names the adoption verdict flagged
-//!   (`sig=`, `api_key=`, `sas_token=`): `access_key`, `api_key`,
-//!   `apikey`, `auth`, `key`, `passkey`, `pw`, `sas_token`, `secret`,
-//!   `sig`, `token`. The names are the published scanner lists,
+//!   (`sig=`, `api_key=`, `sas_token=`): `access_key`, `access_token`,
+//!   `api_key`, `apikey`, `auth`, `key`, `oauth_token`, `passkey`, `pw`,
+//!   `refresh_token`, `sas_token`, `secret`, `sig`, `token`. The names
+//!   are the published scanner lists,
 //!   transcribed and closed: ESLint `no-credentials-in-query-params`
 //!   (eslint-plugin-browser-security)'s default sensitive terms
 //!   (`password`, `token`, `secret`, `api_key`/`apiKey`, `auth`),
@@ -75,9 +76,10 @@
 //!   logs, proxy logs, browser history, and the `Referer` header).
 //!   Judicious cuts: no `session`/`sessionid`/`sid` (session
 //!   IDENTIFIERS are not credentials; a masked `sid=` corrupts a log
-//!   line for nothing), no `access_token`/`refresh_token`/`auth_token`
-//!   (the `_token` suffix family is real but open-ended — `oauth_token`
-//!   alone would not mask under the closed set, the documented seam;
+//!   line for nothing), and no `auth_token` (the `_token` suffix
+//!   family is open-ended — the one `_token` name left out after the
+//!   evidenced trio arrived: `access_token=` is the canonical CWE-598
+//!   leak shape, `refresh_token=`/`oauth_token=` its OAuth siblings;
 //!   more arrive as evidence names them, never by pattern).
 //!
 //!   WHY A NEW NAME, not a parameter: the design charter ("New scrubs
@@ -1008,16 +1010,20 @@ const PARAM_NAMES: [&str; 5] = ["sslpassword", "passphrase", "password", "passwd
 /// rule: the five shared names plus the ops-standard query-parameter
 /// names (the module docs carry the sources and the judicious cuts).
 /// Longest first, the same discipline `PARAM_NAMES` keeps — the set's
-/// suffix overlaps (`key` inside `api_key`/`access_key`, `token` inside
-/// `sas_token`, `password` inside `sslpassword`) resolve to the longest
+/// suffix overlaps (`key` inside `api_key`/`access_key`/`access_token`,
+/// `token` inside `sas_token`/`access_token`/`refresh_token`/
+/// `oauth_token`, `password` inside `sslpassword`) resolve to the longest
 /// name at each `=`, whose anchor check then decides; a shorter suffix's
 /// anchor position would sit on a name char (a word byte) and fail
 /// either anchor's check anyway. The reference regex's alternation is
 /// spelled in this same longest-first order (it backtracks either way,
 /// but the order keeps `pwd` tried before its prefix `pw`, the set's
 /// one prefix pair). No OTHER name is a prefix of another.
-const EXTENDED_PARAM_NAMES: [&str; 16] = [
+const EXTENDED_PARAM_NAMES: [&str; 19] = [
+    "refresh_token",
+    "access_token",
     "sslpassword",
+    "oauth_token",
     "passphrase",
     "access_key",
     "sas_token",
@@ -1284,6 +1290,31 @@ mod tests {
 
     fn scrub(text: &str, rules: RuleSet) -> String {
         scrub_log_text(text, rules).into_owned()
+    }
+
+    #[test]
+    fn the_token_query_family_masks_under_the_extended_set() {
+        // The evidenced `_token` trio: `access_token=` is the canonical
+        // CWE-598 leak shape, `refresh_token=`/`oauth_token=` its OAuth
+        // siblings; `auth_token=` stays the documented open-ended seam.
+        assert_eq!(
+            scrub(
+                "https://idp.example.com/sso?client_id=abc&access_token=supersecret123",
+                RuleSet::ALL
+            ),
+            "https://idp.example.com/sso?client_id=abc&access_token=***"
+        );
+        assert_eq!(
+            scrub(
+                "https://x/?refresh_token=rt99&oauth_token=ot77",
+                RuleSet::ALL
+            ),
+            "https://x/?refresh_token=***&oauth_token=***"
+        );
+        assert_eq!(
+            scrub("https://x/?auth_token=at55", RuleSet::ALL),
+            "https://x/?auth_token=at55"
+        );
     }
 
     #[test]
@@ -1741,9 +1772,12 @@ mod tests {
         );
         assert_eq!(scrub("?pwx=v", RuleSet::URI_QUERY_CREDS_EXTENDED), "?pwx=v");
         assert_eq!(scrub("xpw=v", RuleSet::URI_QUERY_CREDS_EXTENDED), "xpw=v");
+        // POSTURE CHANGE (the closed-set widening): `oauth_token=` was
+        // the documented non-masking seam; the evidenced `_token` trio
+        // joined the set and it masks now (`auth_token=` remains out).
         assert_eq!(
             scrub("?oauth_token=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
-            "?oauth_token=v"
+            "?oauth_token=***"
         );
         // The value grammar is the shared one: to whitespace or `&`, the
         // libpq quoted legs included, and a value may run to end of text.
