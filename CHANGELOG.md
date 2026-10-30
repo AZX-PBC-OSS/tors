@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.18.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.17.1...v0.18.0) (2026-10-30)
+
+
+### Features
+
+* **documents:** the document_structure surface ([#209](https://github.com/AZX-PBC-OSS/tors/issues/209) [#210](https://github.com/AZX-PBC-OSS/tors/issues/210) [#211](https://github.com/AZX-PBC-OSS/tors/issues/211)) ([1fb2e67](https://github.com/AZX-PBC-OSS/tors/commit/1fb2e67c741e1b2468e14d305da01872a1984a0f))
+* **documents:** the page_geometry and page_layout surfaces ([#203](https://github.com/AZX-PBC-OSS/tors/issues/203)) ([a058030](https://github.com/AZX-PBC-OSS/tors/commit/a058030a3d40a9fc906241d7d0ec6a92ae675816))
+* **documents:** the page_images and page_text_chars surfaces ([#205](https://github.com/AZX-PBC-OSS/tors/issues/205) [#206](https://github.com/AZX-PBC-OSS/tors/issues/206)) ([17bcce0](https://github.com/AZX-PBC-OSS/tors/commit/17bcce0650a41f9205b1393ba7fed2a21e758270))
+* **documents:** the page-tables surface ([#204](https://github.com/AZX-PBC-OSS/tors/issues/204)) ([19d07c5](https://github.com/AZX-PBC-OSS/tors/commit/19d07c5abefa6eea8ca9a21da473b0d3e72d3631))
+* **documents:** the pdf_page_labels and pdf_security surfaces ([#207](https://github.com/AZX-PBC-OSS/tors/issues/207) [#208](https://github.com/AZX-PBC-OSS/tors/issues/208)) ([64a0fea](https://github.com/AZX-PBC-OSS/tors/commit/64a0feacaf9b6353a70bba9614c15aa5235bbfc3))
+
+
+### Bug Fixes
+
+* **chunk:** the chunk_quality surface at document scale ([#226](https://github.com/AZX-PBC-OSS/tors/issues/226)) ([82c86d8](https://github.com/AZX-PBC-OSS/tors/commit/82c86d851a31d2f415cae2cecbbf8fb221ff2b8a))
+* **documents:** the bounds and precedence fixes from the release review ([#230](https://github.com/AZX-PBC-OSS/tors/issues/230)) ([c46b137](https://github.com/AZX-PBC-OSS/tors/commit/c46b137775538e9fd46049e5b36cd3f7c769cdb7))
+* **json:** streaming rewind split, schema date validity gate, sentinel message ([#229](https://github.com/AZX-PBC-OSS/tors/issues/229)) ([82e3ce5](https://github.com/AZX-PBC-OSS/tors/commit/82e3ce51797575636babf51189973991a61f556e))
+* **security:** the redaction posture batch ([#232](https://github.com/AZX-PBC-OSS/tors/issues/232)) ([286df3a](https://github.com/AZX-PBC-OSS/tors/commit/286df3a8f6e047fad9df15f5f6d9007638fb9c33))
+* **text:** search + similarity core fixes ([#228](https://github.com/AZX-PBC-OSS/tors/issues/228)) ([96b478a](https://github.com/AZX-PBC-OSS/tors/commit/96b478a8344aab671a23e1d7436d191e23dfa9a7))
+
+
+### Documentation
+
+* **documents:** the evidence-grounded extraction recipe ([#212](https://github.com/AZX-PBC-OSS/tors/issues/212)) ([8ea29f8](https://github.com/AZX-PBC-OSS/tors/commit/8ea29f899f87bcd8554a76f350a3d3b296cc3226))
+
+
+### Miscellaneous Chores
+
+* **ci:** the release-readiness batch - the msrv gate, the fuzz-lock deny pass, and the no-App release fallbacks ([#227](https://github.com/AZX-PBC-OSS/tors/issues/227)) ([5cd32d0](https://github.com/AZX-PBC-OSS/tors/commit/5cd32d0131969c457b320c91e2f82d3e1b09d95b))
+* **deps-ci:** bump Swatinem/rust-cache in the github-actions group ([#217](https://github.com/AZX-PBC-OSS/tors/issues/217)) ([18e1c57](https://github.com/AZX-PBC-OSS/tors/commit/18e1c5783e9d61e55aa3c99daddbe99d32dd47e4))
+* **deps-py:** bump the python-minor-patch group ([#218](https://github.com/AZX-PBC-OSS/tors/issues/218)) ([3aa6966](https://github.com/AZX-PBC-OSS/tors/commit/3aa696692b43b4922f2d61a3be0d3c1cb6309d6f))
+* **deps-rust:** bump jsonschema from 0.58.6 to 0.60.1 ([#231](https://github.com/AZX-PBC-OSS/tors/issues/231)) ([41dfbfd](https://github.com/AZX-PBC-OSS/tors/commit/41dfbfd634cb4e9525f30be94d8ceead05b6db0c))
+* **deps:** rev the rust, actions, and python dependency trees ([#215](https://github.com/AZX-PBC-OSS/tors/issues/215)) ([c6819a7](https://github.com/AZX-PBC-OSS/tors/commit/c6819a7755bbdf0036bd8f62b3b5d11f5737f6ce))
+
 ## [0.17.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.17.0...v0.17.1) (2026-10-19)
 
 
