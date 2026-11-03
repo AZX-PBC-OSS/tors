@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/AZX-PBC-OSS/tors/compare/v0.18.1...v0.18.2) (2026-11-03)
+
+
+### Miscellaneous Chores
+
+* **deps-rust:** bump jsonschema ([#238](https://github.com/AZX-PBC-OSS/tors/issues/238)) ([e8eb2cf](https://github.com/AZX-PBC-OSS/tors/commit/e8eb2cfaaa843bed45dbe8d7576112f2ec133963))
+
 ## [0.18.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.18.0...v0.18.1) (2026-10-30)
 
 
