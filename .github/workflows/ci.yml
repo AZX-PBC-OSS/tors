@@ -98,7 +98,7 @@ jobs:
         # action ships a prebuilt cargo-deny binary, so the gate costs
         # seconds, not the minutes a `cargo install cargo-deny --locked`
         # would add to every run.
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
         with:
           command-arguments: licenses advisories bans
 
@@ -109,7 +109,7 @@ jobs:
         # the root lock's (deny.toml's [graph] comment has the measured
         # skew). Same action, same deny.toml policy, same three checks.
         # only the manifest differs.
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
         with:
           manifest-path: tors-documents/Cargo.toml
           command-arguments: licenses advisories bans
@@ -122,7 +122,7 @@ jobs:
         # (release-lock-sync.yml refreshes the two locks above on release
         # PRs; this one is not version-synced, which is exactly why it
         # needs its own advisory gate instead.)
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
         with:
           manifest-path: fuzz/Cargo.toml
           command-arguments: licenses advisories bans
@@ -130,7 +130,7 @@ jobs:
       - name: Install uv
         # For the ruff step below: ruff is a dev-group dependency (pyproject.toml),
         # so the lockfile, not this workflow, owns its version.
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
 
       - name: Ruff
         # The Python-side lint gate (config in pyproject.toml [tool.ruff];
@@ -236,7 +236,7 @@ jobs:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -304,7 +304,7 @@ jobs:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           # The heavy lanes are Python-version-independent (the sweep is
           # extension parity, the timing cells measure the native pass);
