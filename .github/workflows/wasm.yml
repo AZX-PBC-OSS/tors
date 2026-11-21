@@ -42,7 +42,7 @@ jobs:
         # and 3.14 selects Pyodide 314.x / pyemscripten_2026_0 / Emscripten
         # 5.0.3 plus a stable Rust toolchain (1.93.0) that clears the crate's
         # 1.90 MSRV: driving from 3.13 would pin a Rust nightly below MSRV.
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.14"
 

@@ -210,7 +210,7 @@ jobs:
           test "${#wheels[@]}" -eq 8
           test "${#sdists[@]}" -eq 1
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
       - name: Prune files already on PyPI
         # Idempotent re-run gate (the 2026-09-26 double-dispatch's red X):
         # PyPI rejects filename reuse with 400 AFTER the whole build matrix
@@ -381,7 +381,7 @@ jobs:
           printf 'payload wheels in dist/: %d\n' "${#wheels[@]}"
           test "${#wheels[@]}" -eq 8
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
       - name: Prune files already on PyPI
         # Same idempotent re-run gate as the base publish job above (the
         # 2026-09-26 double-dispatch died HERE on
